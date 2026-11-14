@@ -261,6 +261,15 @@ fn main() {
         return;
     }
 
+    // Внутренний режим: обёртка окна терминала (см. platform::run_window).
+    if args.first().map(String::as_str) == Some("run-window") {
+        let Some(program) = args.get(1) else {
+            eprintln!("usage: aipanel-agent run-window <program> [args...]");
+            std::process::exit(2);
+        };
+        std::process::exit(platform::run_window(program, &args[2..]));
+    }
+
     // Установка и удаление плагина AiPanel для TUI opencode (см. install.rs).
     let plugin_cmd = match args.first().map(String::as_str) {
         Some("install-opencode-plugin") => Some(install::install()),

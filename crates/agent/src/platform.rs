@@ -87,6 +87,35 @@ mod imp {
         out.push('"');
     }
 
+    unsafe extern "system" fn ignore_ctrl_c(_event: u32) -> i32 {
+        1
+    }
+
+    /// Тело обёртки окна: запускает программу в этой же консоли и ждёт её завершения.
+    /// Возвращает код выхода для окна: 0, чтобы терминал закрылся сам; настоящий код
+    /// сохраняется, только если программа упала в первые секунды, чтобы была видна ошибка.
+    pub fn run_window(program: &str, args: &[String]) -> i32 {
+        use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
+        // Ctrl+C предназначен программе: обёртка его переживает и дожидается её выхода.
+        // Собственный обработчик (а не «игнорировать») не наследуется программой.
+        unsafe { SetConsoleCtrlHandler(Some(ignore_ctrl_c), 1) };
+        let started = std::time::Instant::now();
+        match std::process::Command::new(program).args(args).status() {
+            Ok(status) => {
+                let code = status.code().unwrap_or(1);
+                if code != 0 && started.elapsed() < Duration::from_secs(15) {
+                    code
+                } else {
+                    0
+                }
+            }
+            Err(e) => {
+                eprintln!("не удалось запустить {program}: {e}");
+                1
+            }
+        }
+    }
+
     /// Запускает программу в новом окне Windows Terminal (`wt.exe`), а если его нет — в
     /// отдельном окне обычной консоли. Возвращает pid запущенного процесса.
     pub fn spawn_window(program: &str, args: &[String], cwd: &str) -> Result<u32, String> {
@@ -98,7 +127,14 @@ mod imp {
         let escape = |s: &str| s.replace(';', "\\;").replace('"', "\\\"");
         let mut wt = String::from("wt.exe -w new -d ");
         quote_arg(&escape(cwd), &mut wt);
-        for a in std::iter::once(program).chain(args.iter().map(String::as_str)) {
+        // Программа запускается через обёртку `run-window`: Windows Terminal оставляет окно
+        // открытым после ненулевого кода выхода, а обёртка закрывает его кодом 0.
+        let me = std::env::current_exe().map(|p| p.to_string_lossy().into_owned());
+        let wrapped: Vec<&str> = match &me {
+            Ok(exe) => [exe.as_str(), "run-window", program].into_iter().chain(args.iter().map(String::as_str)).collect(),
+            Err(_) => std::iter::once(program).chain(args.iter().map(String::as_str)).collect(),
+        };
+        for a in wrapped {
             wt.push(' ');
             quote_arg(&escape(a), &mut wt);
         }
@@ -266,6 +302,10 @@ mod imp {
 
     pub async fn process_cmdline_contains(_exe: &str, _needle: &str) -> bool {
         false
+    }
+
+    pub fn run_window(_program: &str, _args: &[String]) -> i32 {
+        1
     }
 
     pub fn spawn_window(_program: &str, _args: &[String], _cwd: &str) -> Result<u32, String> {
