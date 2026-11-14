@@ -29,6 +29,13 @@ const APP_JS: &str = include_str!("../static/app.js");
 const MD_JS: &str = include_str!("../static/md.js");
 const SUGGEST_JS: &str = include_str!("../static/suggest.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
+const ICON_SVG: &str = include_str!("../static/icon.svg");
+const MANIFEST: &str = include_str!("../static/app.webmanifest");
+const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
+const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../static/apple-touch-icon.png");
+const ICON_192: &[u8] = include_bytes!("../static/icon-192.png");
+const ICON_512: &[u8] = include_bytes!("../static/icon-512.png");
+const ICON_MASKABLE_512: &[u8] = include_bytes!("../static/icon-maskable-512.png");
 
 const COOKIE: &str = "aipanel_session";
 const MAX_TOKENS: usize = 64;
@@ -178,6 +185,10 @@ fn random_token() -> String {
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
+    asset_bytes(content_type, body.as_bytes())
+}
+
+fn asset_bytes(content_type: &'static str, body: &'static [u8]) -> Response {
     (
         [
             (header::CONTENT_TYPE, content_type),

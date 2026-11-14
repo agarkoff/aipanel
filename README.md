@@ -143,3 +143,15 @@ cargo test
 PANEL_PASSWORD=dev-password AGENT_TOKEN=dev-agent-token BIND=127.0.0.1:8080 cargo run -p aipanel-server
 AIPANEL_SERVER=ws://127.0.0.1:8080/agent AIPANEL_TOKEN=dev-agent-token cargo run -p aipanel-agent
 ```
+
+## Иконки
+
+Значок панели (вкладка браузера, домашний экран телефона) и значок exe агента рисует один скрипт — нужен Python с Pillow:
+
+```sh
+python assets/make-icons.py
+```
+
+Геометрия задана один раз в сетке 1024×1024, из неё получаются `icon.svg`, `favicon.ico`, PNG для манифеста и `crates/agent/icon.ico`. Размеры до 24 px рисуются упрощённо, иначе штрихи сливаются. Готовые файлы лежат в репозитории, так что для сборки Python не нужен.
+
+Веб-интерфейс раздаёт значки сам (`crates/server/src/main.rs`), а `static/app.webmanifest` делает панель устанавливаемой на телефон — «На главный экран». Значок в exe встраивает `crates/agent/build.rs` через `winres`; без Windows SDK сборка проходит без значка.

@@ -60,7 +60,9 @@ input, textarea, select {
   display: grid;
   gap: 12px;
 }
-.login h1 { margin: 0 0 4px; font-size: 22px; }
+.login h1 { margin: 0 0 4px; font-size: 22px; display: flex; align-items: center; gap: 10px; }
+.login h1 .logo { width: 30px; height: 30px; border-radius: 8px; }
+.logo { display: block; border-radius: 5px; flex: none; }
 .error { color: var(--wait); margin: 0; min-height: 1.4em; }
 
 .app { display: grid; grid-template-columns: 340px 1fr; height: 100dvh; }

@@ -7,12 +7,16 @@
 <meta name="theme-color" content="#1f2023" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
 <title>AiPanel</title>
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="32x32">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/app.webmanifest">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
 <form id="login" class="login" hidden>
-  <h1>AiPanel</h1>
+  <h1><img class="logo" src="/icon.svg" alt="" width="30" height="30">AiPanel</h1>
   <input id="password" type="password" placeholder="Пароль" autocomplete="current-password" required>
   <button type="submit">Войти</button>
   <p id="login-error" class="error"></p>
@@ -21,6 +25,7 @@
 <div id="app" class="app" hidden>
   <aside id="sidebar" class="sidebar">
     <header>
+      <img class="logo" src="/icon.svg" alt="" width="20" height="20">
       <strong>AiPanel</strong>
       <span id="conn" class="conn" title="Соединение с сервером"></span>
       <button id="new-session" class="new-session" type="button" title="Новая сессия" aria-label="Новая сессия">+</button>
