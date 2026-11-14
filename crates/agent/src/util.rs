@@ -12,6 +12,29 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Полный путь к программе: по PATH, затем в `~/.opencode/bin`. Агент может быть
+/// запущен с урезанным PATH, в котором нет каталога установки opencode.
+pub fn resolve_exe(bin: &str) -> String {
+    if bin.contains(['/', '\\']) {
+        return bin.to_owned();
+    }
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for name in [format!("{bin}.exe"), bin.to_owned()] {
+                let p = dir.join(name);
+                if p.is_file() {
+                    return p.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    let fallback = home_dir().join(".opencode").join("bin").join(format!("{bin}.exe"));
+    if fallback.is_file() {
+        return fallback.to_string_lossy().into_owned();
+    }
+    bin.to_owned()
+}
+
 pub fn now_ms() -> i64 {
     to_ms(SystemTime::now())
 }

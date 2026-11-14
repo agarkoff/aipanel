@@ -41,6 +41,25 @@ mod imp {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    /// Есть ли запущенный процесс `exe`, в командной строке которого встречается `needle`.
+    /// `needle` должен состоять только из букв, цифр, `-` и `_`.
+    pub async fn process_cmdline_contains(exe: &str, needle: &str) -> bool {
+        let script = format!(
+            "@(Get-CimInstance Win32_Process | Where-Object {{ $_.Name -eq '{exe}' -and $_.CommandLine -like '*{needle}*' }}).Count"
+        );
+        let mut cmd = tokio::process::Command::new("powershell.exe");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        no_window(&mut cmd);
+        match tokio::time::timeout(Duration::from_secs(15), cmd.output()).await {
+            Ok(Ok(out)) => String::from_utf8_lossy(&out.stdout).trim().parse::<u32>().is_ok_and(|n| n > 0),
+            _ => false,
+        }
+    }
+
     /// Добавляет аргумент в командную строку по правилам CommandLineToArgvW.
     fn quote_arg(arg: &str, out: &mut String) {
         if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
@@ -244,6 +263,10 @@ mod imp {
     }
 
     pub fn no_window(_cmd: &mut tokio::process::Command) {}
+
+    pub async fn process_cmdline_contains(_exe: &str, _needle: &str) -> bool {
+        false
+    }
 
     pub fn spawn_window(_program: &str, _args: &[String], _cwd: &str) -> Result<u32, String> {
         Err("открытие окна консоли поддерживается только в Windows".into())

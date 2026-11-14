@@ -5,8 +5,9 @@
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
     hash::{Hash, Hasher},
-    path::PathBuf,
-    time::Duration,
+    path::{Path, PathBuf},
+    sync::Mutex,
+    time::{Duration, Instant},
 };
 
 use aipanel_proto::{AgentMsg, Item, SessionInfo};
@@ -20,10 +21,13 @@ use crate::{
 
 const TEXT_LIMIT: usize = 20_000;
 const RESULT_LIMIT: usize = 4_000;
+/// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
+const LAUNCH_GUARD: Duration = Duration::from_secs(25);
 
 pub struct OpenCode {
     cfg: OpenCodeCfg,
     http: reqwest::Client,
+    launched: Mutex<HashMap<String, Instant>>,
 }
 
 struct Endpoint {
@@ -37,7 +41,13 @@ impl OpenCode {
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();
-        Self { cfg, http }
+        Self { cfg, http, launched: Mutex::new(HashMap::new()) }
+    }
+
+    fn recently_launched(&self, id: &str) -> bool {
+        let mut map = self.launched.lock().unwrap_or_else(|e| e.into_inner());
+        map.retain(|_, t| t.elapsed() < LAUNCH_GUARD);
+        map.contains_key(id)
     }
 
     fn endpoint(&self) -> Result<Endpoint, String> {
@@ -109,7 +119,7 @@ impl OpenCode {
             let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or_else(|| basename(cwd));
             let status = if waiting.contains(id) {
                 "waiting"
-            } else if active.contains(id) {
+            } else if active.contains(id) || self.recently_launched(id) {
                 "busy"
             } else {
                 // Сервис opencode хранит все сессии и примет сообщение в любую из них,
@@ -125,7 +135,7 @@ impl OpenCode {
                 status: status.into(),
                 live: status != "ready",
                 updated_at: s["time"]["updated"].as_i64().unwrap_or(0),
-                delivery: "api".into(),
+                delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
             });
         }
         out
@@ -172,7 +182,51 @@ impl OpenCode {
         }
     }
 
+    /// Окно открывается, если сессия ничего не выполняет и её окна ещё нет. Окно ищется
+    /// по `-s <id>` в командной строке `opencode.exe`: окно, в котором сессию выбрали
+    /// уже внутри программы, так не найти и будет открыто ещё одно.
+    async fn should_open_window(&self, id: &str) -> bool {
+        if !cfg!(windows) || self.recently_launched(id) {
+            return false;
+        }
+        let active = self
+            .get("/api/session/active")
+            .await
+            .ok()
+            .is_some_and(|v| v["data"].get(id).is_some());
+        !active && !crate::platform::process_cmdline_contains("opencode.exe", id).await
+    }
+
+    /// Открывает окно Windows Terminal с сессией; сообщение уходит первым запросом.
+    async fn open_window(&self, id: &str, text: &str) -> Result<(), String> {
+        if text.encode_utf16().count() > crate::claude::MAX_ARG_UTF16 {
+            return Err(format!(
+                "сообщение слишком длинное для запуска окна (до {} символов)",
+                crate::claude::MAX_ARG_UTF16
+            ));
+        }
+        let info = self.get(&format!("/api/session/{id}")).await?;
+        let cwd = info["data"]["location"]["directory"]
+            .as_str()
+            .or(info["location"]["directory"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if cwd.is_empty() || !Path::new(&cwd).is_dir() {
+            return Err(format!("каталог сессии недоступен: {cwd}"));
+        }
+        self.launched.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_owned(), Instant::now());
+        // Форма `--prompt=<текст>` не даёт принять текст, начинающийся с «-», за параметр.
+        let args = vec!["-s".to_owned(), id.to_owned(), format!("--prompt={text}")];
+        let bin = crate::util::resolve_exe(&self.cfg.bin);
+        crate::platform::spawn_window(&bin, &args, &cwd).map(|_| ()).inspect_err(|_| {
+            self.launched.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        })
+    }
+
     pub async fn send(&self, id: &str, text: &str) -> Result<(), String> {
+        if self.should_open_window(id).await {
+            return self.open_window(id, text).await;
+        }
         self.call(reqwest::Method::POST, &format!("/api/session/{id}/prompt"), Some(json!({ "text": text })))
             .await
             .map(|_| ())

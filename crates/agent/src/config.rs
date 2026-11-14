@@ -35,6 +35,9 @@ pub struct ClaudeCfg {
 #[serde(default, deny_unknown_fields)]
 pub struct OpenCodeCfg {
     pub enabled: bool,
+    /// Исполняемый файл opencode для открытия окна. Если его нет в PATH,
+    /// ищется `~/.opencode/bin/opencode.exe`.
+    pub bin: String,
     pub max_sessions: usize,
     /// Адрес сервиса opencode. По умолчанию читается из его файла состояния.
     pub url: Option<String>,
@@ -70,7 +73,7 @@ impl Default for ClaudeCfg {
 
 impl Default for OpenCodeCfg {
     fn default() -> Self {
-        Self { enabled: true, max_sessions: 30, url: None, password: None }
+        Self { enabled: true, bin: "opencode".into(), max_sessions: 30, url: None, password: None }
     }
 }
 
