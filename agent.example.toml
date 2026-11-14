@@ -1,0 +1,30 @@
+# Скопируйте в agent.toml рядом с aipanel-agent(.exe) или передайте путь через --config.
+# server, token и name можно задать и переменными AIPANEL_SERVER, AIPANEL_TOKEN, AIPANEL_NAME.
+
+# Адрес панели. Вне localhost используйте wss:// (HTTPS), иначе токен уйдёт открытым текстом.
+server = "wss://panel.example.com/agent"
+
+# Значение AGENT_TOKEN из .env сервера.
+token = ""
+
+# Имя этой машины в панели. По умолчанию — имя хоста.
+#name = "home-pc"
+
+[claude]
+enabled = true
+# Исполняемый файл Claude Code для продолжения закрытых сессий.
+bin = "claude"
+# Закрытые сессии: изменённые за последние N дней, не больше max_recent штук.
+recent_days = 7
+max_recent = 30
+# Дополнительные аргументы для `claude -p --resume <id>`. Фоновый процесс не может
+# спросить разрешение на инструмент, поэтому режим разрешений задаётся здесь, например:
+#headless_args = ["--permission-mode", "acceptEdits"]
+headless_args = []
+
+[opencode]
+enabled = true
+max_sessions = 30
+# Адрес и пароль сервиса opencode. По умолчанию берутся из ~/.local/state/opencode/service.json.
+#url = "http://127.0.0.1:4096"
+#password = ""

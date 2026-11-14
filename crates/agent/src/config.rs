@@ -1,0 +1,111 @@
+use std::path::PathBuf;
+
+use serde::Deserialize;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Config {
+    /// Адрес панели, например `wss://panel.example.com/agent`.
+    pub server: String,
+    /// Общий секрет агента (AGENT_TOKEN на сервере).
+    pub token: String,
+    /// Имя машины в панели. По умолчанию — имя хоста.
+    pub name: String,
+    pub claude: ClaudeCfg,
+    pub opencode: OpenCodeCfg,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClaudeCfg {
+    pub enabled: bool,
+    /// Исполняемый файл Claude Code для фонового запуска.
+    pub bin: String,
+    /// Каталог данных Claude Code. По умолчанию `~/.claude`.
+    pub home: Option<PathBuf>,
+    /// Показывать закрытые сессии, изменённые за последние N дней.
+    pub recent_days: u64,
+    /// Не больше стольких закрытых сессий.
+    pub max_recent: usize,
+    /// Дополнительные аргументы для `claude -p --resume`.
+    pub headless_args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenCodeCfg {
+    pub enabled: bool,
+    pub max_sessions: usize,
+    /// Адрес сервиса opencode. По умолчанию читается из его файла состояния.
+    pub url: Option<String>,
+    pub password: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server: String::new(),
+            token: String::new(),
+            name: std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "agent".into()),
+            claude: ClaudeCfg::default(),
+            opencode: OpenCodeCfg::default(),
+        }
+    }
+}
+
+impl Default for ClaudeCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bin: "claude".into(),
+            home: None,
+            recent_days: 7,
+            max_recent: 30,
+            headless_args: Vec::new(),
+        }
+    }
+}
+
+impl Default for OpenCodeCfg {
+    fn default() -> Self {
+        Self { enabled: true, max_sessions: 30, url: None, password: None }
+    }
+}
+
+impl Config {
+    /// Читает `--config <путь>`, иначе `agent.toml` рядом с программой или в текущем
+    /// каталоге. Переменные AIPANEL_SERVER, AIPANEL_TOKEN, AIPANEL_NAME имеют приоритет.
+    pub fn load(explicit: Option<PathBuf>) -> Result<Self, String> {
+        let path = explicit.clone().or_else(|| {
+            let beside = std::env::current_exe().ok()?.parent()?.join("agent.toml");
+            [beside, PathBuf::from("agent.toml")].into_iter().find(|p| p.is_file())
+        });
+        let mut cfg = match path {
+            Some(p) => {
+                let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+                toml::from_str::<Config>(&text).map_err(|e| format!("{}: {e}", p.display()))?
+            }
+            None => Config::default(),
+        };
+        for (var, field) in [
+            ("AIPANEL_SERVER", &mut cfg.server),
+            ("AIPANEL_TOKEN", &mut cfg.token),
+            ("AIPANEL_NAME", &mut cfg.name),
+        ] {
+            if let Ok(v) = std::env::var(var) {
+                if !v.is_empty() {
+                    *field = v;
+                }
+            }
+        }
+        if cfg.server.is_empty() || cfg.token.is_empty() {
+            return Err("server and token are required (agent.toml or AIPANEL_SERVER / AIPANEL_TOKEN)".into());
+        }
+        if !(cfg.server.starts_with("ws://") || cfg.server.starts_with("wss://")) {
+            return Err("server must start with ws:// or wss://".into());
+        }
+        Ok(cfg)
+    }
+}

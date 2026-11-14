@@ -1,0 +1,38 @@
+services:
+  panel:
+    build: .
+    image: aipanel-server
+    restart: unless-stopped
+    environment:
+      PANEL_PASSWORD: ${PANEL_PASSWORD:?set PANEL_PASSWORD in .env}
+      AGENT_TOKEN: ${AGENT_TOKEN:?set AGENT_TOKEN in .env}
+    ports:
+      # По умолчанию порт открыт только на самом хосте: снаружи панель должна быть за HTTPS-прокси.
+      - "${PANEL_LISTEN:-127.0.0.1:8080}:8080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 32m
+    healthcheck:
+      test: ["CMD", "/aipanel-server", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Необязательный HTTPS-прокси с автоматическим сертификатом:
+  #   docker compose --profile tls up -d
+  # Нужны DOMAIN в .env, DNS-запись на этот хост и открытые порты 80 и 443.
+  caddy:
+    profiles: [tls]
+    image: caddy:2-alpine
+    restart: unless-stopped
+    command: caddy reverse-proxy --from ${DOMAIN:-localhost} --to panel:8080
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+    depends_on: [panel]
+
+volumes:
+  caddy_data:
