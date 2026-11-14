@@ -12,6 +12,11 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Каталог данных AiPanel (`~/.aipanel`): сюда плагины окон пишут свои отчёты.
+pub fn aipanel_dir() -> PathBuf {
+    std::env::var_os("AIPANEL_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".aipanel"))
+}
+
 /// Полный путь к программе: по PATH, затем в `~/.opencode/bin`. Агент может быть
 /// запущен с урезанным PATH, в котором нет каталога установки opencode.
 pub fn resolve_exe(bin: &str) -> String {

@@ -317,13 +317,16 @@ function autoGrow() {
   text.style.height = `${Math.min(text.scrollHeight + 2, window.innerHeight * 0.4)}px`;
 }
 $('text').addEventListener('input', autoGrow);
-if (!matchMedia('(pointer: coarse)').matches) $('text').placeholder += '. Ctrl+Enter — отправить';
+// На компьютере Enter отправляет, Shift+Enter переносит строку (как в Claude Code и opencode).
+// На телефоне Enter переносит строку, а отправляет кнопка рядом с полем.
+const touchInput = matchMedia('(pointer: coarse)').matches;
+if (!touchInput) $('text').placeholder += '. Enter — отправить, Shift+Enter — новая строка';
 
 $('text').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault();
-    $('composer').requestSubmit();
-  }
+  // isComposing: Enter при выборе слова в IME не должен отправлять сообщение.
+  if (e.key !== 'Enter' || e.isComposing || e.shiftKey || touchInput) return;
+  e.preventDefault();
+  $('composer').requestSubmit();
 });
 
 $('interrupt').addEventListener('click', () => {

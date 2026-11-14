@@ -3,6 +3,7 @@
 
 mod claude;
 mod config;
+mod install;
 mod opencode;
 mod platform;
 mod util;
@@ -256,6 +257,23 @@ fn main() {
         if let Err(e) = platform::inject_main(pid, esc) {
             eprintln!("{e}");
             std::process::exit(1);
+        }
+        return;
+    }
+
+    // Установка и удаление плагина AiPanel для TUI opencode (см. install.rs).
+    let plugin_cmd = match args.first().map(String::as_str) {
+        Some("install-opencode-plugin") => Some(install::install()),
+        Some("uninstall-opencode-plugin") => Some(install::uninstall()),
+        _ => None,
+    };
+    if let Some(result) = plugin_cmd {
+        match result {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
         }
         return;
     }

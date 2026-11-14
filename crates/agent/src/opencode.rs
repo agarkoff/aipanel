@@ -44,6 +44,37 @@ impl OpenCode {
         Self { cfg, http, launched: Mutex::new(HashMap::new()) }
     }
 
+    /// Сессии, открытые сейчас в окнах opencode, по отчётам плагина AiPanel
+    /// (`~/.aipanel/opencode/<pid>.json`). Отчёты мёртвых процессов удаляются.
+    fn windowed_sessions(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        let Ok(entries) = std::fs::read_dir(crate::util::aipanel_dir().join("opencode")) else {
+            return out;
+        };
+        let now = crate::util::now_ms();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let Some(v) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            else {
+                continue;
+            };
+            let pid = v["pid"].as_u64().unwrap_or(0) as u32;
+            if pid == 0 || !crate::platform::pid_alive(pid) {
+                let _ = std::fs::remove_file(&path);
+                continue;
+            }
+            // Плагин обновляет отчёт каждые 5 с; давно не обновлявшийся отчёт устарел.
+            let fresh = v["updated"].as_i64().is_some_and(|u| now - u < 60_000);
+            if let (true, Some(id)) = (fresh, v["sessionID"].as_str()) {
+                out.insert(id.to_owned());
+            }
+        }
+        out
+    }
+
     fn recently_launched(&self, id: &str) -> bool {
         let mut map = self.launched.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, t| t.elapsed() < LAUNCH_GUARD);
@@ -112,6 +143,7 @@ impl OpenCode {
             })
             .unwrap_or_default();
 
+        let windowed = self.windowed_sessions();
         let mut out = Vec::new();
         for s in list["data"].as_array().into_iter().flatten() {
             let Some(id) = s["id"].as_str() else { continue };
@@ -121,6 +153,8 @@ impl OpenCode {
                 "waiting"
             } else if active.contains(id) || self.recently_launched(id) {
                 "busy"
+            } else if windowed.contains(id) {
+                "idle"
             } else {
                 // Сервис opencode хранит все сессии и примет сообщение в любую из них,
                 // но открыта ли сессия в каком-то окне, он не сообщает. Поэтому сессия,
@@ -194,7 +228,11 @@ impl OpenCode {
             .await
             .ok()
             .is_some_and(|v| v["data"].get(id).is_some());
-        !active && !crate::platform::process_cmdline_contains("opencode.exe", id).await
+        if active || self.windowed_sessions().contains(id) {
+            return false;
+        }
+        // Окна, открытые до установки плагина, видны только по командной строке.
+        !crate::platform::process_cmdline_contains("opencode.exe", id).await
     }
 
     /// Открывает окно Windows Terminal с сессией; сообщение уходит первым запросом.
