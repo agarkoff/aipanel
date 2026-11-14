@@ -300,6 +300,7 @@ fn main() {
             std::process::exit(2);
         }
     };
+    platform::set_terminal_profile(&cfg.terminal_profile);
     if cfg.server.starts_with("ws://") && !cfg.server.contains("://localhost") && !cfg.server.contains("://127.0.0.1") {
         eprintln!("warning: ws:// is unencrypted, the agent token is sent in clear text; use wss:// outside localhost");
     }

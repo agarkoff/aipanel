@@ -87,6 +87,30 @@ mod imp {
         out.push('"');
     }
 
+    static PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+    pub fn set_terminal_profile(profile: &str) {
+        let _ = PROFILE.set(profile.trim().to_owned());
+    }
+
+    /// Профиль по умолчанию из настроек Windows Terminal (guid или имя).
+    fn default_wt_profile() -> Option<String> {
+        let local = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        [
+            "Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json",
+            "Packages/Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe/LocalState/settings.json",
+            "Microsoft/Windows Terminal/settings.json",
+        ]
+        .iter()
+        .filter_map(|rel| std::fs::read_to_string(local.join(rel)).ok())
+        .find_map(|text| {
+            let after = text.get(text.find("\"defaultProfile\"")? + "\"defaultProfile\"".len()..)?;
+            let value = after.trim_start().strip_prefix(':')?.trim_start().strip_prefix('"')?;
+            Some(value[..value.find('"')?].to_owned())
+        })
+        .filter(|p| !p.is_empty())
+    }
+
     unsafe extern "system" fn ignore_ctrl_c(_event: u32) -> i32 {
         1
     }
@@ -125,7 +149,15 @@ mod imp {
         // Кавычки экранируются дважды: wt собирает командную строку программы заново и
         // не возвращает им обратные слеши, из-за чего текст обрывался на первой кавычке.
         let escape = |s: &str| s.replace(';', "\\;").replace('"', "\\\"");
-        let mut wt = String::from("wt.exe -w new -d ");
+        let mut wt = String::from("wt.exe -w new ");
+        // Без профиля wt берёт общие настройки (чёрный фон), а не оформление вашего профиля.
+        let configured = PROFILE.get().map(String::as_str).filter(|p| !p.is_empty());
+        if let Some(profile) = configured.map(str::to_owned).or_else(default_wt_profile) {
+            wt.push_str("-p ");
+            quote_arg(&escape(&profile), &mut wt);
+            wt.push(' ');
+        }
+        wt.push_str("-d ");
         quote_arg(&escape(cwd), &mut wt);
         // Программа запускается через обёртку `run-window`: Windows Terminal оставляет окно
         // открытым после ненулевого кода выхода, а обёртка закрывает его кодом 0.
@@ -307,6 +339,8 @@ mod imp {
     pub fn run_window(_program: &str, _args: &[String]) -> i32 {
         1
     }
+
+    pub fn set_terminal_profile(_profile: &str) {}
 
     pub fn spawn_window(_program: &str, _args: &[String], _cwd: &str) -> Result<u32, String> {
         Err("открытие окна консоли поддерживается только в Windows".into())

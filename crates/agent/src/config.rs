@@ -11,6 +11,9 @@ pub struct Config {
     pub token: String,
     /// Имя машины в панели. По умолчанию — имя хоста.
     pub name: String,
+    /// Профиль Windows Terminal (имя или guid) для окон, которые открывает агент.
+    /// Пусто — профиль по умолчанию из настроек Windows Terminal.
+    pub terminal_profile: String,
     pub claude: ClaudeCfg,
     pub opencode: OpenCodeCfg,
 }
@@ -56,6 +59,7 @@ impl Default for Config {
             name: std::env::var("COMPUTERNAME")
                 .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "agent".into()),
+            terminal_profile: String::new(),
             claude: ClaudeCfg::default(),
             opencode: OpenCodeCfg::default(),
         }
