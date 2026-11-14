@@ -24,6 +24,15 @@ const RESULT_LIMIT: usize = 4_000;
 /// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
 const LAUNCH_GUARD: Duration = Duration::from_secs(25);
 
+/// Файл в каталоге состояния opencode (`~/.local/state/opencode`).
+fn state_file(name: &str) -> PathBuf {
+    std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| crate::util::home_dir().join(".local").join("state"))
+        .join("opencode")
+        .join(name)
+}
+
 pub struct OpenCode {
     cfg: OpenCodeCfg,
     http: reqwest::Client,
@@ -85,10 +94,7 @@ impl OpenCode {
         if let (Some(url), Some(password)) = (&self.cfg.url, &self.cfg.password) {
             return Ok(Endpoint { url: url.trim_end_matches('/').to_owned(), password: password.clone() });
         }
-        let state = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| crate::util::home_dir().join(".local").join("state"));
-        let path = state.join("opencode").join("service.json");
+        let path = state_file("service.json");
         let text = std::fs::read_to_string(&path).map_err(|_| "сервис opencode не запущен".to_owned())?;
         let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
         match (v["url"].as_str(), v["password"].as_str()) {
@@ -219,15 +225,10 @@ impl OpenCode {
     /// Окно открывается, если сессия ничего не выполняет и её окна ещё нет. Окно ищется
     /// по `-s <id>` в командной строке `opencode.exe`: окно, в котором сессию выбрали
     /// уже внутри программы, так не найти и будет открыто ещё одно.
-    async fn should_open_window(&self, id: &str) -> bool {
+    async fn should_open_window(&self, id: &str, active: bool) -> bool {
         if !cfg!(windows) || self.recently_launched(id) {
             return false;
         }
-        let active = self
-            .get("/api/session/active")
-            .await
-            .ok()
-            .is_some_and(|v| v["data"].get(id).is_some());
         if active || self.windowed_sessions().contains(id) {
             return false;
         }
@@ -261,8 +262,47 @@ impl OpenCode {
         })
     }
 
+    /// Модель, на которой должны идти сообщения из панели: `(провайдер, модель)`.
+    fn target_model(&self) -> Option<(String, String)> {
+        match self.cfg.model.trim() {
+            "" | "session" => None,
+            "auto" => {
+                // Последняя модель, выбранная в окне opencode: именно она видна в строке состояния.
+                let text = std::fs::read_to_string(state_file("model.json")).ok()?;
+                let v: Value = serde_json::from_str(&text).ok()?;
+                let first = v["recent"].as_array()?.first()?;
+                Some((first["providerID"].as_str()?.to_owned(), first["modelID"].as_str()?.to_owned()))
+            }
+            explicit => explicit.split_once('/').map(|(p, m)| (p.to_owned(), m.to_owned())),
+        }
+    }
+
+    /// Переключает сессию на целевую модель. Сообщение, отправленное без этого, уходит на
+    /// модель, сохранённую в сессии (или на умолчание сервера), а не на ту, что видна в окне.
+    async fn apply_model(&self, id: &str) {
+        let Some((provider, model)) = self.target_model() else { return };
+        let Ok(info) = self.get(&format!("/api/session/{id}")).await else { return };
+        let cur = if info["data"].is_object() { &info["data"]["model"] } else { &info["model"] };
+        if cur["providerID"].as_str() == Some(&provider) && cur["id"].as_str() == Some(&model) {
+            return;
+        }
+        let body = json!({ "model": { "providerID": provider, "id": model } });
+        if let Err(e) = self.call(reqwest::Method::POST, &format!("/api/session/{id}/model"), Some(body)).await {
+            eprintln!("opencode: не удалось переключить модель {provider}/{model}: {e}");
+        }
+    }
+
     pub async fn send(&self, id: &str, text: &str) -> Result<(), String> {
-        if self.should_open_window(id).await {
+        let active = self
+            .get("/api/session/active")
+            .await
+            .ok()
+            .is_some_and(|v| v["data"].get(id).is_some());
+        // Модель меняется только у сессии, которая сейчас ничего не выполняет.
+        if !active {
+            self.apply_model(id).await;
+        }
+        if self.should_open_window(id, active).await {
             return self.open_window(id, text).await;
         }
         self.call(reqwest::Method::POST, &format!("/api/session/{id}/prompt"), Some(json!({ "text": text })))

@@ -38,6 +38,10 @@ pub struct OpenCodeCfg {
     /// Исполняемый файл opencode для открытия окна. Если его нет в PATH,
     /// ищется `~/.opencode/bin/opencode.exe`.
     pub bin: String,
+    /// Модель для сообщений из панели: `auto` — последняя выбранная в окне opencode
+    /// (та, что видна в строке состояния), `session` — не менять модель сессии,
+    /// либо явно `провайдер/модель`.
+    pub model: String,
     pub max_sessions: usize,
     /// Адрес сервиса opencode. По умолчанию читается из его файла состояния.
     pub url: Option<String>,
@@ -73,7 +77,14 @@ impl Default for ClaudeCfg {
 
 impl Default for OpenCodeCfg {
     fn default() -> Self {
-        Self { enabled: true, bin: "opencode".into(), max_sessions: 30, url: None, password: None }
+        Self {
+            enabled: true,
+            bin: "opencode".into(),
+            model: "auto".into(),
+            max_sessions: 30,
+            url: None,
+            password: None,
+        }
     }
 }
 
