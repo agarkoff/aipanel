@@ -168,17 +168,28 @@ function select(agent, session) {
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
   setHint('');
   $('app').classList.add('viewing');
+  // Запись в истории нужна, чтобы системная кнопка «Назад» на телефоне
+  // возвращала к списку сессий, а не уводила со страницы.
+  if (!(history.state && history.state.viewing)) history.pushState({ viewing: true }, '');
   send({ t: 'watch', agent, session });
   renderSessions();
   renderHeader();
 }
 
-$('back').addEventListener('click', () => {
+function closeView() {
   $('app').classList.remove('viewing');
   selected = null;
   send({ t: 'unwatch' });
   renderSessions();
   renderHeader();
+}
+
+$('back').addEventListener('click', () => {
+  if (history.state && history.state.viewing) history.back();
+  else closeView();
+});
+window.addEventListener('popstate', () => {
+  if (selected) closeView();
 });
 
 // ------------------------------------------------------------ шапка и лента
@@ -291,11 +302,21 @@ $('composer').addEventListener('submit', (e) => {
   const ok = send({ t: 'send', id: String(++cmdSeq), agent: selected.agent, session: selected.session, text });
   if (ok) {
     $('text').value = '';
+    autoGrow();
     setHint('Отправляется…');
   } else {
     setHint('Нет соединения с сервером.', true);
   }
 });
+
+// Поле ввода растёт вместе с текстом, до 40% высоты экрана.
+function autoGrow() {
+  const text = $('text');
+  text.style.height = 'auto';
+  text.style.height = `${Math.min(text.scrollHeight + 2, window.innerHeight * 0.4)}px`;
+}
+$('text').addEventListener('input', autoGrow);
+if (!matchMedia('(pointer: coarse)').matches) $('text').placeholder += '. Ctrl+Enter — отправить';
 
 $('text').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {

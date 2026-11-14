@@ -2,7 +2,9 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#1f2023" media="(prefers-color-scheme: dark)">
 <meta name="color-scheme" content="light dark">
 <title>AiPanel</title>
 <link rel="stylesheet" href="/style.css">
@@ -29,18 +31,18 @@
 
   <main class="main">
     <header class="top">
-      <button id="back" class="link back" type="button">← Сессии</button>
+      <button id="back" class="link back" type="button" aria-label="К списку сессий">←</button>
       <div class="titles">
         <div id="title" class="title">Выберите сессию</div>
         <div id="subtitle" class="subtitle"></div>
       </div>
       <span id="status" class="badge" hidden></span>
-      <button id="interrupt" class="danger" type="button" hidden>Прервать</button>
+      <button id="interrupt" class="danger" type="button" aria-label="Прервать" hidden><span class="icon">■</span><span class="label">Прервать</span></button>
     </header>
     <div id="feed" class="feed"></div>
     <form id="composer" class="composer" hidden>
-      <textarea id="text" rows="2" placeholder="Сообщение в сессию. Ctrl+Enter — отправить"></textarea>
-      <button type="submit">Отправить</button>
+      <textarea id="text" rows="1" placeholder="Сообщение в сессию"></textarea>
+      <button type="submit" aria-label="Отправить"><span class="icon">↑</span><span class="label">Отправить</span></button>
     </form>
     <p id="hint" class="hint"></p>
   </main>
