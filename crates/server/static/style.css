@@ -144,7 +144,34 @@ input, textarea, select {
 .back { display: none; }
 .titles { min-width: 0; flex: 1; }
 .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subtitle { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subtitle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  white-space: nowrap;
+}
+#subtitle { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.session-id { flex: none; color: inherit; font: inherit; white-space: nowrap; }
+.session-id::before { content: "·"; margin-right: 4px; }
+.copy-id {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.copy-id:hover { color: var(--text); }
+.copy-id.copied { color: var(--idle); }
 .badge {
   font-size: 12px;
   padding: 2px 8px;

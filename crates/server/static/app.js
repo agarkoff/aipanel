@@ -34,6 +34,7 @@ const nodes = new Map(); // id элемента ленты -> DOM-узел
 let launchId = null;
 let launchRequest = null;
 let pendingLaunch = null;
+let copyIdTimer = null;
 // Каталоги, показанные в подсказках для текущего выбранного компьютера.
 let launchDirCache = { agent: '', dirs: [] };
 
@@ -182,11 +183,19 @@ function current() {
   return agent && session ? { agent, session } : null;
 }
 
+// Ключ сессии — `tool:id`; пользователю нужен сам id (для `--resume`, `-s` и т.п.).
+function sessionId(key) {
+  const colon = key.indexOf(':');
+  return colon < 0 ? key : key.slice(colon + 1);
+}
+
 function select(agent, session) {
   selected = { agent, session };
   nodes.clear();
   feedRequests.clear();
   resetHistoryNav();
+  clearTimeout(copyIdTimer);
+  $('copy-id').classList.remove('copied');
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
   setHint('');
   $('app').classList.add('viewing');
@@ -222,6 +231,8 @@ function renderHeader() {
   if (!cur) {
     $('title').textContent = selected ? selected.session : 'Выберите сессию';
     $('subtitle').textContent = '';
+    $('session-id').hidden = true;
+    $('copy-id').hidden = true;
     badge.hidden = true;
     $('interrupt').hidden = true;
     $('composer').hidden = true;
@@ -230,6 +241,9 @@ function renderHeader() {
   const { agent, session } = cur;
   $('title').textContent = session.title || session.key;
   $('subtitle').textContent = `${agent.name} · ${session.tool} · ${session.cwd}`;
+  $('session-id').hidden = false;
+  $('session-id').textContent = sessionId(session.key);
+  $('copy-id').hidden = false;
   badge.hidden = false;
   badge.className = `badge ${agent.online ? session.status : ''}`;
   badge.textContent = agent.online ? STATUS[session.status] || session.status : 'агент не в сети';
@@ -259,6 +273,39 @@ function setHint(text, isError) {
   } else {
     delete hint.dataset.sticky;
   }
+}
+
+$('copy-id').addEventListener('click', async () => {
+  const cur = current();
+  if (!cur) return;
+  const ok = await copyToClipboard(sessionId(cur.session.key));
+  $('copy-id').classList.toggle('copied', ok);
+  clearTimeout(copyIdTimer);
+  if (ok) copyIdTimer = setTimeout(() => $('copy-id').classList.remove('copied'), 1500);
+  setHint(ok ? 'Идентификатор скопирован.' : 'Не удалось скопировать идентификатор.', !ok);
+});
+
+async function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {}
+  // Запасной путь: Clipboard API нет на странице без HTTPS (панель в локальной сети).
+  const area = document.createElement('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  area.style.position = 'fixed';
+  area.style.opacity = '0';
+  document.body.append(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {}
+  area.remove();
+  return ok;
 }
 
 function firstLine(text) {
