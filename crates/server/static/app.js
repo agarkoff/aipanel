@@ -260,6 +260,8 @@ function buildItem(item) {
       : item.kind === 'tool_use' ? `${item.tool || 'инструмент'}: ${firstLine(item.text)}`
       : `Результат: ${firstLine(item.text)}`;
     details.append(el('summary', '', label), el('div', 'body', item.text));
+    // Размышления раскрыты по умолчанию; вызовы инструментов и результаты свёрнуты.
+    if (item.kind === 'thinking') details.open = true;
     node.append(details);
   }
   if (item.ts && (item.kind === 'text' || item.kind === 'error')) {
