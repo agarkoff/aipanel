@@ -37,6 +37,15 @@ let pendingLaunch = null;
 // Каталоги, показанные в подсказках для текущего выбранного компьютера.
 let launchDirCache = { agent: '', dirs: [] };
 
+// История запросов для стрелок вверх/вниз в поле ввода.
+// Основной источник — лента сессии, поэтому в историю попадают и сообщения,
+// отправленные из окна консоли или с другого устройства.
+const feedRequests = new Map(); // id элемента ленты -> текст запроса
+// Отправленные из этого браузера, но ещё не пришедшие в ленту.
+const sentRequests = new Map(); // "агент\nсессия" -> [текст, ...]
+let histPos = 0; // 0 — черновик, 1 — последний запрос, 2 — предыдущий…
+let histDraft = ''; // что было в поле до начала просмотра истории
+
 // ------------------------------------------------------------ вход
 
 async function boot() {
@@ -176,6 +185,8 @@ function current() {
 function select(agent, session) {
   selected = { agent, session };
   nodes.clear();
+  feedRequests.clear();
+  resetHistoryNav();
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
   setHint('');
   $('app').classList.add('viewing');
@@ -285,12 +296,18 @@ function applyHistory(msg) {
   const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   if (msg.reset) {
     nodes.clear();
+    feedRequests.clear();
     feed.replaceChildren();
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
   } else if (msg.items.length && !nodes.size) {
     feed.replaceChildren();
   }
   for (const item of msg.items) {
+    // Запросы из ленты — история для стрелок в поле ввода.
+    if (item.role === 'user' && (item.kind === 'text' || item.kind === 'queued')) {
+      feedRequests.set(item.id, item.text);
+      consumeSentRequest(item.text);
+    }
     const node = buildItem(item);
     const old = nodes.get(item.id);
     if (old) {
@@ -304,6 +321,72 @@ function applyHistory(msg) {
     nodes.set(item.id, node);
   }
   if (msg.reset || stick) feed.scrollTop = feed.scrollHeight;
+}
+
+// ------------------------------------------------------------ история запросов
+
+function historyKey() {
+  return selected ? `${selected.agent}\n${selected.session}` : '';
+}
+
+function historyEntries() {
+  // Сначала запросы из ленты (в хронологическом порядке), затем отправленные
+  // из этого браузера, которые агент ещё не успел показать в ленте.
+  return [...feedRequests.values(), ...(sentRequests.get(historyKey()) || [])];
+}
+
+// Возврат к обычному вводу: текущее содержимое поля становится черновиком.
+function resetHistoryNav() {
+  histPos = 0;
+  histDraft = $('text').value;
+}
+
+function rememberRequest(text) {
+  const key = historyKey();
+  if (!key) return;
+  let list = sentRequests.get(key);
+  if (!list) sentRequests.set(key, (list = []));
+  list.push(text);
+}
+
+// Запрос дошёл до ленты: убираем его временную копию, иначе в истории был бы дубль.
+function consumeSentRequest(text) {
+  const key = historyKey();
+  const list = sentRequests.get(key);
+  if (!list) return;
+  const i = list.indexOf(text);
+  if (i < 0) return;
+  list.splice(i, 1);
+  if (!list.length) sentRequests.delete(key);
+}
+
+// step = 1 — к более старому запросу, -1 — к более новому.
+// false означает, что событие не наше: стрелка должна двигать каретку как обычно.
+function navigateHistory(step) {
+  const list = historyEntries();
+  const area = $('text');
+  if (step > 0) {
+    if (!list.length || histPos >= list.length) return false;
+    // Просмотр начинаем только с начала поля, иначе Up листает строки текста.
+    // В однострочном черновике двигать каретку вверх некуда, поэтому там Up
+    // всегда вызывает историю — как в оболочке.
+    // Дальше Up продолжает листать, даже если каретка в конце: текст не менялся.
+    if (histPos === 0) {
+      const atStart = area.selectionStart === 0 && area.selectionEnd === 0;
+      if (!atStart && area.value.includes('\n')) return false;
+      histDraft = area.value;
+    }
+    histPos += 1;
+    area.value = list[list.length - histPos];
+  } else {
+    if (histPos === 0) return false;
+    histPos -= 1;
+    area.value = histPos === 0 ? histDraft : list[list.length - histPos];
+  }
+  // Каретка в конец, чтобы сразу править запрос.
+  area.setSelectionRange(area.value.length, area.value.length);
+  autoGrow();
+  return true;
 }
 
 // ------------------------------------------------------------ новая сессия
@@ -499,7 +582,9 @@ $('composer').addEventListener('submit', (e) => {
   if (!selected || !text.trim()) return;
   const ok = send({ t: 'send', id: String(++cmdSeq), agent: selected.agent, session: selected.session, text });
   if (ok) {
+    rememberRequest(text);
     $('text').value = '';
+    resetHistoryNav();
     autoGrow();
     setHint('Отправляется…');
   } else {
@@ -513,17 +598,32 @@ function autoGrow() {
   text.style.height = 'auto';
   text.style.height = `${Math.min(text.scrollHeight + 2, window.innerHeight * 0.4)}px`;
 }
-$('text').addEventListener('input', autoGrow);
+$('text').addEventListener('input', () => {
+  // Правка текста завершает просмотр истории: восстановленный запрос становится
+  // черновиком, и следующая стрелка вверх начинает с последнего запроса.
+  resetHistoryNav();
+  autoGrow();
+});
 // На компьютере Enter отправляет, Shift+Enter переносит строку (как в Claude Code и opencode).
 // На телефоне Enter переносит строку, а отправляет кнопка рядом с полем.
 const touchInput = matchMedia('(pointer: coarse)').matches;
 if (!touchInput) $('text').placeholder += '. Enter — отправить, Shift+Enter — новая строка';
 
 $('text').addEventListener('keydown', (e) => {
-  // isComposing: Enter при выборе слова в IME не должен отправлять сообщение.
-  if (e.key !== 'Enter' || e.isComposing || e.shiftKey || touchInput) return;
-  e.preventDefault();
-  $('composer').requestSubmit();
+  // isComposing: Enter при выборе слова в IME не должен ни отправлять сообщение,
+  // ни листать историю.
+  if (e.isComposing) return;
+  if (e.key === 'Enter') {
+    if (e.shiftKey || touchInput) return;
+    e.preventDefault();
+    $('composer').requestSubmit();
+    return;
+  }
+  // Вверх/вниз — предыдущие запросы. Shift+стрелки оставляем выделению текста,
+  // Ctrl/Alt/Meta — системным и браузерным сочетаниям.
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return;
+  if (navigateHistory(e.key === 'ArrowUp' ? 1 : -1)) e.preventDefault();
 });
 
 $('interrupt').addEventListener('click', () => {
