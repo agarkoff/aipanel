@@ -1,0 +1,218 @@
+'use strict';
+
+// Небольшой рендерер Markdown. Строит DOM-узлы напрямую и нигде не использует
+// innerHTML, поэтому HTML из текста сообщения остаётся обычным текстом.
+
+const renderMarkdown = (() => {
+  const node = (tag, text) => {
+    const n = document.createElement(tag);
+    if (text !== undefined) n.textContent = text;
+    return n;
+  };
+
+  const INLINE = new RegExp(
+    [
+      '\\\\([\\\\`*_{}\\[\\]()#+\\-.!|~>])', // 1: экранированный символ
+      '(`+)([\\s\\S]*?[^`])\\2(?!`)', // 2, 3: код
+      '\\*\\*([^\\s*](?:[\\s\\S]*?[^\\s])?)\\*\\*', // 4: жирный
+      '__([^\\s_](?:[\\s\\S]*?[^\\s])?)__(?![A-Za-zА-Яа-яЁё0-9])', // 5: жирный
+      '~~([^\\s~](?:[\\s\\S]*?[^\\s])?)~~', // 6: зачёркнутый
+      '\\*([^\\s*](?:[^*]*?[^\\s*])?)\\*', // 7: курсив
+      '(?<![A-Za-zА-Яа-яЁё0-9_])_([^\\s_](?:[^_]*?[^\\s_])?)_(?![A-Za-zА-Яа-яЁё0-9_])', // 8: курсив
+      '\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)', // 9, 10: ссылка
+      '(https?:\\/\\/[^\\s<>"\'`]*[^\\s<>"\'`.,;:!?)\\]])', // 11: адрес
+    ].join('|'),
+    'g',
+  );
+
+  function link(text, href) {
+    if (!/^(https?:|mailto:)/i.test(href)) return document.createTextNode(text);
+    const a = node('a', text);
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    return a;
+  }
+
+  function inline(parent, text) {
+    let last = 0;
+    // matchAll работает с копией выражения: рекурсивные вызовы не сбивают позицию поиска.
+    for (const m of text.matchAll(INLINE)) {
+      if (m.index > last) parent.append(text.slice(last, m.index));
+      last = m.index + m[0].length;
+      if (m[1] !== undefined) parent.append(m[1]);
+      else if (m[3] !== undefined) parent.append(node('code', m[3].trim() || m[3]));
+      else if (m[4] !== undefined || m[5] !== undefined) inline(parent.appendChild(node('strong')), m[4] ?? m[5]);
+      else if (m[6] !== undefined) inline(parent.appendChild(node('del')), m[6]);
+      else if (m[7] !== undefined || m[8] !== undefined) inline(parent.appendChild(node('em')), m[7] ?? m[8]);
+      else if (m[9] !== undefined) parent.append(link(m[9], m[10]));
+      else if (m[11] !== undefined) parent.append(link(m[11], m[11]));
+    }
+    if (last < text.length) parent.append(text.slice(last));
+  }
+
+  // Делит строку таблицы на ячейки; `|` внутри кода и после `\` не считается разделителем.
+  function cells(line) {
+    const out = [];
+    let cur = '';
+    let code = false;
+    const s = line.trim();
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (c === '\\' && s[i + 1] === '|') {
+        cur += '|';
+        i++;
+      } else if (c === '`') {
+        code = !code;
+        cur += c;
+      } else if (c === '|' && !code) {
+        out.push(cur);
+        cur = '';
+      } else {
+        cur += c;
+      }
+    }
+    out.push(cur);
+    if (s.startsWith('|')) out.shift();
+    if (s.endsWith('|') && !s.endsWith('\\|')) out.pop();
+    return out.map((c) => c.trim());
+  }
+
+  const RE_FENCE = /^\s{0,3}(```+|~~~+)\s*([^\s`]*)/;
+  const RE_HEADING = /^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/;
+  const RE_HR = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
+  const RE_LIST = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
+  const RE_QUOTE = /^\s{0,3}>\s?(.*)$/;
+  const RE_TABLE_SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+
+  const isTableStart = (lines, i) =>
+    lines[i].includes('|') && i + 1 < lines.length && lines[i + 1].includes('-') && RE_TABLE_SEP.test(lines[i + 1]) &&
+    cells(lines[i]).length === cells(lines[i + 1]).length;
+
+  const startsBlock = (lines, i) =>
+    RE_FENCE.test(lines[i]) || RE_HEADING.test(lines[i]) || RE_HR.test(lines[i]) || RE_LIST.test(lines[i]) ||
+    RE_QUOTE.test(lines[i]) || isTableStart(lines, i);
+
+  function table(lines, i, parent) {
+    const aligns = cells(lines[i + 1]).map((c) =>
+      c.startsWith(':') && c.endsWith(':') ? 'center' : c.endsWith(':') ? 'right' : '');
+    const tbl = node('table');
+    const row = (line, tag) => {
+      const tr = node('tr');
+      const data = cells(line);
+      aligns.forEach((align, k) => {
+        const cell = node(tag);
+        if (align) cell.classList.add(align);
+        inline(cell, data[k] || '');
+        tr.append(cell);
+      });
+      return tr;
+    };
+    tbl.appendChild(node('thead')).append(row(lines[i], 'th'));
+    const body = tbl.appendChild(node('tbody'));
+    i += 2;
+    while (i < lines.length && lines[i].trim() && lines[i].includes('|')) body.append(row(lines[i++], 'td'));
+    const wrap = node('div');
+    wrap.className = 'table-wrap';
+    wrap.append(tbl);
+    parent.append(wrap);
+    return i;
+  }
+
+  function list(lines, i, parent) {
+    // Стек открытых списков: отступ маркера и элемент списка.
+    const stack = [];
+    let item = null;
+    while (i < lines.length) {
+      const m = RE_LIST.exec(lines[i]);
+      if (m) {
+        const indent = m[1].replace(/\t/g, '    ').length;
+        const ordered = /\d/.test(m[2]);
+        while (stack.length > 1 && indent < stack[stack.length - 1].indent) stack.pop();
+        let top = stack[stack.length - 1];
+        const deeper = !top || indent >= top.indent + 2;
+        if (deeper || top.ordered !== ordered) {
+          // Новый уровень вложенности либо смена вида списка на том же уровне.
+          const host = deeper ? item || parent : top.host;
+          if (!deeper) stack.pop();
+          const el = node(ordered ? 'ol' : 'ul');
+          if (ordered && parseInt(m[2], 10) !== 1) el.start = parseInt(m[2], 10);
+          host.append(el);
+          top = { indent, el, ordered, host };
+          stack.push(top);
+        }
+        item = node('li');
+        const task = /^\[([ xX])\]\s+(.*)$/.exec(m[3]);
+        if (task) {
+          const box = node('input');
+          box.type = 'checkbox';
+          box.disabled = true;
+          box.checked = task[1] !== ' ';
+          item.append(box, ' ');
+          inline(item, task[2]);
+        } else {
+          inline(item, m[3]);
+        }
+        top.el.append(item);
+        i++;
+      } else if (lines[i].trim() && /^\s+/.test(lines[i]) && item && !RE_FENCE.test(lines[i])) {
+        item.append('\n');
+        inline(item, lines[i].trim());
+        i++;
+      } else if (!lines[i].trim() && i + 1 < lines.length && RE_LIST.test(lines[i + 1])) {
+        i++; // пустая строка между пунктами одного списка
+      } else {
+        break;
+      }
+    }
+    return i;
+  }
+
+  function blocks(lines, parent) {
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      let m;
+      if (!line.trim()) {
+        i++;
+      } else if ((m = RE_FENCE.exec(line))) {
+        const close = new RegExp(`^\\s{0,3}${m[1][0]}{${m[1].length},}\\s*$`);
+        const code = [];
+        i++;
+        while (i < lines.length && !close.test(lines[i])) code.push(lines[i++]);
+        i++; // закрывающая строка; незакрытый блок идёт до конца текста
+        const pre = node('pre');
+        pre.append(node('code', code.join('\n')));
+        parent.append(pre);
+      } else if ((m = RE_HEADING.exec(line))) {
+        inline(parent.appendChild(node(`h${m[1].length}`)), m[2]);
+        i++;
+      } else if (RE_HR.test(line)) {
+        parent.append(node('hr'));
+        i++;
+      } else if (isTableStart(lines, i)) {
+        i = table(lines, i, parent);
+      } else if (RE_QUOTE.test(line)) {
+        const inner = [];
+        while (i < lines.length && (m = RE_QUOTE.exec(lines[i]))) {
+          inner.push(m[1]);
+          i++;
+        }
+        blocks(inner, parent.appendChild(node('blockquote')));
+      } else if (RE_LIST.test(line)) {
+        i = list(lines, i, parent);
+      } else {
+        const para = [line];
+        i++;
+        while (i < lines.length && lines[i].trim() && !startsBlock(lines, i)) para.push(lines[i++]);
+        inline(parent.appendChild(node('p')), para.join('\n'));
+      }
+    }
+  }
+
+  return (text) => {
+    const root = document.createDocumentFragment();
+    blocks(text.replace(/\r\n?/g, '\n').split('\n'), root);
+    return root;
+  };
+})();

@@ -234,7 +234,11 @@ function firstLine(text) {
 
 function buildItem(item) {
   const node = el('div', `item ${item.role} ${item.kind}`);
-  if (item.kind === 'text' || item.kind === 'error') {
+  if (item.kind === 'text') {
+    const body = el('div', 'body md');
+    body.append(renderMarkdown(item.text));
+    node.append(body);
+  } else if (item.kind === 'error') {
     node.append(el('div', 'body', item.text));
   } else {
     const details = el('details');

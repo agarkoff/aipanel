@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
+const MD_JS: &str = include_str!("../static/md.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 
 const COOKIE: &str = "aipanel_session";
@@ -552,6 +553,7 @@ async fn main() {
     let router = Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }))
         .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
+        .route("/md.js", get(|| async { asset("text/javascript; charset=utf-8", MD_JS) }))
         .route("/style.css", get(|| async { asset("text/css; charset=utf-8", STYLE_CSS) }))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/login", post(login))
