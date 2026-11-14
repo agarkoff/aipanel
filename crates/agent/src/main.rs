@@ -6,13 +6,14 @@ mod config;
 mod install;
 mod opencode;
 mod platform;
+mod status;
 mod util;
 
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -41,6 +42,11 @@ struct Agent {
     online: AtomicBool,
     force: AtomicBool,
     watchers: Mutex<HashMap<String, JoinHandle<()>>>,
+    // Состояние для команды `status` (см. status.rs).
+    started: i64,
+    connected_since: AtomicI64,
+    sessions: AtomicUsize,
+    last_error: Mutex<String>,
 }
 
 /// Идентификатор сессии попадает в имя файла, аргумент команды и URL,
@@ -110,7 +116,7 @@ impl Agent {
 
     fn finish(&self, id: String, result: Result<(), String>) {
         if let Err(e) = &result {
-            eprintln!("command failed: {e}");
+            util::log(&format!("command failed: {e}"));
         }
         let _ = self.out.send(AgentMsg::Result { id, ok: result.is_ok(), error: result.err() });
         self.rescan.notify_one();
@@ -135,6 +141,7 @@ async fn scanner(agent: Arc<Agent>) {
                 list.extend(agent.opencode.scan().await);
             }
             list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            agent.sessions.store(list.len(), Ordering::Relaxed);
             if agent.force.swap(false, Ordering::Relaxed) || list != last {
                 let _ = agent.out.send(AgentMsg::Sessions { sessions: list.clone() });
                 last = list;
@@ -176,6 +183,7 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
     }
     agent.force.store(true, Ordering::Relaxed);
     agent.online.store(true, Ordering::Relaxed);
+    agent.connected_since.store(util::now_ms(), Ordering::Relaxed);
     agent.rescan.notify_one();
 
     let mut tick = tokio::time::interval(Duration::from_secs(30));
@@ -187,7 +195,7 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
                     last_rx = Instant::now();
                     match serde_json::from_str::<ServerMsg>(t.as_str()) {
                         Ok(msg) => agent.handle(msg),
-                        Err(e) => eprintln!("bad message from server: {e}"),
+                        Err(e) => util::log(&format!("bad message from server: {e}")),
                     }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -209,6 +217,25 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
         }
     }
     agent.online.store(false, Ordering::Relaxed);
+    agent.connected_since.store(0, Ordering::Relaxed);
+}
+
+/// Раз в 2 секунды обновляет файл состояния для команд `status` и `stop`.
+async fn status_writer(agent: Arc<Agent>) {
+    loop {
+        status::write(&status::Status {
+            pid: std::process::id(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            name: agent.cfg.name.clone(),
+            server: agent.cfg.server.clone(),
+            started: agent.started,
+            connected_since: agent.connected_since.load(Ordering::Relaxed),
+            last_error: agent.last_error.lock().unwrap().clone(),
+            sessions: agent.sessions.load(Ordering::Relaxed),
+            updated: util::now_ms(),
+        });
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
 }
 
 async fn run(cfg: Config) {
@@ -223,20 +250,36 @@ async fn run(cfg: Config) {
         online: AtomicBool::new(false),
         force: AtomicBool::new(false),
         watchers: Mutex::new(HashMap::new()),
+        started: util::now_ms(),
+        connected_since: AtomicI64::new(0),
+        sessions: AtomicUsize::new(0),
+        last_error: Mutex::new(String::new()),
     });
     tokio::spawn(scanner(Arc::clone(&agent)));
+    tokio::spawn(status_writer(Arc::clone(&agent)));
 
     let mut backoff = 1;
+    // Одна и та же ошибка подключения пишется в лог один раз, иначе лог рос бы
+    // строкой в 30 секунд, пока сервер недоступен.
+    let mut last_failure: Option<String> = None;
     loop {
         match connect(&agent.cfg).await {
             Ok(ws) => {
-                eprintln!("connected to {}", agent.cfg.server);
+                util::log(&format!("connected to {}", agent.cfg.server));
+                last_failure = None;
+                agent.last_error.lock().unwrap().clear();
                 backoff = 1;
                 while rx.try_recv().is_ok() {} // сообщения прошлого подключения уже неактуальны
                 session(&agent, ws, &mut rx).await;
-                eprintln!("disconnected");
+                util::log("disconnected");
             }
-            Err(e) => eprintln!("connect to {} failed: {e}", agent.cfg.server),
+            Err(e) => {
+                if last_failure.as_deref() != Some(e.as_str()) {
+                    util::log(&format!("connect to {} failed: {e} (повторы не пишутся)", agent.cfg.server));
+                }
+                last_failure = Some(e.clone());
+                *agent.last_error.lock().unwrap() = e;
+            }
         }
         agent.stop_watchers();
         tokio::time::sleep(Duration::from_secs(backoff)).await;
@@ -270,6 +313,16 @@ fn main() {
         std::process::exit(platform::run_window(program, &args[2..]));
     }
 
+    // Консольные команды управления агентом (см. status.rs).
+    match args.first().map(String::as_str) {
+        Some("status") => {
+            let config = args.iter().position(|a| a == "--config").and_then(|i| args.get(i + 1));
+            std::process::exit(status::cmd_status(!args.iter().any(|a| a == "--no-start"), config.map(String::as_str)));
+        }
+        Some("stop") => std::process::exit(status::cmd_stop()),
+        _ => {}
+    }
+
     // Установка и удаление плагина AiPanel для TUI opencode (см. install.rs).
     let plugin_cmd = match args.first().map(String::as_str) {
         Some("install-opencode-plugin") => Some(install::install()),
@@ -296,13 +349,19 @@ fn main() {
     let cfg = match Config::load(explicit) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("config error: {e}");
+            util::log(&format!("config error: {e}"));
             std::process::exit(2);
         }
     };
+    // Два агента на одной машине вытесняли бы друг друга на сервере.
+    if let Some(other) = status::running() {
+        eprintln!("agent is already running (pid {}); use `aipanel-agent status` or `stop`", other.pid);
+        // В лог не пишется: автозапуск вызывает status каждые несколько минут.
+        std::process::exit(3);
+    }
     platform::set_terminal_profile(&cfg.terminal_profile);
     if cfg.server.starts_with("ws://") && !cfg.server.contains("://localhost") && !cfg.server.contains("://127.0.0.1") {
-        eprintln!("warning: ws:// is unencrypted, the agent token is sent in clear text; use wss:// outside localhost");
+        util::log("warning: ws:// is unencrypted, the agent token is sent in clear text; use wss:// outside localhost");
     }
 
     let runtime = tokio::runtime::Builder::new_current_thread()

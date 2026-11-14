@@ -97,8 +97,12 @@ impl Config {
     /// каталоге. Переменные AIPANEL_SERVER, AIPANEL_TOKEN, AIPANEL_NAME имеют приоритет.
     pub fn load(explicit: Option<PathBuf>) -> Result<Self, String> {
         let path = explicit.clone().or_else(|| {
+            // Рядом с программой, в текущей папке, затем в каталоге данных (~/.aipanel):
+            // последний вариант нужен, когда exe лежит в общей папке из PATH.
             let beside = std::env::current_exe().ok()?.parent()?.join("agent.toml");
-            [beside, PathBuf::from("agent.toml")].into_iter().find(|p| p.is_file())
+            [beside, PathBuf::from("agent.toml"), crate::util::aipanel_dir().join("agent.toml")]
+                .into_iter()
+                .find(|p| p.is_file())
         });
         let mut cfg = match path {
             Some(p) => {

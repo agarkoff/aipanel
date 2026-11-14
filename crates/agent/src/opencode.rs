@@ -288,7 +288,7 @@ impl OpenCode {
         }
         let body = json!({ "model": { "providerID": provider, "id": model } });
         if let Err(e) = self.call(reqwest::Method::POST, &format!("/api/session/{id}/model"), Some(body)).await {
-            eprintln!("opencode: не удалось переключить модель {provider}/{model}: {e}");
+            crate::util::log(&format!("opencode: не удалось переключить модель {provider}/{model}: {e}"));
         }
     }
 

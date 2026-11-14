@@ -87,6 +87,26 @@ mod imp {
         out.push('"');
     }
 
+    /// Отсоединяет запускаемый процесс от консоли: он переживёт закрытие окна, где его запустили.
+    pub fn detach(cmd: &mut std::process::Command) {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    }
+
+    pub fn kill_pid(pid: u32) -> bool {
+        use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let ok = TerminateProcess(h, 1) != 0;
+            CloseHandle(h);
+            ok
+        }
+    }
+
     static PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
     pub fn set_terminal_profile(profile: &str) {
@@ -341,6 +361,12 @@ mod imp {
     }
 
     pub fn set_terminal_profile(_profile: &str) {}
+
+    pub fn detach(_cmd: &mut std::process::Command) {}
+
+    pub fn kill_pid(pid: u32) -> bool {
+        std::process::Command::new("kill").arg(pid.to_string()).status().is_ok_and(|s| s.success())
+    }
 
     pub fn spawn_window(_program: &str, _args: &[String], _cwd: &str) -> Result<u32, String> {
         Err("открытие окна консоли поддерживается только в Windows".into())

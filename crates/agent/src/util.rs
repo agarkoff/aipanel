@@ -12,6 +12,44 @@ pub fn home_dir() -> PathBuf {
         .unwrap_or_default()
 }
 
+/// `2026-11-05 10:06:22Z` по мс с эпохи Unix (UTC).
+pub fn iso_utc(ms: i64) -> String {
+    let secs = ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // civil_from_days (Howard Hinnant).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}Z", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
+/// Предел размера лога: при превышении старое содержимое удаляется, лог начинается заново.
+const LOG_MAX_BYTES: u64 = 512 * 1024;
+
+/// Пишет строку в stderr и в `~/.aipanel/agent.log` с временем.
+pub fn log(message: &str) {
+    use std::io::Write;
+    eprintln!("{message}");
+    let dir = aipanel_dir();
+    let path = dir.join("agent.log");
+    let _ = std::fs::create_dir_all(&dir);
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > LOG_MAX_BYTES) {
+        let _ = std::fs::remove_file(&path);
+    }
+    // Файл прежней схемы ротации больше не нужен.
+    let _ = std::fs::remove_file(dir.join("agent.log.1"));
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{} {message}", iso_utc(now_ms()));
+    }
+}
+
 /// Каталог данных AiPanel (`~/.aipanel`): сюда плагины окон пишут свои отчёты.
 pub fn aipanel_dir() -> PathBuf {
     std::env::var_os("AIPANEL_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".aipanel"))
@@ -107,6 +145,13 @@ mod tests {
         assert_eq!(parse_iso_ms("1970-01-01T00:00:00.000Z"), 0);
         assert_eq!(parse_iso_ms("2026-11-05T10:06:22.084Z"), 1_793_873_182_084);
         assert_eq!(parse_iso_ms("garbage"), 0);
+    }
+
+    #[test]
+    fn iso_output() {
+        assert_eq!(iso_utc(0), "1970-01-01 00:00:00Z");
+        assert_eq!(iso_utc(1_793_873_182_084), "2026-11-05 10:06:22Z");
+        assert_eq!(iso_utc(parse_iso_ms("2024-02-29T23:59:59.000Z")), "2024-02-29 23:59:59Z");
     }
 
     #[test]

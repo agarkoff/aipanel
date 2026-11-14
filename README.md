@@ -64,13 +64,49 @@ docker compose --profile tls up -d --build
 cargo build --release -p aipanel-agent
 ```
 
-Положите `agent.toml` (образец — `agent.example.toml`) рядом с `target/release/aipanel-agent(.exe)` и запустите агент от того же пользователя, под которым работают Claude Code и opencode. На Linux для сборки нужен пакет разработки OpenSSL (`libssl-dev`).
+Конфигурация `agent.toml` (образец — `agent.example.toml`) ищется по порядку: путь из `--config`, рядом с exe, в текущей папке, в `~/.aipanel/agent.toml`. Запускайте агент от того же пользователя, под которым работают Claude Code и opencode. На Linux для сборки нужен пакет разработки OpenSSL (`libssl-dev`).
 
-Автозапуск в Windows — задача планировщика «при входе в систему»:
+Чтобы агент был доступен как команда, скопируйте exe в каталог из `PATH`, а конфигурацию положите в `~/.aipanel/agent.toml` (Windows):
 
 ```powershell
-schtasks /Create /TN AiPanelAgent /SC ONLOGON /TR "D:\Projects\demo\target\release\aipanel-agent.exe"
+Disable-ScheduledTask -TaskName AiPanelAgent   # если настроен автозапуск (см. ниже): иначе он поднимет агента во время копирования
+aipanel-agent stop                             # запущенный exe нельзя заменить
+Copy-Item target\release\aipanel-agent.exe $env:USERPROFILE\.local\bin\
+Enable-ScheduledTask -TaskName AiPanelAgent
+aipanel-agent status
 ```
+
+После каждой пересборки копирование нужно повторить.
+
+### Управление агентом
+
+```sh
+aipanel-agent status             # показать состояние; если агент не запущен — запустить его
+aipanel-agent status --no-start  # только показать состояние
+aipanel-agent stop               # остановить агента
+```
+
+`status` печатает pid, время работы, адрес сервера, состояние соединения и число сессий. Если агент не запущен, команда запускает его в фоне (без окна, переживает закрытие консоли), ждёт подключения и показывает результат; при ошибке (например, неверный `agent.toml`) печатает конец лога `~/.aipanel/agent.log`. Код выхода: 0 — работает и подключён, 2 — работает, но не подключён, 1 — не запущен или не запустился. Второй агент на той же машине не стартует: он вытеснял бы первого на сервере.
+
+Состояние агент пишет в `~/.aipanel/agent.json` раз в 2 секунды (файл каждый раз перезаписывается целиком, его размер не растёт).
+
+Лог агента — `~/.aipanel/agent.log`. Он ограничен: при превышении 512 КБ старое содержимое удаляется и лог начинается заново, старые логи не хранятся. Одна и та же ошибка подключения к серверу пишется один раз, а не при каждой попытке. Время в логе — UTC.
+
+#### Автозапуск (Windows)
+
+Задача планировщика `AiPanelAgent` запускает `aipanel-agent status` при входе в систему и каждые 5 минут. `status` стартует агента, только если он не запущен, поэтому задача заодно поднимает агента после падения. Окно не показывается (`conhost --headless`), ограничения по времени выполнения нет. Создание:
+
+```powershell
+$user = "$env:USERDOMAIN\$env:USERNAME"
+$action = New-ScheduledTaskAction -Execute 'conhost.exe' -Argument "--headless `"$env:USERPROFILE\.local\bin\aipanel-agent.exe`" status"
+$logon = New-ScheduledTaskTrigger -AtLogOn -User $user
+$repeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero)
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName AiPanelAgent -Action $action -Trigger @($logon, $repeat) -Settings $settings -Principal $principal
+```
+
+Удаление: `Unregister-ScheduledTask -TaskName AiPanelAgent -Confirm:$false`. Остановить агента насовсем можно только вместе с задачей: иначе она запустит его снова не позже чем через 5 минут.
 
 Для opencode должен работать его фоновый сервис (`opencode service status`).
 
