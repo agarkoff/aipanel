@@ -112,7 +112,10 @@ impl OpenCode {
             } else if active.contains(id) {
                 "busy"
             } else {
-                "idle"
+                // Сервис opencode хранит все сессии и примет сообщение в любую из них,
+                // но открыта ли сессия в каком-то окне, он не сообщает. Поэтому сессия,
+                // которая ничего не выполняет, показывается как неактивная, а не «ждёт ввода».
+                "ready"
             };
             out.push(SessionInfo {
                 key: format!("opencode:{id}"),
@@ -120,7 +123,7 @@ impl OpenCode {
                 title: title.to_owned(),
                 cwd: cwd.to_owned(),
                 status: status.into(),
-                live: true,
+                live: status != "ready",
                 updated_at: s["time"]["updated"].as_i64().unwrap_or(0),
                 delivery: "api".into(),
             });
