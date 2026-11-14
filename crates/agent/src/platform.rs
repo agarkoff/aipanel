@@ -41,6 +41,96 @@ mod imp {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
 
+    /// Добавляет аргумент в командную строку по правилам CommandLineToArgvW.
+    fn quote_arg(arg: &str, out: &mut String) {
+        if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
+            out.push_str(arg);
+            return;
+        }
+        out.push('"');
+        let mut backslashes = 0usize;
+        for c in arg.chars() {
+            match c {
+                '\\' => backslashes += 1,
+                '"' => {
+                    out.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                    out.push('"');
+                    backslashes = 0;
+                }
+                _ => {
+                    out.extend(std::iter::repeat('\\').take(backslashes));
+                    out.push(c);
+                    backslashes = 0;
+                }
+            }
+        }
+        out.extend(std::iter::repeat('\\').take(backslashes * 2));
+        out.push('"');
+    }
+
+    /// Запускает программу в новом окне Windows Terminal (`wt.exe`), а если его нет — в
+    /// отдельном окне обычной консоли. Возвращает pid запущенного процесса.
+    pub fn spawn_window(program: &str, args: &[String], cwd: &str) -> Result<u32, String> {
+        use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
+        // Windows Terminal разбирает `;` как разделитель своих команд, а `\;` передаёт
+        // программе как обычный символ: без этого текст сообщения мог бы подставить команду.
+        // Кавычки экранируются дважды: wt собирает командную строку программы заново и
+        // не возвращает им обратные слеши, из-за чего текст обрывался на первой кавычке.
+        let escape = |s: &str| s.replace(';', "\\;").replace('"', "\\\"");
+        let mut wt = String::from("wt.exe -w new -d ");
+        quote_arg(&escape(cwd), &mut wt);
+        for a in std::iter::once(program).chain(args.iter().map(String::as_str)) {
+            wt.push(' ');
+            quote_arg(&escape(a), &mut wt);
+        }
+        match create(&wt, cwd, 0) {
+            Ok(pid) => Ok(pid),
+            Err(_) => {
+                let mut line = String::new();
+                quote_arg(program, &mut line);
+                for a in args {
+                    line.push(' ');
+                    quote_arg(a, &mut line);
+                }
+                create(&line, cwd, CREATE_NEW_CONSOLE)
+            }
+        }
+    }
+
+    /// Дескрипторы агента не наследуются: иначе программа писала бы в его лог, а не в окно.
+    fn create(line: &str, cwd: &str, flags: u32) -> Result<u32, String> {
+        use windows_sys::Win32::System::Threading::{
+            CreateProcessW, PROCESS_INFORMATION, STARTF_USESHOWWINDOW, STARTUPINFOW,
+        };
+        let mut wide: Vec<u16> = line.encode_utf16().chain(Some(0)).collect();
+        let wcwd: Vec<u16> = cwd.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let mut si: STARTUPINFOW = std::mem::zeroed();
+            si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+            si.dwFlags = STARTF_USESHOWWINDOW;
+            si.wShowWindow = 1; // SW_SHOWNORMAL
+            let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+            let ok = CreateProcessW(
+                std::ptr::null(),
+                wide.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                0,
+                flags,
+                std::ptr::null(),
+                wcwd.as_ptr(),
+                &si,
+                &mut pi,
+            );
+            if ok == 0 {
+                return Err(format!("CreateProcess: код ошибки {}", GetLastError()));
+            }
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            Ok(pi.dwProcessId)
+        }
+    }
+
     /// `Some(text)` — набрать текст и нажать Enter, `None` — нажать Esc.
     pub async fn console_input(pid: u32, text: Option<&str>) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
@@ -154,6 +244,10 @@ mod imp {
     }
 
     pub fn no_window(_cmd: &mut tokio::process::Command) {}
+
+    pub fn spawn_window(_program: &str, _args: &[String], _cwd: &str) -> Result<u32, String> {
+        Err("открытие окна консоли поддерживается только в Windows".into())
+    }
 
     pub async fn console_input(_pid: u32, _text: Option<&str>) -> Result<(), String> {
         Err("ввод в открытую сессию поддерживается только в Windows".into())

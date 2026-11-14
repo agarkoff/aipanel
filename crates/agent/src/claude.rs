@@ -2,7 +2,8 @@
 //!
 //! Открытые сессии берутся из реестра `~/.claude/sessions/<pid>.json`, лента — из
 //! транскрипта `~/.claude/projects/<проект>/<sessionId>.jsonl`. В открытую сессию
-//! текст вводится через её консоль, закрытая продолжается через `claude -p --resume`.
+//! текст вводится через её консоль, для закрытой открывается новое окно консоли
+//! `claude --resume <id> -- <текст>` (вне Windows — фоновый `claude -p --resume`).
 
 use std::{
     collections::{HashMap, HashSet},
@@ -43,6 +44,18 @@ const NESTED_SESSION_ENV: [&str; 8] = [
     "CLAUDE_CODE_MESSAGING_SOCKET",
     "CLAUDE_CODE_MESSAGING_TOKEN",
 ];
+/// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
+const LAUNCH_GUARD: Duration = Duration::from_secs(25);
+/// Предел командной строки Windows — 32 767 символов; запас оставлен под служебные аргументы.
+const MAX_ARG_UTF16: usize = 12_000;
+
+/// Если агент запущен из сессии Claude Code, её переменные пометили бы дочерние
+/// процессы как вложенные: такие процессы не сохраняют транскрипт.
+pub fn scrub_env() {
+    for var in NESTED_SESSION_ENV {
+        std::env::remove_var(var);
+    }
+}
 
 #[derive(Clone)]
 struct Known {
@@ -64,6 +77,7 @@ struct St {
     transcripts: HashMap<String, PathBuf>,
     listed_at: Option<Instant>,
     headless: HashMap<String, oneshot::Sender<()>>,
+    launched: HashMap<String, Instant>,
 }
 
 pub struct Claude {
@@ -110,6 +124,7 @@ impl Claude {
             st.listed_at = Some(Instant::now());
         }
 
+        st.launched.retain(|_, t| t.elapsed() < LAUNCH_GUARD);
         let mut out = Vec::new();
         let mut known = HashMap::new();
         let mut used = HashSet::new();
@@ -175,7 +190,7 @@ impl Claude {
             let meta = tail_meta(&mut st, &path, mtime);
             used.insert(path.clone());
             let cwd = meta.cwd.unwrap_or_default();
-            let running = st.headless.contains_key(&sid);
+            let running = st.headless.contains_key(&sid) || st.launched.contains_key(&sid);
             let title = meta.title.unwrap_or_else(|| match basename(&cwd) {
                 "" => sid.chars().take(8).collect(),
                 dir => dir.to_owned(),
@@ -188,7 +203,14 @@ impl Claude {
                 status: if running { "busy" } else { "stopped" }.into(),
                 live: false,
                 updated_at: to_ms(mtime),
-                delivery: if cwd.is_empty() { "none" } else { "headless" }.into(),
+                delivery: if cwd.is_empty() {
+                    "none"
+                } else if cfg!(windows) {
+                    "window"
+                } else {
+                    "headless"
+                }
+                .into(),
             });
             known.insert(sid, Known { pid: None, cwd, path: Some(path) });
         }
@@ -256,7 +278,40 @@ impl Claude {
         let known = self.lock().known.get(sid).cloned().ok_or("сессия не найдена")?;
         match known.pid {
             Some(pid) => crate::platform::console_input(pid, Some(text)).await,
+            None if cfg!(windows) => self.open_window(sid, &known.cwd, text),
             None => self.headless(sid, &known.cwd, text, out),
+        }
+    }
+
+    /// Открывает видимое окно консоли с сессией; сообщение уходит первым запросом.
+    fn open_window(&self, sid: &str, cwd: &str, text: &str) -> Result<(), String> {
+        if cwd.is_empty() || !Path::new(cwd).is_dir() {
+            return Err(format!("каталог сессии недоступен: {cwd}"));
+        }
+        if text.encode_utf16().count() > MAX_ARG_UTF16 {
+            return Err(format!("сообщение слишком длинное для запуска окна (до {MAX_ARG_UTF16} символов)"));
+        }
+        {
+            let mut st = self.lock();
+            if st.launched.get(sid).is_some_and(|t| t.elapsed() < LAUNCH_GUARD) {
+                return Err("окно этой сессии уже открывается".into());
+            }
+            st.launched.insert(sid.to_owned(), Instant::now());
+        }
+        let mut args = vec!["--resume".to_owned(), sid.to_owned()];
+        args.extend(self.cfg.resume_args.iter().cloned());
+        // `--` нужен, чтобы текст, начинающийся с «-», не приняли за параметр.
+        args.push("--".into());
+        args.push(text.to_owned());
+        match crate::platform::spawn_window(&self.cfg.bin, &args, cwd) {
+            Ok(_) => {
+                self.rescan.notify_one();
+                Ok(())
+            }
+            Err(e) => {
+                self.lock().launched.remove(sid);
+                Err(e)
+            }
         }
     }
 
@@ -290,17 +345,12 @@ impl Claude {
 
         let mut cmd = tokio::process::Command::new(&self.cfg.bin);
         cmd.args(["-p", "--resume", sid])
-            .args(&self.cfg.headless_args)
+            .args(&self.cfg.resume_args)
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        // Если агент запущен из сессии Claude Code, её переменные пометили бы дочерний
-        // процесс как вложенный: такой процесс не сохраняет транскрипт.
-        for var in NESTED_SESSION_ENV {
-            cmd.env_remove(var);
-        }
         crate::platform::no_window(&mut cmd);
         let mut child = match cmd.spawn() {
             Ok(c) => c,

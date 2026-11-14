@@ -17,10 +17,11 @@ bin = "claude"
 # Закрытые сессии: изменённые за последние N дней, не больше max_recent штук.
 recent_days = 7
 max_recent = 30
-# Дополнительные аргументы для `claude -p --resume <id>`. Фоновый процесс не может
-# спросить разрешение на инструмент, поэтому режим разрешений задаётся здесь, например:
-#headless_args = ["--permission-mode", "acceptEdits"]
-headless_args = []
+# Дополнительные аргументы при запуске закрытой сессии: в Windows это окно консоли
+# `claude --resume <id> ...`, на других системах фоновый `claude -p --resume <id>`.
+# Например, режим разрешений:
+#resume_args = ["--permission-mode", "acceptEdits"]
+resume_args = []
 
 [opencode]
 enabled = true

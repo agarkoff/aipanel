@@ -260,6 +260,7 @@ fn main() {
         return;
     }
 
+    claude::scrub_env();
     let explicit = args
         .iter()
         .position(|a| a == "--config")

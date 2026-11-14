@@ -27,8 +27,8 @@ pub struct ClaudeCfg {
     pub recent_days: u64,
     /// Не больше стольких закрытых сессий.
     pub max_recent: usize,
-    /// Дополнительные аргументы для `claude -p --resume`.
-    pub headless_args: Vec<String>,
+    /// Дополнительные аргументы при запуске закрытой сессии (`claude --resume <id> ...`).
+    pub resume_args: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -63,7 +63,7 @@ impl Default for ClaudeCfg {
             home: None,
             recent_days: 7,
             max_recent: 30,
-            headless_args: Vec::new(),
+            resume_args: Vec::new(),
         }
     }
 }
