@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -80,6 +80,19 @@ pub fn resolve_exe(bin: &str) -> String {
 
 pub fn now_ms() -> i64 {
     to_ms(SystemTime::now())
+}
+
+/// Каталог для новой сессии должен быть существующим абсолютным путём:
+/// относительный путь зависел бы от каталога, из которого запущен агент.
+pub fn session_dir(cwd: &str) -> Result<&Path, String> {
+    let dir = Path::new(cwd);
+    if !dir.is_absolute() {
+        return Err(format!("укажите абсолютный путь к каталогу: {cwd}"));
+    }
+    if !dir.is_dir() {
+        return Err(format!("каталог не найден: {cwd}"));
+    }
+    Ok(dir)
 }
 
 pub fn to_ms(t: SystemTime) -> i64 {

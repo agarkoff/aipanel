@@ -33,7 +33,7 @@ body {
   color: var(--text);
   font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
-button, input, textarea { font: inherit; color: inherit; }
+button, input, textarea, select { font: inherit; color: inherit; }
 button {
   border: 1px solid var(--line);
   background: var(--panel);
@@ -45,7 +45,7 @@ button[type=submit] { background: var(--accent); border-color: var(--accent); co
 button:disabled { opacity: .5; cursor: default; }
 button.link { border: 0; background: none; color: var(--accent); padding: 4px 6px; }
 button.danger { border-color: var(--wait); color: var(--wait); }
-input, textarea {
+input, textarea, select {
   border: 1px solid var(--line);
   background: var(--panel);
   border-radius: 6px;
@@ -76,6 +76,18 @@ input, textarea {
 .conn { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
 .conn.on { background: var(--idle); }
 .filter { margin: 0 14px 8px; width: auto; }
+.new-session {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 17px;
+  line-height: 1;
+}
 .sessions { overflow-y: auto; flex: 1; padding-bottom: 12px; }
 
 .agent {
@@ -226,6 +238,23 @@ input, textarea {
 .hint { margin: 0; padding: 0 16px 8px; background: var(--panel); color: var(--muted); font-size: 12px; min-height: 0; }
 .hint.error { color: var(--wait); }
 
+/* Окно запуска новой сессии */
+.launch {
+  width: min(440px, calc(100vw - 32px));
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  max-height: 90dvh;
+}
+.launch::backdrop { background: rgba(0, 0, 0, .4); }
+.launch form { display: grid; gap: 12px; padding: 16px; }
+.launch h2 { margin: 0; font-size: 17px; }
+.launch label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.launch .hint { padding: 0; background: none; }
+.launch .actions { display: flex; justify-content: flex-end; gap: 8px; }
+
 html, body { overflow: hidden; }
 button, .session { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
 .feed, .sessions { overscroll-behavior: contain; }
@@ -251,6 +280,7 @@ button .icon { display: none; }
   }
   .sidebar header .link { min-height: 44px; padding: 0 8px; font-size: 15px; }
   .filter { margin: 0 16px 8px; padding: 10px 12px; }
+  .new-session { width: 32px; height: 32px; font-size: 20px; }
   .sessions { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
   .agent { padding: 12px 16px 4px; }
   .session { padding: 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }

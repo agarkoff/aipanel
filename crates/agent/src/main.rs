@@ -96,7 +96,7 @@ impl Agent {
                         Ok(_) => Err("неизвестный тип сессии".into()),
                         Err(e) => Err(e),
                     };
-                    me.finish(id, result);
+                    me.finish(id, result.map(|_| None));
                 });
             }
             ServerMsg::Interrupt { id, session } => {
@@ -108,17 +108,32 @@ impl Agent {
                         Ok(_) => Err("неизвестный тип сессии".into()),
                         Err(e) => Err(e),
                     };
+                    me.finish(id, result.map(|_| None));
+                });
+            }
+            ServerMsg::Start { id, tool, cwd } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result = match tool.as_str() {
+                        "claude" => me.claude.start(&cwd),
+                        "opencode" => me.opencode.start(&cwd).await,
+                        _ => Err("неизвестный тип сессии".into()),
+                    };
                     me.finish(id, result);
                 });
             }
         }
     }
 
-    fn finish(&self, id: String, result: Result<(), String>) {
+    fn finish(&self, id: String, result: Result<Option<String>, String>) {
         if let Err(e) = &result {
             util::log(&format!("command failed: {e}"));
         }
-        let _ = self.out.send(AgentMsg::Result { id, ok: result.is_ok(), error: result.err() });
+        let (ok, session, error) = match result {
+            Ok(session) => (true, session, None),
+            Err(e) => (false, None, Some(e)),
+        };
+        let _ = self.out.send(AgentMsg::Result { id, ok, error, session });
         self.rescan.notify_one();
     }
 

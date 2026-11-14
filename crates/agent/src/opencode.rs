@@ -222,6 +222,36 @@ impl OpenCode {
         }
     }
 
+    /// Создаёт новую сессию opencode в каталоге `cwd` и открывает её в окне.
+    /// Сессию создаёт API, поэтому она сразу известна панели даже без окна.
+    pub async fn start(&self, cwd: &str) -> Result<Option<String>, String> {
+        crate::util::session_dir(cwd)?;
+        let v = self
+            .call(
+                reqwest::Method::POST,
+                "/api/session",
+                Some(json!({ "location": { "directory": cwd } })),
+            )
+            .await?;
+        let id = v["data"]["id"]
+            .as_str()
+            .or_else(|| v["id"].as_str())
+            .ok_or("opencode не вернул идентификатор сессии")?
+            .to_owned();
+        if cfg!(windows) {
+            let bin = crate::util::resolve_exe(&self.cfg.bin);
+            self.launched.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Instant::now());
+            let args = vec!["-s".to_owned(), id.clone()];
+            if let Err(e) = crate::platform::spawn_window(&bin, &args, cwd) {
+                self.launched.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+                // Сессия без окна пользователю не нужна: убираем её из списка opencode.
+                let _ = self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None).await;
+                return Err(e);
+            }
+        }
+        Ok(Some(format!("opencode:{id}")))
+    }
+
     /// Окно открывается, если сессия ничего не выполняет и её окна ещё нет. Окно ищется
     /// по `-s <id>` в командной строке `opencode.exe`: окно, в котором сессию выбрали
     /// уже внутри программы, так не найти и будет открыто ещё одно.

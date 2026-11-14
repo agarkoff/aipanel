@@ -30,6 +30,13 @@ let selected = null; // { agent, session }
 let cmdSeq = 0;
 const nodes = new Map(); // id элемента ленты -> DOM-узел
 
+// Запуск новой сессии: id команды, её параметры и ожидаемая сессия.
+let launchId = null;
+let launchRequest = null;
+let pendingLaunch = null;
+// Каталоги, показанные в подсказках для текущего выбранного компьютера.
+let launchDirCache = { agent: '', dirs: [] };
+
 // ------------------------------------------------------------ вход
 
 async function boot() {
@@ -66,6 +73,7 @@ function start() {
   $('app').hidden = false;
   connect();
   setInterval(renderSessions, 30000); // обновляет «N мин назад»
+  setInterval(checkPendingLaunch, 3000); // на случай, если список сессий не изменился
 }
 
 function connect() {
@@ -97,11 +105,13 @@ function onMessage(msg) {
     agents = msg.agents;
     renderSessions();
     renderHeader();
+    checkPendingLaunch();
   } else if (msg.t === 'history') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyHistory(msg);
   } else if (msg.t === 'result') {
-    setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
+    if (launchId && msg.id === launchId) onLaunchResult(msg);
+    else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
   }
 }
 
@@ -294,6 +304,191 @@ function applyHistory(msg) {
     nodes.set(item.id, node);
   }
   if (msg.reset || stick) feed.scrollTop = feed.scrollHeight;
+}
+
+// ------------------------------------------------------------ новая сессия
+
+// Пути с разных компьютеров могут отличаться регистром и разделителями.
+function normCwd(path) {
+  return path.replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
+}
+
+// Каталоги всех сессий агента — и Claude Code, и opencode — без повторов,
+// сначала недавно использованные.
+function sessionDirs(agent) {
+  const map = new Map();
+  for (const s of agent ? agent.sessions : []) {
+    if (!s.cwd) continue;
+    const key = normCwd(s.cwd);
+    const seen = map.get(key);
+    if (seen) {
+      seen.tools.add(s.tool);
+      seen.updated = Math.max(seen.updated, s.updated_at || 0);
+    } else {
+      map.set(key, { cwd: s.cwd, tools: new Set([s.tool]), updated: s.updated_at || 0 });
+    }
+  }
+  return [...map.values()].sort((a, b) => b.updated - a.updated);
+}
+
+function fillLaunchAgents() {
+  const online = agents.filter((a) => a.online);
+  const sel = $('launch-agent');
+  const prev = sel.value;
+  sel.replaceChildren();
+  for (const a of online) {
+    const opt = el('option', '', a.name);
+    opt.value = a.name;
+    sel.append(opt);
+  }
+  sel.value = online.some((a) => a.name === prev) ? prev : online[0].name;
+  // Один компьютер — выбирать не из чего.
+  $('launch-agent-row').hidden = online.length < 2;
+}
+
+function fillLaunchDirs() {
+  const agent = agents.find((a) => a.name === $('launch-agent').value);
+  const dirs = sessionDirs(agent);
+  launchDirCache = { agent: agent ? agent.name : '', dirs };
+  return dirs;
+}
+
+// Подсказки каталогов в поле ввода: список открывается и при наборе текста.
+// <datalist> для этого не годится — он показывает варианты, только пока ввод
+// совпадает с началом пути, и при наборе «D:\Proj\…» список пропадает.
+const cwdSuggest = Suggest.attach($('launch-cwd'), {
+  // Порядок — как в sessionDirs(): от недавно использованных к старым.
+  items: () => launchDirCache.dirs.map((d) => ({ value: d.cwd })),
+  // При открытии окна список не распахивается сам: фокус ставится программно.
+  openOnFocus: false,
+  // Поле уже заполнено каталогом открытой сессии: по клику показываем весь список.
+  openAllWhenExact: true,
+  emptyText: 'Такого каталога ещё не было. Можно ввести путь вручную.',
+});
+
+function openLaunch() {
+  const online = agents.filter((a) => a.online);
+  if (!online.length) {
+    setHint('Нет подключённых агентов: новую сессию запускать негде.', true);
+    return;
+  }
+  fillLaunchAgents();
+  if (selected && online.some((a) => a.name === selected.agent)) $('launch-agent').value = selected.agent;
+  const dirs = fillLaunchDirs();
+  const cur = current();
+  const sameAgent = cur && cur.agent.name === $('launch-agent').value;
+  if (sameAgent && (cur.session.tool === 'claude' || cur.session.tool === 'opencode')) {
+    $('launch-tool').value = cur.session.tool;
+  }
+  // Каталог открытой сессии — самый вероятный выбор, иначе самый свежий из списка.
+  $('launch-cwd').value = sameAgent && cur.session.cwd ? cur.session.cwd : (dirs[0]?.cwd ?? '');
+  $('launch-ok').disabled = false;
+  launchHint('');
+  $('launch').showModal();
+  $('launch-cwd').focus();
+}
+
+function launchHint(text, isError) {
+  const hint = $('launch-hint');
+  hint.textContent = text;
+  hint.className = isError ? 'hint error' : 'hint';
+}
+
+$('new-session').addEventListener('click', openLaunch);
+$('launch-cancel').addEventListener('click', () => $('launch').close());
+
+// Клик по пустому месту вокруг окна (затемнение) закрывает его: у <dialog>
+// затемнение — часть самого элемента, поэтому цель события — сам dialog.
+// Пока запуск идёт, окно не закрываем: ошибку запуска должно быть видно.
+$('launch').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget && launchId === null) e.currentTarget.close();
+});
+
+$('launch-agent').addEventListener('change', () => {
+  // Если в поле был путь из подсказок прошлого компьютера, заменяем его на путь
+  // нового: чужие абсолютные пути на другой машине обычно не существуют.
+  const prev = launchDirCache;
+  const cwd = $('launch-cwd').value.trim();
+  const wasSuggested = !cwd || prev.dirs.some((d) => normCwd(d.cwd) === normCwd(cwd));
+  const dirs = fillLaunchDirs();
+  if (wasSuggested) $('launch-cwd').value = dirs[0]?.cwd ?? '';
+});
+
+$('launch-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const agent = $('launch-agent').value;
+  const tool = $('launch-tool').value;
+  const cwd = $('launch-cwd').value.trim();
+  if (!agent) {
+    launchHint('Нет подключённых агентов.', true);
+    return;
+  }
+  if (!cwd) {
+    launchHint('Укажите каталог.', true);
+    $('launch-cwd').focus();
+    return;
+  }
+  const a = agents.find((x) => x.name === agent);
+  const keys = new Set(a ? a.sessions.map((s) => s.key) : []);
+  const id = String(++cmdSeq);
+  if (!send({ t: 'start', id, agent, tool, cwd })) {
+    launchHint('Нет соединения с сервером.', true);
+    return;
+  }
+  launchId = id;
+  launchRequest = { agent, tool, cwd, keys };
+  $('launch-ok').disabled = true;
+  launchHint('Запускаем…');
+});
+
+function onLaunchResult(msg) {
+  const req = launchRequest;
+  launchId = null;
+  launchRequest = null;
+  $('launch-ok').disabled = false;
+  if (!msg.ok) {
+    launchHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
+    return;
+  }
+  $('launch').close();
+  pendingLaunch = {
+    agent: req.agent,
+    tool: req.tool,
+    cwd: req.cwd,
+    key: msg.session || null,
+    keys: req.keys,
+    until: Date.now() + 90000,
+  };
+  setHint(req.tool === 'claude' ? 'Открываем окно Claude Code…' : 'Открываем окно opencode…');
+  checkPendingLaunch();
+}
+
+// Новая сессия появляется в списке после сканирования; когда она нашлась,
+// открываем её ленту, чтобы сразу можно было писать.
+function checkPendingLaunch() {
+  if (!pendingLaunch) return;
+  const agent = agents.find((a) => a.name === pendingLaunch.agent);
+  if (agent) {
+    let hit = null;
+    if (pendingLaunch.key) {
+      hit = agent.sessions.find((s) => s.key === pendingLaunch.key);
+    } else {
+      hit = agent.sessions
+        .filter((s) => s.tool === pendingLaunch.tool && !pendingLaunch.keys.has(s.key))
+        .filter((s) => normCwd(s.cwd) === normCwd(pendingLaunch.cwd))
+        .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))[0];
+    }
+    if (hit) {
+      pendingLaunch = null;
+      setHint('');
+      select(agent.name, hit.key);
+      return;
+    }
+  }
+  if (Date.now() > pendingLaunch.until) {
+    pendingLaunch = null;
+    setHint('Новая сессия не появилась в списке. Откройте её вручную в терминале.', true);
+  }
 }
 
 // ------------------------------------------------------------ команды

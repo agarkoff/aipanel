@@ -59,6 +59,9 @@ pub enum AgentMsg {
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Ключ созданной сессии (`opencode:<id>`), если команда его вернула.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
 }
 
@@ -70,4 +73,8 @@ pub enum ServerMsg {
     Unwatch { session: String },
     Send { id: String, session: String, text: String },
     Interrupt { id: String, session: String },
+    /// Новая сессия: `tool` — `claude` или `opencode`, `cwd` — абсолютный путь.
+    Start { id: String, tool: String, cwd: String },
+    /// Продолжить сессию `session` в другом инструменте `tool`.
+    Handoff { id: String, session: String, tool: String },
 }

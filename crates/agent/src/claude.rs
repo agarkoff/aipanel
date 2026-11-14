@@ -283,6 +283,15 @@ impl Claude {
         }
     }
 
+    /// Открывает новую сессию Claude Code в каталоге `cwd`. Идентификатор появится
+    /// в списке после того, как Claude Code запишет реестр сессий.
+    pub fn start(&self, cwd: &str) -> Result<Option<String>, String> {
+        crate::util::session_dir(cwd)?;
+        crate::platform::spawn_window(&self.cfg.bin, &[], cwd)?;
+        self.rescan.notify_one();
+        Ok(None)
+    }
+
     /// Открывает видимое окно консоли с сессией; сообщение уходит первым запросом.
     fn open_window(&self, sid: &str, cwd: &str, text: &str) -> Result<(), String> {
         if cwd.is_empty() || !Path::new(cwd).is_dir() {

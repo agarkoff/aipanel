@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const MD_JS: &str = include_str!("../static/md.js");
+const SUGGEST_JS: &str = include_str!("../static/suggest.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 
 const COOKIE: &str = "aipanel_session";
@@ -374,10 +375,13 @@ fn on_agent_msg(app: &App, agent: &str, msg: AgentMsg) {
                 }
             }
         }
-        AgentMsg::Result { id, ok, error } => {
+        AgentMsg::Result { id, ok, error, session } => {
             if let Some((browser, orig)) = inner.pending.remove(&id) {
                 if let Some(b) = inner.browsers.get(&browser) {
-                    let _ = b.tx.try_send(json!({ "t": "result", "id": orig, "ok": ok, "error": error }).to_string());
+                    let _ = b.tx.try_send(
+                        json!({ "t": "result", "id": orig, "ok": ok, "error": error, "session": session })
+                            .to_string(),
+                    );
                 }
             }
         }
@@ -393,6 +397,7 @@ enum BrowserMsg {
     Unwatch,
     Send { id: String, agent: String, session: String, text: String },
     Interrupt { id: String, agent: String, session: String },
+    Start { id: String, agent: String, tool: String, cwd: String },
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -477,6 +482,19 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Interrupt { id: cmd, session });
         }
+        BrowserMsg::Start { id, agent, tool, cwd } => {
+            let cwd = cwd.trim().to_owned();
+            if !matches!(tool.as_str(), "claude" | "opencode") {
+                reply(&inner, browser, &id, "неизвестный тип сессии");
+                return;
+            }
+            if cwd.is_empty() || cwd.len() > 4096 || cwd.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректный каталог");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Start { id: cmd, tool, cwd });
+        }
     }
 }
 
@@ -554,6 +572,7 @@ async fn main() {
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }))
         .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
         .route("/md.js", get(|| async { asset("text/javascript; charset=utf-8", MD_JS) }))
+        .route("/suggest.js", get(|| async { asset("text/javascript; charset=utf-8", SUGGEST_JS) }))
         .route("/style.css", get(|| async { asset("text/css; charset=utf-8", STYLE_CSS) }))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/login", post(login))

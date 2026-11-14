@@ -23,6 +23,7 @@
     <header>
       <strong>AiPanel</strong>
       <span id="conn" class="conn" title="Соединение с сервером"></span>
+      <button id="new-session" class="new-session" type="button" title="Новая сессия" aria-label="Новая сессия">+</button>
       <button id="logout" class="link" type="button">Выйти</button>
     </header>
     <input id="filter" class="filter" type="search" placeholder="Фильтр по названию или каталогу">
@@ -48,7 +49,31 @@
   </main>
 </div>
 
+<dialog id="launch" class="launch" aria-labelledby="launch-title">
+  <form id="launch-form">
+    <h2 id="launch-title">Новая сессия</h2>
+    <label>Инструмент
+      <select id="launch-tool">
+        <option value="claude">Claude Code</option>
+        <option value="opencode">opencode</option>
+      </select>
+    </label>
+    <label id="launch-agent-row">Компьютер
+      <select id="launch-agent"></select>
+    </label>
+    <label>Каталог
+      <input id="launch-cwd" placeholder="Абсолютный путь к папке" autocomplete="off" spellcheck="false" required>
+    </label>
+    <p id="launch-hint" class="hint"></p>
+    <div class="actions">
+      <button id="launch-cancel" class="link" type="button">Отмена</button>
+      <button id="launch-ok" type="submit">Запустить</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/md.js"></script>
+<script src="/suggest.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>
