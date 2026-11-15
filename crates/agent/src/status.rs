@@ -88,7 +88,7 @@ fn log_tail(path: &std::path::Path) -> String {
 
 /// `status`: показывает состояние; если агент не запущен, запускает его (кроме `--no-start`).
 /// Код выхода: 0 — работает и подключён, 2 — работает, но не подключён, 1 — не запущен.
-pub fn cmd_status(start: bool, config: Option<&str>) -> i32 {
+pub fn cmd_status(start: bool, config: Option<&str>, home: Option<&str>) -> i32 {
     if let Some(status) = running() {
         print(&status);
         return if status.connected_since > 0 { 0 } else { 2 };
@@ -111,6 +111,9 @@ pub fn cmd_status(start: bool, config: Option<&str>) -> i32 {
     let mut cmd = Command::new(exe);
     if let Some(config) = config {
         cmd.args(["--config", config]);
+    }
+    if let Some(home) = home {
+        cmd.args(["--home", home]);
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     crate::platform::detach(&mut cmd);

@@ -405,8 +405,20 @@ async fn run(cfg: Config) {
     }
 }
 
+/// Значение флага вида `--config <путь>` / `--home <путь>`.
+fn arg_value(args: &[String], flag: &str) -> Option<String> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Второй экземпляр агента (например, для удалённой панели) живёт в своём
+    // каталоге состояния: так его лог, pid-файл и статус не пересекаются с
+    // основным. Задаётся флагом `--home` или переменной AIPANEL_HOME.
+    if let Some(home) = arg_value(&args, "--home") {
+        util::set_aipanel_dir(PathBuf::from(home));
+    }
 
     // Внутренний режим: ввод в консоль другого процесса (см. platform.rs).
     if args.first().map(String::as_str) == Some("inject") {
@@ -434,8 +446,13 @@ fn main() {
     // Консольные команды управления агентом (см. status.rs).
     match args.first().map(String::as_str) {
         Some("status") => {
-            let config = args.iter().position(|a| a == "--config").and_then(|i| args.get(i + 1));
-            std::process::exit(status::cmd_status(!args.iter().any(|a| a == "--no-start"), config.map(String::as_str)));
+            let config = arg_value(&args, "--config");
+            let home = arg_value(&args, "--home");
+            std::process::exit(status::cmd_status(
+                !args.iter().any(|a| a == "--no-start"),
+                config.as_deref(),
+                home.as_deref(),
+            ));
         }
         Some("stop") => std::process::exit(status::cmd_stop()),
         _ => {}

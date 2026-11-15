@@ -1,5 +1,6 @@
 use std::{
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -52,7 +53,18 @@ pub fn log(message: &str) {
 
 /// Каталог данных AiPanel (`~/.aipanel`): сюда плагины окон пишут свои отчёты.
 pub fn aipanel_dir() -> PathBuf {
+    if let Some(dir) = HOME_OVERRIDE.get() {
+        return dir.clone();
+    }
     std::env::var_os("AIPANEL_HOME").map(PathBuf::from).unwrap_or_else(|| home_dir().join(".aipanel"))
+}
+
+static HOME_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// Переопределяет каталог данных (флаг `--home`). Нужен второму экземпляру
+/// агента, чтобы его состояние, лог и pid не пересекались с основным.
+pub fn set_aipanel_dir(dir: PathBuf) {
+    let _ = HOME_OVERRIDE.set(dir);
 }
 
 /// Полный путь к программе: по PATH, затем в `~/.opencode/bin`. Агент может быть
