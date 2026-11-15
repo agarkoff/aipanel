@@ -51,6 +51,7 @@ const DELIVERY = {
 let ws = null;
 let agents = [];
 let selected = null; // { agent, session }
+let lastViewed = null; // последняя открытая сессия: остаётся подсвеченной в списке после выхода
 let cmdSeq = 0;
 const nodes = new Map(); // id элемента ленты -> DOM-узел
 
@@ -296,7 +297,9 @@ function renderSessions() {
       const row = el('div', 'session-row');
       const btn = el('button', 'session');
       btn.type = 'button';
-      if (selected && selected.agent === a.name && selected.session === s.key) btn.classList.add('active');
+      // Подсвечивается открытая сессия, а после выхода из неё — та, где только что были.
+      const mark = selected || lastViewed;
+      if (mark && mark.agent === a.name && mark.session === s.key) btn.classList.add('active');
       btn.append(
         el('span', dotClass(s, a.online)),
         el('span', 'name', s.title || s.key),
@@ -550,6 +553,7 @@ function sessionId(key) {
 
 function select(agent, session) {
   selected = { agent, session };
+  lastViewed = selected;
   nodes.clear();
   feedRequests.clear();
   clearPrompts();
@@ -583,6 +587,9 @@ function closeView() {
   setHint('');
   renderSessions();
   renderHeader();
+  // На телефоне список был скрыт; прокручиваем к сессии, из которой вышли.
+  const mark = document.querySelector('#sessions .session.active');
+  if (mark) mark.scrollIntoView({ block: 'nearest' });
 }
 
 $('back').addEventListener('click', () => {

@@ -159,7 +159,7 @@ input, textarea, select {
 .session-row.dragging .session { transition: none; }
 .session-row .session { touch-action: pan-y; }
 .session:hover { background: var(--bg); }
-.session.active { background: var(--user); }
+.session.active { background: var(--user); box-shadow: inset 3px 0 0 var(--accent); }
 .swipe-action {
   position: absolute;
   inset: 0;
