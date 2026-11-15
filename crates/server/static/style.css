@@ -394,6 +394,8 @@ input, textarea, select {
 .composer textarea { resize: vertical; max-height: 40vh; }
 .hint { margin: 0; padding: 0 16px 8px; background: var(--panel); color: var(--muted); font-size: 12px; min-height: 0; }
 .hint.error { color: var(--wait); }
+/* Вторая копия подсказки — для экрана списка сессий на телефоне (см. медиазапрос ниже). */
+.hint-list { display: none; }
 
 /* Окно запуска новой сессии */
 .launch {
@@ -411,6 +413,14 @@ input, textarea, select {
 .launch label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 .launch .hint { padding: 0; background: none; }
 .launch .actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* На тач-экране экранная клавиатура меняет высоту окна просмотра, и окно,
+   центрированное по вертикали, переезжает как раз между касанием и click:
+   палец попадает уже мимо кнопки, а запуск не уходит. Прижимаем окно к верху,
+   тогда его положение от клавиатуры не зависит. */
+@media (pointer: coarse) {
+  .launch { margin: 8px auto auto; }
+}
 
 html, body { overflow: hidden; }
 button, .session { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
@@ -501,4 +511,12 @@ button .icon { display: none; }
   .composer:not(:has(+ .hint:not(:empty))) { border-top: 1px solid var(--line); }
   .hint:not(:empty) { border-top: 1px solid var(--line); }
   .composer textarea { resize: none; padding: 9px 12px; border-radius: 18px; }
+
+  /* Лента на телефоне скрыта, пока не выбрана сессия, и подсказка из неё не видна.
+     Сообщения о запуске новой сессии и ошибки показываем внизу списка сессий. */
+  .app:not(.viewing) .hint-list:not(:empty) {
+    display: block;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line);
+  }
 }

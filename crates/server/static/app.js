@@ -238,6 +238,8 @@ function closeView() {
   selected = null;
   clearPrompts();
   send({ t: 'unwatch' });
+  // Подсказка относилась к открытой сессии; в списке её копия была бы уже не к месту.
+  setHint('');
   renderSessions();
   renderHeader();
 }
@@ -306,6 +308,12 @@ function setHint(text, isError) {
   const hint = $('hint');
   hint.textContent = text;
   hint.className = isError ? 'hint error' : 'hint';
+  // На телефоне лента (а с ней и #hint) скрыта, пока не выбрана сессия, поэтому
+  // сообщение о запуске новой сессии дублируем в список — иначе на экране списка
+  // не видно ни «Запускаем…», ни ошибки.
+  const listHint = $('hint-list');
+  listHint.textContent = text;
+  listHint.className = isError ? 'hint hint-list error' : 'hint hint-list';
   if (text) {
     hint.dataset.sticky = '1';
     clearTimeout(setHint.timer);
@@ -1150,7 +1158,14 @@ $('launch-cancel').addEventListener('click', () => $('launch').close());
 // затемнение — часть самого элемента, поэтому цель события — сам dialog.
 // Пока запуск идёт, окно не закрываем: ошибку запуска должно быть видно.
 $('launch').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget && launchId === null) e.currentTarget.close();
+  if (e.target !== e.currentTarget || launchId !== null) return;
+  // Клик мог прийти общему предку, хотя палец был внутри окна: так бывает, когда
+  // раскладка сдвинулась между касанием и кликом (на телефоне закрылась клавиатура).
+  // Такой клик за затемнение не считаем, иначе окно пропадает без запуска.
+  const box = e.currentTarget.getBoundingClientRect();
+  const inside = e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom;
+  if (inside) return;
+  e.currentTarget.close();
 });
 
 $('launch-agent').addEventListener('change', () => {
