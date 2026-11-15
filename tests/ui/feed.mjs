@@ -292,6 +292,15 @@ try {
   check('счётчик закрепов', layout.count.trim() === '3 / 3', layout);
   check('кнопка «в конец» скрыта внизу', layout.toEndHidden, layout);
 
+  // Регрессия: общее CSS-правило `.user` (имя в шапке) сжимало свои сообщения
+  // в ленте в ноль — они оставались в DOM, но были не видны.
+  const mine = await evaluate(`(() => {
+    const users = [...document.querySelectorAll('#feed .item.user')];
+    const heights = users.map((n) => Math.round(n.getBoundingClientRect().height));
+    return { count: users.length, heights, min: heights.length ? Math.min(...heights) : 0 };
+  })()`);
+  check('свои сообщения видны в ленте', mine.count === 3 && mine.min > 0, mine);
+
   // Нажатия на закреп: переход к сообщению и переключение на предыдущее своё.
   const pinState = async () => evaluate(`(() => {
     const feed = document.getElementById('feed');

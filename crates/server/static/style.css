@@ -81,7 +81,9 @@ input, textarea, select {
 .sidebar header .link { margin-left: auto; }
 .conn { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
 .conn.on { background: var(--idle); }
-.user {
+/* Имя вошедшего пользователя. Класс не `user`, чтобы не совпадать с классом
+   своих сообщений в ленте (`.item.user`): общее правило сжимало их в ноль. */
+.who {
   color: var(--muted);
   font-size: 12px;
   min-width: 0;
