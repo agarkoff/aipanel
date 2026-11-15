@@ -315,6 +315,29 @@ try {
     };
   })()`);
 
+  // Закреп следует за прокруткой: показывает своё сообщение, ближайшее выше
+  // верхней кромки ленты, а у самого низа — последнее своё, как в Telegram.
+  await evaluate(`document.getElementById('feed').scrollTop = 0`);
+  await sleep(200);
+  let followed = await pinState();
+  check('в начале ленты закреп показывает первое своё сообщение', followed.preview === 'Первый вопрос' && followed.count === '1 / 3', followed);
+
+  await evaluate(`(() => {
+    const f = document.getElementById('feed');
+    const second = [...f.querySelectorAll('.item.user')][1];
+    const box = f.getBoundingClientRect();
+    const contentTop = f.scrollTop + second.getBoundingClientRect().top - box.top;
+    f.scrollTop = contentTop + 40;
+  })()`);
+  await sleep(200);
+  followed = await pinState();
+  check('при прокрутке закреп показывает ближайшее предыдущее', followed.preview === 'Второй вопрос' && followed.count === '2 / 3', followed);
+
+  await evaluate(`(() => { const f = document.getElementById('feed'); f.scrollTop = f.scrollHeight; })()`);
+  await sleep(200);
+  followed = await pinState();
+  check('внизу закреп снова показывает последнее своё', followed.preview === 'Последний вопрос' && followed.count === '3 / 3', followed);
+
   await evaluate(`document.getElementById('pin').click()`);
   await sleep(300);
   let pin = await pinState();
@@ -331,6 +354,20 @@ try {
   await sleep(300);
   pin = await pinState();
   check('после самого старого закреп возвращается к последнему', pin.preview === 'Последний вопрос' && pin.count === '3 / 3', pin);
+
+  // После перехода по закрепу ручная прокрутка снова двигает закреп, а не
+  // оставляет его на сообщении, к которому прыгнули.
+  await settleScroll();
+  await evaluate(`(() => {
+    const f = document.getElementById('feed');
+    const second = [...f.querySelectorAll('.item.user')][1];
+    const box = f.getBoundingClientRect();
+    const contentTop = f.scrollTop + second.getBoundingClientRect().top - box.top;
+    f.scrollTop = contentTop + 40;
+  })()`);
+  await sleep(250);
+  const afterScroll = await pinState();
+  check('после перехода прокрутка снова меняет закреп', afterScroll.preview === 'Второй вопрос' && afterScroll.count === '2 / 3', afterScroll);
 
   // Кнопка «в конец»: появляется при прокрутке вверх, возвращает в конец.
   await settleScroll();

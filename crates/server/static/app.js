@@ -35,9 +35,14 @@ let cmdSeq = 0;
 const nodes = new Map(); // id элемента ленты -> DOM-узел
 
 // Закреп в шапке ленты: показываем последнее своё сообщение, по нажатию переходим
-// к нему, а закреп переключается на предыдущее своё — как в Telegram.
+// к нему, а закреп переключается на предыдущее своё — как в Telegram. При обычной
+// прокрутке закреп сам следует за лентой.
 let pinIdx = -1; // индекс своего сообщения в ленте, на который ведёт закреп
 let pinNewestId = ''; // id самого нового своего сообщения при прошлой отрисовке
+// Пока закреп везёт ленту к сообщению, прокрутка не должна переключать закреп:
+// после нажатия он уже показывает следующее сообщение, как в Telegram.
+let pinJumping = false;
+let pinJumpTimer = null;
 let flashId = ''; // id сообщения, к которому сейчас подсвечен переход
 let flashTimer = null;
 // Пока идёт переход по закрепу, авто-прилипание к концу ленты выключено:
@@ -771,6 +776,8 @@ function syncPin() {
 
 function resetPin() {
   clearFlash();
+  clearTimeout(pinJumpTimer);
+  pinJumping = false;
   scrollHoldUntil = 0;
   $('pin').hidden = true;
   $('pin-preview').textContent = '';
@@ -806,11 +813,39 @@ $('pin').addEventListener('click', () => {
   // старого закреп возвращается к последнему.
   pinIdx = pinIdx === 0 ? list.length - 1 : pinIdx - 1;
   renderPin(list);
+  // Пока лента едет к сообщению, закреп не пересчитываем по положению: он уже
+  // показывает следующее. Следующая ручная прокрутка снова включит следование.
+  pinJumping = true;
+  clearTimeout(pinJumpTimer);
+  pinJumpTimer = setTimeout(() => {
+    pinJumping = false;
+  }, 1500);
 });
 
 function nearEnd() {
   const feed = $('feed');
   return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+}
+
+// Закреп следует за прокруткой: показывает своё сообщение, ближайшее выше верхней
+// кромки ленты, а у самого низа — последнее своё. Как в Telegram, где закреп
+// меняется синхронно с движением ленты.
+function followPin() {
+  const list = myMessages();
+  if (!list.length) return;
+  let idx = list.length - 1;
+  if (!nearEnd()) {
+    const edge = $('feed').getBoundingClientRect().top + 1;
+    idx = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].getBoundingClientRect().top <= edge) idx = i;
+      else break;
+    }
+  }
+  if (idx !== pinIdx) {
+    pinIdx = idx;
+    renderPin(list);
+  }
 }
 
 // Кнопка «в конец» — только когда лента прокручена вверх: внизу она не нужна.
@@ -824,7 +859,22 @@ $('to-end').addEventListener('click', () => {
   feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
 });
 
-$('feed').addEventListener('scroll', updateToEnd, { passive: true });
+$('feed').addEventListener(
+  'scroll',
+  () => {
+    updateToEnd();
+    if (pinJumping) {
+      // Ждём, пока плавная прокрутка к закрепу перестанет присылать события.
+      clearTimeout(pinJumpTimer);
+      pinJumpTimer = setTimeout(() => {
+        pinJumping = false;
+      }, 150);
+      return;
+    }
+    followPin();
+  },
+  { passive: true },
+);
 
 // ------------------------------------------------------------ запросы opencode
 
