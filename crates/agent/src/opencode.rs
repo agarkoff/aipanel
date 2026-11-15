@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Item, Limits, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo};
+use aipanel_proto::{AgentMsg, Command, Item, Limits, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -238,11 +238,24 @@ impl OpenCode {
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, String> {
+        self.call_with(method, path, &[], body).await
+    }
+
+    /// Запрос с параметрами строки запроса: списку команд нужен каталог сессии,
+    /// а он приходит в виде `location[directory]`.
+    async fn call_with(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> Result<Value, String> {
         let ep = self.endpoint()?;
         let mut req = self
             .http
             .request(method, format!("{}{path}", ep.url))
-            .basic_auth("opencode", Some(ep.password));
+            .basic_auth("opencode", Some(ep.password))
+            .query(query);
         if let Some(body) = body {
             req = req.json(&body);
         }
@@ -257,6 +270,35 @@ impl OpenCode {
 
     async fn get(&self, path: &str) -> Result<Value, String> {
         self.call(reqwest::Method::GET, path, None).await
+    }
+
+    /// Команды, доступные сессии (`/init`, `/review`, пользовательские из
+    /// настроек opencode). Их отдаёт сам opencode — для каталога сессии,
+    /// поэтому список у каждого проекта свой.
+    pub async fn commands(&self, id: &str) -> Vec<Command> {
+        let info = self.get(&format!("/api/session/{id}")).await.unwrap_or(Value::Null);
+        let cwd = info["data"]["location"]["directory"]
+            .as_str()
+            .or(info["location"]["directory"].as_str())
+            .unwrap_or_default();
+        // Каталог сессии уточняет список (команды проекта), но без него opencode
+        // отдаёт хотя бы пользовательские команды.
+        let query: &[(&str, &str)] = if cwd.is_empty() { &[] } else { &[("location[directory]", cwd)] };
+        let Ok(v) = self.call_with(reqwest::Method::GET, "/api/command", query, None).await else {
+            return Vec::new();
+        };
+        v["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| {
+                let name = c["name"].as_str().filter(|n| !n.is_empty())?;
+                Some(Command {
+                    name: name.to_owned(),
+                    description: c["description"].as_str().unwrap_or_default().chars().take(200).collect(),
+                })
+            })
+            .collect()
     }
 
     pub async fn scan(&self) -> Vec<SessionInfo> {
@@ -630,6 +672,20 @@ impl OpenCode {
     /// Отправляет сообщение. Возвращает элемент очереди, если opencode принял
     /// сообщение, но ещё не отдал его в ленту (сессия занята).
     pub async fn send(&self, id: &str, text: &str) -> Result<Option<Item>, String> {
+        // Слэш-команду opencode выполняет не как текст сообщения, а отдельным
+        // запросом: только он разворачивает шаблон команды. Имя сверяется со
+        // списком команд, поэтому сообщение «/путь/к/файлу» остаётся сообщением.
+        if let Some((name, args)) = crate::util::slash_command(text) {
+            if self.commands(id).await.iter().any(|c| c.name == name) {
+                self.call(
+                    reqwest::Method::POST,
+                    &format!("/api/session/{id}/command"),
+                    Some(json!({ "name": name, "text": args })),
+                )
+                .await?;
+                return Ok(None);
+            }
+        }
         let active = self
             .get("/api/session/active")
             .await

@@ -71,12 +71,21 @@ const session = {
   delivery: 'api',
 };
 
+// Команды, которые «пришлёт агент» в ответ на запрос списка по «/».
+const commands = [
+  { name: 'init', description: 'guided AGENTS.md setup' },
+  { name: 'review', description: 'review changes' },
+  { name: 'clear', description: 'start a new session' },
+];
+
 // ---------------------------------------------------------------- заглушка
 
 const stub = `
 (() => {
   const session = ${JSON.stringify(session)};
   const items = ${JSON.stringify(items)};
+  const commands = ${JSON.stringify(commands)};
+  window.__sent = [];
   class FakeSocket {
     static OPEN = 1;
     constructor() {
@@ -91,6 +100,10 @@ const stub = `
       const msg = JSON.parse(text);
       if (msg.t === 'watch') {
         setTimeout(() => this.emit({ t: 'history', agent: msg.agent, session: msg.session, reset: true, items }), 0);
+      } else if (msg.t === 'commands') {
+        setTimeout(() => this.emit({ t: 'commands', agent: msg.agent, session: msg.session, commands }), 0);
+      } else if (msg.t === 'send') {
+        window.__sent.push(msg);
       }
     }
     close() { this.readyState = 3; }
@@ -386,6 +399,154 @@ try {
   })()`);
   check('кнопка «в конец» возвращает в конец', reachedEnd && endState.gap <= 1, { reachedEnd, ...endState });
   check('кнопка «в конец» скрывается внизу', endState.hidden, endState);
+
+  // ------------------------------------------------------------ слэш-команды
+  // Список команд в поле ввода: «/» открывает его, ввод фильтрует, стрелки и
+  // Enter подставляют команду, а Enter без выбора отправляет набранное.
+
+  const slashState = () => evaluate(`(() => {
+    const list = document.querySelector('#composer .sg-list');
+    const shown = !!list && !list.hidden;
+    return {
+      open: shown,
+      items: shown ? [...list.querySelectorAll('.sg-item')].map((n) => n.querySelector('b').textContent) : [],
+      empty: shown && list.querySelector('.sg-empty') ? list.querySelector('.sg-empty').textContent : '',
+      text: document.getElementById('text').value,
+    };
+  })()`);
+
+  const typeSlash = (value) => evaluate(`(() => {
+    const t = document.getElementById('text');
+    t.focus();
+    t.value = ${JSON.stringify(value)};
+    t.setSelectionRange(t.value.length, t.value.length);
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+
+  const press = (key) => evaluate(`(() => {
+    document.getElementById('text').dispatchEvent(new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true, cancelable: true }));
+  })()`);
+
+  await typeSlash('/');
+  const listed = await waitFor(
+    `(() => {
+      const list = document.querySelector('#composer .sg-list');
+      return list && !list.hidden && list.querySelectorAll('.sg-item').length === ${commands.length};
+    })()`,
+  );
+  const all = await slashState();
+  check('«/» открывает список команд', listed && all.open, all);
+  check('в списке команды с описаниями', all.items.join(',') === 'init,review,clear', all);
+
+  await typeSlash('/cl');
+  await sleep(100);
+  const filtered = await slashState();
+  check('список фильтруется по имени', filtered.items.join(',') === 'clear', filtered);
+
+  await press('ArrowDown');
+  await press('Enter');
+  await sleep(100);
+  const picked = await slashState();
+  const sentBefore = await evaluate(`window.__sent.length`);
+  check('Enter подставляет выбранную команду', picked.text === '/clear ' && !picked.open, picked);
+  check('выбор из списка не отправляет сообщение', sentBefore === 0, sentBefore);
+
+  // Enter без выбранного стрелками пункта — обычная отправка набранного.
+  await typeSlash('/clear');
+  await sleep(100);
+  await press('Enter');
+  await sleep(150);
+  const sentText = await evaluate(`window.__sent.map((m) => m.text)`);
+  check('Enter без выбора отправляет набранное', sentText.join('|') === '/clear', sentText);
+
+  // Список относится только к началу сообщения: дальше «/» — обычный текст.
+  await typeSlash('путь /init');
+  await sleep(100);
+  check('посреди текста список не открывается', !(await slashState()).open);
+
+  // Параметры команды печатаются после имени: выбор из списка подставляет
+  // «/имя » и оставляет курсор за пробелом, дальше текст просто набирается.
+  await typeSlash('/rev');
+  await waitFor(`(() => { const l = document.querySelector('#composer .sg-list'); return l && !l.hidden && l.querySelectorAll('.sg-item').length === 1; })()`);
+  await press('ArrowDown');
+  await press('Enter');
+  await sleep(100);
+  const withSpace = await slashState();
+  check('выбор команды оставляет место для параметров', withSpace.text === '/review ' && !withSpace.open, withSpace);
+
+  await evaluate(`(() => {
+    const t = document.getElementById('text');
+    t.focus();
+    t.value += '24';
+    t.setSelectionRange(t.value.length, t.value.length);
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(100);
+  const withArgs = await slashState();
+  check('параметры не снова открывают список', withArgs.text === '/review 24' && !withArgs.open, withArgs);
+
+  await press('Enter');
+  await sleep(150);
+  const argsSent = await evaluate(`window.__sent.map((m) => m.text)`);
+  check('команда с параметрами уходит целиком', argsSent.at(-1) === '/review 24', argsSent);
+
+  // Escape закрывает список и не трогает набранное.
+  await typeSlash('/i');
+  await waitFor(`(() => { const l = document.querySelector('#composer .sg-list'); return l && !l.hidden; })()`);
+  await press('Escape');
+  await sleep(100);
+  const escaped = await slashState();
+  check('Escape закрывает список', !escaped.open && escaped.text === '/i', escaped);
+
+  // На телефоне список не должен уезжать за экран: поле ввода у нижней кромки,
+  // поэтому список раскрывается вверх.
+  await send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 740,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await typeSlash('/');
+  await waitFor(`(() => { const l = document.querySelector('#composer .sg-list'); return l && !l.hidden && l.querySelectorAll('.sg-item').length > 0; })()`);
+  const narrow = await evaluate(`(() => {
+    const list = document.querySelector('#composer .sg-list').getBoundingClientRect();
+    const input = document.getElementById('text').getBoundingClientRect();
+    return {
+      listTop: list.top, listBottom: list.bottom, listLeft: list.left, listRight: list.right,
+      height: list.height, inputTop: input.top, width: innerWidth, height0: innerHeight,
+    };
+  })()`);
+  check(
+    'на телефоне список целиком на экране и над полем',
+    narrow.height > 0 &&
+      narrow.listTop >= 0 &&
+      narrow.listBottom <= narrow.height0 + 1 &&
+      narrow.listLeft >= 0 &&
+      narrow.listRight <= narrow.width + 1 &&
+      narrow.listBottom <= narrow.inputTop + 1,
+    narrow,
+  );
+
+  // На телефоне механика та же: выбор подставляет «/имя », параметр печатается дальше.
+  await press('ArrowDown');
+  await press('Enter');
+  await sleep(100);
+  const mobilePick = await slashState();
+  await evaluate(`(() => {
+    const t = document.getElementById('text');
+    t.focus();
+    t.value += '24';
+    t.setSelectionRange(t.value.length, t.value.length);
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(100);
+  const mobileArgs = await slashState();
+  check(
+    'на телефоне команда с параметрами набирается так же',
+    mobilePick.text === '/init ' && !mobilePick.open && mobileArgs.text === '/init 24' && !mobileArgs.open,
+    { mobilePick, mobileArgs },
+  );
+
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
   failures.push(String(error));

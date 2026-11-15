@@ -77,6 +77,12 @@ const promptReplyIds = new Map(); // id команды -> id запроса
 // Каталоги, показанные в подсказках для текущего выбранного компьютера.
 let launchDirCache = { agent: '', dirs: [] };
 
+// Команды сессий (`/init`, `/clear`) для списка, который открывается по `/`:
+// ключ — «агент\nсессия». Список присылает агент, он же выполняет команду.
+const sessionCommands = new Map();
+// Когда команды уже запрошены: чтобы не спрашивать агента на каждое нажатие.
+const commandsAsked = new Map();
+
 // История запросов для стрелок вверх/вниз в поле ввода.
 // Основной источник — лента сессии, поэтому в историю попадают и сообщения,
 // отправленные из окна консоли или с другого устройства.
@@ -139,6 +145,9 @@ function connect() {
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onopen = () => {
     $('conn').classList.add('on');
+    // После переподключения агент мог перезапуститься: списки команд берём заново.
+    sessionCommands.clear();
+    commandsAsked.clear();
     if (selected) send({ t: 'watch', agent: selected.agent, session: selected.session });
   };
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
@@ -173,6 +182,12 @@ function onMessage(msg) {
   } else if (msg.t === 'prompts') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyPrompts(msg.prompts || []);
+  } else if (msg.t === 'commands') {
+    const key = commandKey(msg.agent, msg.session);
+    commandsAsked.delete(key);
+    sessionCommands.set(key, Array.isArray(msg.commands) ? msg.commands : []);
+    // Список уже открыт на «/»: подставляем пришедшие команды на место заглушки.
+    if (selected && msg.agent === selected.agent && msg.session === selected.session) slash.refresh();
   } else if (msg.t === 'result') {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
@@ -1746,6 +1761,88 @@ function onHandoffResult(msg) {
 
 // ------------------------------------------------------------ команды
 
+// Слэш-команды сессии (`/init`, `/clear`) — как в терминале Claude Code и
+// opencode: набираешь `/` в начале сообщения, открывается список с описаниями.
+// Список присылает агент; он же выполняет команду, когда сообщение отправлено.
+// Модуль подсказок работает в режиме слова: выбор заменяет только `/имя`, а не
+// весь текст поля, и не трогает Enter, если ничего не выбрано стрелками.
+const slash = Suggest.attach($('text'), {
+  minChars: 0,
+  limit: 0,
+  openOnFocus: false,
+  emptyOnQueryless: true,
+  emptyText: slashEmptyText,
+  token: slashToken,
+  items: slashItems,
+  text: (item) => `/${item.value} `,
+  // Совпадение с начала имени — выше совпадения в середине.
+  rank: (item, q) => (q && item.value.toLowerCase().startsWith(q) ? 0 : 1),
+});
+
+function commandKey(agent, session) {
+  return `${agent}\n${session}`;
+}
+
+// Команды из панели выполняются только там, где агент может их передать:
+// у Claude Code — набором в консоль открытой сессии (закрытая получила бы текст
+// первым сообщением), у opencode — запросом к его API.
+function slashAllowed(cur) {
+  if (!cur || !cur.agent.online) return false;
+  if (cur.session.tool === 'claude') return cur.session.delivery === 'console';
+  return cur.session.delivery !== 'none';
+}
+
+function slashItems() {
+  const cur = current();
+  if (!cur || !slashAllowed(cur)) return [];
+  const key = commandKey(cur.agent.name, cur.session.key);
+  const list = sessionCommands.get(key);
+  if (!list) {
+    askCommands(cur.agent.name, cur.session.key);
+    return [];
+  }
+  return list.map((c) => ({ value: c.name, label: c.name, hint: c.description || '' }));
+}
+
+// Слово после `/` в начале сообщения: только там список и открывается —
+// «/» посреди текста это просто текст. Возвращает запрос без слэша и границы
+// слова, чтобы выбор заменил именно его.
+function slashToken(input) {
+  const value = input.value;
+  const at = input.selectionStart == null ? value.length : input.selectionStart;
+  const m = /^\/\S*/.exec(value);
+  if (!m || at < 1 || at > m[0].length) return null;
+  return { query: value.slice(1, at), start: 0, end: m[0].length };
+}
+
+function askCommands(agent, session) {
+  const key = commandKey(agent, session);
+  const asked = commandsAsked.get(key);
+  // Если ответ не пришёл (агент перезапустился), через время спросим снова.
+  if (asked && Date.now() - asked < 10000) return;
+  if (!send({ t: 'commands', agent, session })) return;
+  commandsAsked.set(key, Date.now());
+}
+
+function slashEmptyText() {
+  const cur = current();
+  if (!cur) return '';
+  const key = commandKey(cur.agent.name, cur.session.key);
+  if (!slashAllowed(cur)) {
+    if (!cur.agent.online) return 'Агент не в сети.';
+    return cur.session.tool === 'claude'
+      ? 'Команды Claude Code есть только у открытой в терминале сессии.'
+      : 'В эту сессию команды отправить нельзя.';
+  }
+  const list = sessionCommands.get(key);
+  if (list) return list.length ? 'Ничего не найдено' : 'Команд нет';
+  if (!ws || ws.readyState !== WebSocket.OPEN) return 'Нет соединения с сервером.';
+  const asked = commandsAsked.get(key);
+  // Старый агент не знает запроса команд и просто молчит.
+  if (asked && Date.now() - asked > 6000) return 'Список не пришёл: возможно, агент старой версии.';
+  return 'Загружаем команды…';
+}
+
 $('composer').addEventListener('submit', (e) => {
   e.preventDefault();
   const text = $('text').value;
@@ -1777,14 +1874,20 @@ $('text').addEventListener('input', () => {
 // На компьютере Enter отправляет, Shift+Enter переносит строку (как в Claude Code и opencode).
 // На телефоне Enter переносит строку, а отправляет кнопка рядом с полем.
 const touchInput = matchMedia('(pointer: coarse)').matches;
-if (!touchInput) $('text').placeholder += '. Enter — отправить, Shift+Enter — новая строка';
+if (!touchInput) $('text').placeholder += '. Enter — отправить, Shift+Enter — новая строка, / — команды';
 
 $('text').addEventListener('keydown', (e) => {
+  // Список команд обрабатывает стрелки, Enter и Escape раньше нас: если он уже
+  // занялся клавишей, полю остаётся только всё остальное.
+  if (e.defaultPrevented) return;
   // isComposing: Enter при выборе слова в IME не должен ни отправлять сообщение,
   // ни листать историю.
   if (e.isComposing) return;
   if (e.key === 'Enter') {
     if (e.shiftKey || touchInput) return;
+    // Enter без выбранного стрелками пункта остаётся отправкой: список просто
+    // закрывается, а набранный текст уходит как есть.
+    if (slash.isOpen()) slash.close();
     e.preventDefault();
     $('composer').requestSubmit();
     return;

@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Item, Limits, SessionInfo};
+use aipanel_proto::{AgentMsg, Command, Item, Limits, SessionInfo};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -171,6 +171,20 @@ impl Claude {
             return None;
         }
         Some(Limits { tool: "claude".into(), title: "Claude Code".into(), meters, updated_at: now_ms() })
+    }
+
+    /// Команды сессии: встроенные команды Claude Code, пользовательские из
+    /// `~/.claude/commands` и `<каталог>/.claude/commands` и навыки из `skills`.
+    /// Выполнить их из панели можно только в открытой сессии: текст набирается
+    /// в её консоли, а `claude -p` слэш-команды не выполняет.
+    pub fn commands(&self, sid: &str) -> Vec<Command> {
+        let cwd = self
+            .lock()
+            .known
+            .get(sid)
+            .map(|k| k.cwd.clone())
+            .unwrap_or_default();
+        commands_for(&self.home, &cwd)
     }
 
     fn lock(&self) -> MutexGuard<'_, St> {
@@ -643,6 +657,177 @@ impl Claude {
     }
 }
 
+/// Встроенные команды Claude Code: собственных файлов у них нет, а меню TUI из
+/// панели не прочитать, поэтому список хранится здесь. Он снят с CLI 2.1;
+/// на диске рядом с ним ищутся пользовательские команды и навыки, так что
+/// новинки CLI попадают в панель только после обновления этого списка.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("add-dir", "Add a new working directory"),
+    ("advisor", "Let Claude consult a stronger model at key moments"),
+    ("autocompact", "Set how full the context gets before auto-summarizing"),
+    ("branch", "Create a branch of the current conversation at this point"),
+    ("brief", "Toggle brief-only mode"),
+    ("btw", "Ask a quick side question without interrupting the main conversation"),
+    ("bug", "Report a bug or share your conversation"),
+    ("cd", "Move this session to a new working directory"),
+    ("clear", "Start a new session with empty context; the previous one stays on disk"),
+    ("compact", "Free up context by summarizing the conversation so far"),
+    ("config", "Open settings"),
+    ("context", "Visualize current context usage as a colored grid"),
+    ("copy", "Copy Claude's last response to clipboard"),
+    ("doctor", "Health-check your setup and fix issues"),
+    ("effort", "Set effort level for model usage"),
+    ("export", "Export the current conversation to a file or clipboard"),
+    ("feedback", "Send feedback to Anthropic or report a bug"),
+    ("focus", "Toggle focus view: just your prompt, summary, and response"),
+    ("fork", "Copy this conversation into a new background session"),
+    ("goal", "Set a goal Claude checks before stopping"),
+    ("help", "Show help and available commands"),
+    ("hooks", "View hook configurations for tool events"),
+    ("ide", "Manage IDE integrations and show status"),
+    ("import", "Import config from another AI coding agent"),
+    ("init", "Initialize a new CLAUDE.md file with codebase documentation"),
+    ("login", "Sign in with your Anthropic account"),
+    ("logout", "Sign out from your Anthropic account"),
+    ("mcp", "Manage MCP servers"),
+    ("memory", "Edit CLAUDE.md files and memory settings"),
+    ("model", "Set model for new sessions from this window"),
+    ("output-style", "List output styles or switch to one"),
+    ("permissions", "Manage allow and deny tool permission rules"),
+    ("plan", "Enable plan mode or view the current session plan"),
+    ("privacy-settings", "View and update your privacy settings"),
+    ("recap", "Generate a one-line session recap now"),
+    ("release-notes", "Show what's new in Claude Code"),
+    ("reload-plugins", "Activate pending plugin changes in the current session"),
+    ("reload-skills", "Pick up skills added or changed on disk during this session"),
+    ("rename", "Rename the current conversation"),
+    ("resume", "Resume a previous conversation"),
+    ("rewind", "Rewind the conversation or restore files to an earlier point"),
+    ("sandbox", "Show or change the sandbox settings"),
+    ("skills", "List available skills"),
+    ("status", "Show Claude Code status: version, model, account, API connectivity"),
+    ("statusline", "Set up the status line UI"),
+    ("stop", "Stop this background session; transcript and worktree are kept"),
+    ("tasks", "View and manage everything running in the background"),
+    ("terminal-setup", "Set up the terminal for Claude Code"),
+    ("theme", "Change the theme"),
+    ("tui", "Set the terminal UI renderer (default | fullscreen)"),
+    ("upgrade", "Upgrade your plan for higher rate limits and more Opus"),
+    ("usage", "Show session cost, plan usage, and activity stats"),
+    ("version", "Print the version this session is running"),
+];
+
+/// Команды для сессии в каталоге `cwd`: встроенные, пользовательские из
+/// `~/.claude/commands` и `<cwd>/.claude/commands`, затем навыки из `skills`.
+fn commands_for(home: &Path, cwd: &str) -> Vec<Command> {
+    let mut out: Vec<Command> = BUILTIN_COMMANDS
+        .iter()
+        .map(|(name, description)| Command { name: (*name).into(), description: (*description).into() })
+        .collect();
+    let mut roots = vec![home.join("commands")];
+    let mut skills = vec![home.join("skills")];
+    if !cwd.is_empty() {
+        let project = Path::new(cwd).join(".claude");
+        roots.push(project.join("commands"));
+        skills.push(project.join("skills"));
+    }
+    for root in roots {
+        collect_commands(&root, &root, 0, &mut out);
+    }
+    for root in skills {
+        collect_skills(&root, &mut out);
+    }
+    // Одноимённое определение из каталога проекта важнее пользовательского,
+    // а пользовательское — встроенного: оставляем последнее.
+    let mut seen = HashSet::new();
+    let mut unique: Vec<Command> = Vec::new();
+    for command in out.into_iter().rev() {
+        if seen.insert(command.name.clone()) {
+            unique.push(command);
+        }
+    }
+    unique.reverse();
+    unique.sort_by(|a, b| a.name.cmp(&b.name));
+    unique
+}
+
+/// Файлы команд: `<корень>/<путь>.md`. Вложенные каталоги дают имя через `:`
+/// (`frontend/component.md` — команда `frontend:component`), как в Claude Code.
+fn collect_commands(root: &Path, dir: &Path, depth: usize, out: &mut Vec<Command>) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_commands(root, &path, depth + 1, out);
+            continue;
+        }
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let Ok(relative) = path.strip_prefix(root) else { continue };
+        let name = relative
+            .with_extension("")
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(":");
+        if name.is_empty() {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap_or_default();
+        out.push(Command { name, description: described(&text) });
+    }
+}
+
+/// Навыки: `<корень>/<имя>/SKILL.md`; вызываются в сессии как `/имя`.
+fn collect_skills(root: &Path, out: &mut Vec<Command>) {
+    let Ok(entries) = fs::read_dir(root) else { return };
+    for entry in entries.flatten() {
+        let Ok(text) = fs::read_to_string(entry.path().join("SKILL.md")) else { continue };
+        let name = front_matter(&text, "name")
+            .or_else(|| entry.file_name().to_str().map(str::to_owned))
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        out.push(Command { name, description: described(&text) });
+    }
+}
+
+/// Описание из YAML-заголовка файла: одной строкой и умеренной длины, чтобы
+/// список в панели не раздувался.
+fn described(text: &str) -> String {
+    let line = front_matter(text, "description").unwrap_or_default();
+    line.split('\n').next().unwrap_or("").trim().chars().take(200).collect()
+}
+
+/// Поле простого вида `ключ: значение` из YAML-заголовка между `---`.
+fn front_matter(text: &str, key: &str) -> Option<String> {
+    let mut lines = text.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        let Some((name, value)) = line.split_once(':') else { continue };
+        if name.trim() != key {
+            continue;
+        }
+        let value = value.trim().trim_matches(['"', '\'']);
+        // Многострочные значения (`description: |`) не разбираем: в описании
+        // списка они превратились бы в символ «|».
+        if !value.is_empty() && value != "|" && value != ">" && !value.starts_with("|") && !value.starts_with('>') {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
 /// Название и каталог сессии из хвоста (и при необходимости начала) транскрипта.
 fn tail_meta(st: &mut St, path: &Path, mtime: SystemTime) -> TailMeta {
     if let Some((cached, meta)) = st.tails.get(path) {
@@ -917,6 +1102,53 @@ fn parse_queued(line: &str, out: &mut Vec<Item>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_front_matter() {
+        let text = "---\nname: review\ndescription: \"Смотрит дифф\"\nargument-hint: [файл]\n---\n\nТело";
+        assert_eq!(front_matter(text, "description").as_deref(), Some("Смотрит дифф"));
+        assert_eq!(front_matter(text, "name").as_deref(), Some("review"));
+        assert_eq!(front_matter(text, "missing"), None);
+        assert_eq!(front_matter("без заголовка", "name"), None);
+        assert_eq!(described("---\ndescription: |\n  строка\n---"), "");
+    }
+
+    #[test]
+    fn collects_commands_and_skills() {
+        let root = std::env::temp_dir().join(format!("aipanel-commands-{}", now_ms()));
+        let home = root.join("home");
+        let project = root.join("project");
+        let write = |path: &Path, text: &str| {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(&home.join("commands/review.md"), "---\ndescription: Своя команда\n---\n");
+        write(&home.join("commands/front/review.md"), "---\ndescription: Вложенная\n---\n");
+        write(&project.join(".claude/commands/review.md"), "---\ndescription: Команда проекта\n---\n");
+        write(&project.join(".claude/commands/only-project.md"), "");
+        write(&home.join("skills/human-text/SKILL.md"), "---\nname: human-text\ndescription: Текст\n---\n");
+        write(&home.join("skills/no-front/SKILL.md"), "---\n---\n");
+        write(&home.join("skills/broken/SKILL.md"), "без заголовка");
+
+        let list = commands_for(&home, project.to_str().unwrap());
+        let find = |name: &str| list.iter().find(|c| c.name == name);
+        // Проектная команда вытесняет пользовательскую с тем же именем.
+        assert_eq!(find("review").unwrap().description, "Команда проекта");
+        assert_eq!(find("front:review").unwrap().description, "Вложенная");
+        assert_eq!(find("only-project").unwrap().description, "");
+        assert_eq!(find("human-text").unwrap().description, "Текст");
+        // Навык без name называется по каталогу; без заголовка тоже попадает.
+        assert!(find("no-front").is_some());
+        assert!(find("broken").is_some());
+        // Встроенные команды на месте, порядок — по имени.
+        assert!(find("clear").is_some() && find("compact").is_some());
+        let names: Vec<_> = list.iter().map(|c| c.name.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+        assert_eq!(names.iter().filter(|n| *n == "review").count(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn parses_queued_command_as_user_message() {

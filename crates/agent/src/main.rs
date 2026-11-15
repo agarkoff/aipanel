@@ -126,6 +126,17 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
+            ServerMsg::Commands { session } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let commands = match split_key(&session) {
+                        Ok(("claude", sid)) => me.claude.commands(sid),
+                        Ok(("opencode", sid)) => me.opencode.commands(sid).await,
+                        _ => Vec::new(),
+                    };
+                    let _ = me.out.send(AgentMsg::Commands { session, commands });
+                });
+            }
             ServerMsg::Interrupt { id, session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {

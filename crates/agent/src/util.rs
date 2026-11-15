@@ -275,6 +275,19 @@ pub fn meter(label: &str, used: f64, resets_at: Option<&str>) -> aipanel_proto::
     }
 }
 
+/// Разбирает текст, который начинается с команды `/имя`: возвращает имя без
+/// слэша и остаток строки как аргументы. `None`, если команда не в начале или
+/// вместо имени путь (`/home/user/…`): такой текст — обычное сообщение.
+pub fn slash_command(text: &str) -> Option<(&str, &str)> {
+    let rest = text.trim_start().strip_prefix('/')?;
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let name = &rest[..end];
+    if name.is_empty() || name.contains('/') || name.contains('\\') {
+        return None;
+    }
+    Some((name, rest[end..].trim()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -316,6 +329,19 @@ mod tests {
             edit_diff("a", "", "new"),
             "--- a/a\n+++ b/a\n@@ -1,0 +1,1 @@\n+new\n"
         );
+    }
+
+    #[test]
+    fn slash_commands() {
+        assert_eq!(slash_command("/init"), Some(("init", "")));
+        assert_eq!(slash_command("/review main"), Some(("review", "main")));
+        assert_eq!(slash_command("  /rea:trace_crash файл"), Some(("rea:trace_crash", "файл")));
+        assert_eq!(slash_command("/init\nчто-то"), Some(("init", "что-то")));
+        // Путь или обычный текст командой не считается.
+        assert_eq!(slash_command("/home/user/файл"), None);
+        assert_eq!(slash_command("/"), None);
+        assert_eq!(slash_command("текст"), None);
+        assert_eq!(slash_command("смотри /init"), None);
     }
 
     #[test]

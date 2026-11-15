@@ -20,9 +20,13 @@
  *     openOnFocus: true,                  // открывать при получении фокуса
  *     openAllWhenExact: false,            // клик по полю с готовым значением — весь список
  *     emptyText: 'Ничего не найдено',     // пункт-заглушка, '' — не показывать
+ *     emptyOnQueryless: false,            // заглушка и при пустом запросе («/» — все пункты)
+ *     token: (input) => ({ query, start, end }), // режим части поля: подсказки по слову под
+ *                                         // курсором, выбор заменяет только его (null — нет слова)
+ *     text: (item) => '/init ',           // что вставить вместо слова (по умолчанию value)
  *   });
  *
- * Возвращает { open, close, refresh, element, destroy }.
+ * Возвращает { open, close, isOpen, refresh, element, destroy }.
  */
 (function (global) {
   'use strict';
@@ -129,7 +133,19 @@
     let token = 0;      // отбрасывает устаревшие ответы асинхронного items()
     let alive = true;
 
-    const query = () => norm(input.value);
+    // В режиме token подсказки относятся к слову под курсором (например, к
+    // команде после `/`), а не ко всему значению поля. Если слова нет — null.
+    function word() {
+      if (!opts.token) return { query: norm(input.value), start: 0, end: input.value.length };
+      let t;
+      try {
+        t = opts.token(input);
+      } catch (e) {
+        return null;
+      }
+      if (!t) return null;
+      return { query: norm(t.query), start: t.start, end: t.end };
+    }
 
     function matches(item, q) {
       if (opts.filter) return !!opts.filter(item, q);
@@ -169,8 +185,23 @@
     function choose(n) {
       const item = rows[n];
       if (n < 0 || !item) return;
-      input.value = valueOf(item);
-      close();
+      if (opts.token) {
+        const w = word();
+        if (!w) return;
+        const text = opts.text ? opts.text(item) : valueOf(item);
+        input.value = input.value.slice(0, w.start) + text + input.value.slice(w.end);
+        const caret = w.start + text.length;
+        close();
+        try {
+          input.setSelectionRange(caret, caret);
+        } catch {}
+        // Программная вставка не порождает input: другие обработчики поля
+        // (рост высоты, сброс истории) должны узнать об изменении.
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+      } else {
+        input.value = valueOf(item);
+        close();
+      }
       if (opts.onSelect) opts.onSelect(item);
     }
 
@@ -180,13 +211,14 @@
       list.replaceChildren();
 
       if (!rows.length) {
-        if (!opts.emptyText || !q) {
+        const emptyText = typeof opts.emptyText === 'function' ? opts.emptyText() : opts.emptyText;
+        if (!emptyText || (!q && !opts.emptyOnQueryless)) {
           close();
           return;
         }
         const empty = document.createElement('div');
         empty.className = 'sg-empty';
-        empty.textContent = opts.emptyText;
+        empty.textContent = emptyText;
         list.appendChild(empty);
       } else {
         rows.forEach((item, n) => {
@@ -236,8 +268,8 @@
 
     function openList(forceAll) {
       if (!alive) return;
-      const q = query();
-      if (q.length < minChars) {
+      const w = word();
+      if (!w || w.query.length < minChars) {
         close();
         return;
       }
@@ -264,7 +296,12 @@
     // весь список, а не единственный пункт, совпавший с введённым целиком.
     function build(all, forceAll) {
       const items = Array.isArray(all) ? all : [];
-      let q = query();
+      const w = word();
+      if (!w) {
+        close();
+        return;
+      }
+      let q = w.query;
       if (forceAll && opts.openAllWhenExact && items.some((it) => norm(valueOf(it)) === q || norm(labelOf(it)) === q)) {
         q = '';
       }
@@ -287,6 +324,9 @@
     }
     function onKeyDown(e) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        // Поле в режиме слова и не на слове: стрелки принадлежат ему (история
+        // сообщений в поле ввода), список тут ни при чём.
+        if (!open && opts.token && !word()) return;
         e.preventDefault();
         if (!open) {
           openList(true);
@@ -348,6 +388,7 @@
     return {
       open: () => openList(true),
       close,
+      isOpen: () => open,
       refresh() {
         if (open) openList(false);
       },

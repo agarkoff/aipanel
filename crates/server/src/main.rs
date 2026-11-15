@@ -42,6 +42,7 @@ const MAX_TOKENS: usize = 64;
 const MAX_SESSIONS_PER_AGENT: usize = 500;
 const MAX_TEXT: usize = 200_000;
 const MAX_PROMPTS: usize = 50;
+const MAX_COMMANDS: usize = 200;
 const MAX_ANSWER: usize = 64_000;
 const PING_EVERY: Duration = Duration::from_secs(25);
 const DEAD_AFTER: Duration = Duration::from_secs(90);
@@ -503,6 +504,20 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
                 }
             }
         }
+        AgentMsg::Commands { session, mut commands } => {
+            commands.truncate(MAX_COMMANDS);
+            let text = json!({
+                "t": "commands", "agent": agent, "session": session, "commands": commands,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
         AgentMsg::Result { id, ok, error, session } => {
             // Отвечать на команду может только тот агент, которому она отправлена.
             let allowed = inner
@@ -536,6 +551,8 @@ enum BrowserMsg {
     Handoff { id: String, agent: String, session: String, tool: String },
     CancelQueued { id: String, agent: String, session: String, queue: String },
     Delete { id: String, agent: String, session: String },
+    /// Попросить у агента команды сессии для списка, который открывается по `/`.
+    Commands { agent: String, session: String },
     PromptReply {
         id: String,
         agent: String,
@@ -629,6 +646,16 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             inner.to_agent(&owner, &agent, ServerMsg::Watch { session });
         }
         BrowserMsg::Unwatch => inner.unwatch(browser),
+        BrowserMsg::Commands { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Ответ агент присылает всем, кто смотрит эту сессию: список общий.
+            inner.to_agent(&owner, &agent, ServerMsg::Commands { session });
+        }
         BrowserMsg::Send { id, agent, session, text } => {
             if text.trim().is_empty() || text.len() > MAX_TEXT {
                 reply(&inner, browser, &id, "пустое или слишком длинное сообщение");
@@ -1025,6 +1052,46 @@ mod tests {
         // Одинаковое имя агента у разных пользователей не считается чужим.
         inner.agents.insert(("bob".into(), "alice-pc".into()), entry());
         assert!(inner.browser_owns(1, "alice-pc"));
+    }
+
+    #[test]
+    fn commands_reach_only_watchers_of_that_session() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let (other, mut other_rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+            },
+        );
+        inner.browsers.insert(
+            2,
+            BrowserEntry {
+                tx: other,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s2".into())),
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Commands {
+                session: "opencode:s1".into(),
+                commands: vec![aipanel_proto::Command {
+                    name: "init".into(),
+                    description: "guided setup".into(),
+                }],
+            },
+        );
+        let msg = rx.try_recv().unwrap();
+        assert!(msg.contains("\"t\":\"commands\"") && msg.contains("init"), "{msg}");
+        assert!(other_rx.try_recv().is_err(), "список ушёл в чужую сессию");
     }
 
     #[test]

@@ -70,6 +70,17 @@ pub struct Limits {
     pub updated_at: i64,
 }
 
+/// Команда, которую принимает сессия (`/init`, `/clear`). Панель показывает их
+/// списком, когда в поле ввода набирают `/`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Command {
+    /// Имя без слэша: `init`, `review`, `rea:trace_crash`.
+    pub name: String,
+    /// Что делает команда; пусто, если инструмент не сообщил описание.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
 /// Вариант ответа в запросе opencode.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PromptOption {
@@ -188,6 +199,12 @@ pub enum AgentMsg {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         prompts: Vec<Prompt>,
     },
+    /// Команды, доступные в сессии. Приходит весь список, в том числе пустой:
+    /// панель заменяет им показанный ранее.
+    Commands {
+        session: String,
+        commands: Vec<Command>,
+    },
     Result {
         id: String,
         ok: bool,
@@ -232,4 +249,6 @@ pub enum ServerMsg {
         #[serde(default)]
         cancel: bool,
     },
+    /// Прислать команды сессии `session`: их список зависит от инструмента и каталога.
+    Commands { session: String },
 }
