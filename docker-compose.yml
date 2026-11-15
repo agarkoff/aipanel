@@ -5,9 +5,6 @@ services:
     restart: unless-stopped
     environment:
       PANEL_USERS: ${PANEL_USERS:-}
-      # Переходный режим: пока PANEL_USERS не задан, работают старые переменные.
-      PANEL_PASSWORD: ${PANEL_PASSWORD:-}
-      AGENT_TOKEN: ${AGENT_TOKEN:-}
     ports:
       # По умолчанию порт открыт только на самом хосте: снаружи панель должна быть за HTTPS-прокси.
       - "${PANEL_LISTEN:-127.0.0.1:8080}:8080"

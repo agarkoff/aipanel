@@ -1,3 +1,7 @@
 /target
 .env
+.env.*
 agent.toml
+agent*.toml
+*.log
+.local/

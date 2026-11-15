@@ -989,9 +989,6 @@ struct UserConfig {
     token: String,
 }
 
-/// Имя пользователя в переходном режиме, пока не задан `PANEL_USERS`.
-const LEGACY_USER: &str = "owner";
-
 /// Разбирает `PANEL_USERS`: JSON-объект «имя -> пароль и токен агента».
 fn parse_users(raw: &str) -> Result<BTreeMap<String, User>, String> {
     if raw.trim().is_empty() {
@@ -1033,47 +1030,13 @@ fn parse_users(raw: &str) -> Result<BTreeMap<String, User>, String> {
 }
 
 fn load_users() -> BTreeMap<String, User> {
-    let raw = std::env::var("PANEL_USERS").ok();
-    let password = std::env::var("PANEL_PASSWORD").ok();
-    let token = std::env::var("AGENT_TOKEN").ok();
-    match users_from_env(raw.as_deref(), password.as_deref(), token.as_deref()) {
-        Ok((users, legacy)) => {
-            if legacy {
-                eprintln!(
-                    "PANEL_USERS is not set; legacy PANEL_PASSWORD and AGENT_TOKEN are used as user {LEGACY_USER:?}"
-                );
-            }
-            users
-        }
+    match parse_users(&std::env::var("PANEL_USERS").unwrap_or_default()) {
+        Ok(users) => users,
         Err(e) => {
             eprintln!("{e}; refusing to start");
             std::process::exit(2);
         }
     }
-}
-
-/// Список пользователей из окружения. Пока `PANEL_USERS` не задан, поддерживается
-/// старая схема с одним паролем и одним токеном — чтобы обновление сервера не
-/// останавливало панель до правки конфигурации на хостинге.
-fn users_from_env(
-    panel_users: Option<&str>,
-    password: Option<&str>,
-    token: Option<&str>,
-) -> Result<(BTreeMap<String, User>, bool), String> {
-    if let Some(raw) = panel_users.filter(|v| !v.trim().is_empty()) {
-        return parse_users(raw).map(|users| (users, false));
-    }
-    let password = password.unwrap_or("").trim();
-    let token = token.unwrap_or("").trim();
-    if password.len() >= 8 && token.len() >= 8 {
-        let mut users: BTreeMap<String, User> = BTreeMap::new();
-        users.insert(
-            LEGACY_USER.to_owned(),
-            User { password: password.to_owned(), token: token.to_owned() },
-        );
-        return Ok((users, true));
-    }
-    parse_users(panel_users.unwrap_or_default()).map(|users| (users, false))
 }
 
 async fn shutdown_signal() {
@@ -1206,25 +1169,6 @@ mod tests {
             "bob": {"password": "bob-pass", "token": "same-token"}
         }"#;
         assert!(parse_users(same_token).is_err());
-    }
-
-    #[test]
-    fn panel_users_wins_over_legacy_credentials() {
-        let panel = r#"{"alice":{"password":"alice-pass","token":"alice-token"}}"#;
-        let (users, legacy) =
-            users_from_env(Some(panel), Some("legacy-pass"), Some("legacy-token")).unwrap();
-        assert!(!legacy);
-        assert!(users.contains_key("alice"));
-        assert!(!users.contains_key(LEGACY_USER));
-    }
-
-    #[test]
-    fn falls_back_to_legacy_credentials() {
-        let (users, legacy) =
-            users_from_env(None, Some("legacy-pass"), Some("legacy-token")).unwrap();
-        assert!(legacy);
-        assert_eq!(users[LEGACY_USER].password, "legacy-pass");
-        assert_eq!(users[LEGACY_USER].token, "legacy-token");
     }
 
     fn entry() -> AgentEntry {
