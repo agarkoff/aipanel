@@ -631,6 +631,27 @@ button .icon { display: none; }
     overflow-wrap: anywhere;
   }
   #sm-handoff { min-height: 44px; }
+  /* Идентификатор сессии на телефоне живёт в панели; копируется нажатием на всю строку. */
+  #session-id, #copy-id { display: none; }
+  .sm-id {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+    margin: 0 -8px;
+    width: calc(100% + 16px);
+    padding: 4px 8px;
+    border: 0;
+    border-radius: 8px;
+    background: none;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+  }
+  .sm-id code { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+  .sm-id svg { flex: none; color: var(--muted); }
+  .sm-id:active { background: var(--tool); }
+  .sm-id.copied svg { color: var(--idle); }
   .composer button { font-size: 22px; font-weight: 600; }
 
   .feed { padding: 12px 12px 16px; gap: 10px; }

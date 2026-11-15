@@ -414,6 +414,7 @@ function select(agent, session) {
   resetHistoryNav();
   clearTimeout(copyIdTimer);
   $('copy-id').classList.remove('copied');
+  $('sm-id').classList.remove('copied');
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
   resetPin();
   setHint('');
@@ -495,6 +496,7 @@ function renderHeader() {
   menuKey = session.key;
   $('more').hidden = false;
   $('sm-model').textContent = session.model || 'неизвестна';
+  $('sm-id-text').textContent = sessionId(session.key);
   $('sm-handoff').hidden = $('handoff').hidden;
   $('sm-handoff').textContent = target ? `Продолжить в ${targetName}` : '';
   $('sm-handoff').title = $('handoff').title;
@@ -535,15 +537,18 @@ function setHint(text, isError) {
   }
 }
 
-$('copy-id').addEventListener('click', async () => {
+// Кнопка в шапке (компьютер) и строка в панели под стрелкой (телефон) копируют одно и то же.
+async function copySessionId(btn) {
   const cur = current();
   if (!cur) return;
   const ok = await copyToClipboard(sessionId(cur.session.key));
-  $('copy-id').classList.toggle('copied', ok);
+  btn.classList.toggle('copied', ok);
   clearTimeout(copyIdTimer);
-  if (ok) copyIdTimer = setTimeout(() => $('copy-id').classList.remove('copied'), 1500);
+  if (ok) copyIdTimer = setTimeout(() => btn.classList.remove('copied'), 1500);
   setHint(ok ? 'Идентификатор скопирован.' : 'Не удалось скопировать идентификатор.', !ok);
-});
+}
+$('copy-id').addEventListener('click', () => copySessionId($('copy-id')));
+$('sm-id').addEventListener('click', () => copySessionId($('sm-id')));
 
 async function copyToClipboard(text) {
   try {
