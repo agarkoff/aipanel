@@ -71,6 +71,9 @@ struct Known {
 struct TailMeta {
     title: Option<String>,
     cwd: Option<String>,
+    /// Время последней записи транскрипта (мс от эпохи), а не mtime файла:
+    /// живой CLI «касается» файла раз в час, даже когда новых сообщений нет.
+    updated: i64,
 }
 
 #[derive(Default)]
@@ -155,8 +158,8 @@ impl Claude {
                 let mut meta = TailMeta::default();
                 if let Some(p) = &transcript {
                     if let Ok(mtime) = fs::metadata(p).and_then(|m| m.modified()) {
-                        updated = updated.max(to_ms(mtime));
                         meta = tail_meta(&mut st, p, mtime);
+                        updated = updated.max(meta.updated);
                         used.insert(p.clone());
                     }
                 }
@@ -176,9 +179,10 @@ impl Claude {
             }
         }
 
-        // Недавние закрытые сессии.
+        // Недавние закрытые сессии. Порядок и время берём по последней записи
+        // транскрипта: mtime файла сдвигается и без новых сообщений.
         let cutoff = SystemTime::now() - Duration::from_secs(self.cfg.recent_days * 86_400);
-        let mut recent: Vec<(String, PathBuf, SystemTime)> = st
+        let recent: Vec<(String, PathBuf, SystemTime)> = st
             .transcripts
             .iter()
             .filter(|(sid, _)| !known.contains_key(*sid))
@@ -187,12 +191,19 @@ impl Claude {
                 (mtime >= cutoff).then(|| (sid.clone(), p.clone(), mtime))
             })
             .collect();
-        recent.sort_by(|a, b| b.2.cmp(&a.2));
-        recent.truncate(self.cfg.max_recent);
-        for (sid, path, mtime) in recent {
-            let meta = tail_meta(&mut st, &path, mtime);
+        let mut closed: Vec<(String, PathBuf, SystemTime, TailMeta)> = recent
+            .into_iter()
+            .map(|(sid, path, mtime)| {
+                let meta = tail_meta(&mut st, &path, mtime);
+                (sid, path, mtime, meta)
+            })
+            .collect();
+        closed.sort_by_key(|(_, _, mtime, meta)| -last_update(meta, *mtime));
+        closed.truncate(self.cfg.max_recent);
+        for (sid, path, mtime, meta) in closed {
             used.insert(path.clone());
-            let cwd = meta.cwd.unwrap_or_default();
+            let updated = last_update(&meta, mtime);
+            let cwd = meta.cwd.clone().unwrap_or_default();
             let running = st.headless.contains_key(&sid) || st.launched.contains_key(&sid);
             let title = meta.title.unwrap_or_else(|| match basename(&cwd) {
                 "" => sid.chars().take(8).collect(),
@@ -205,7 +216,7 @@ impl Claude {
                 cwd: cwd.clone(),
                 status: if running { "busy" } else { "stopped" }.into(),
                 live: false,
-                updated_at: to_ms(mtime),
+                updated_at: updated,
                 delivery: if cwd.is_empty() {
                     "none"
                 } else if cfg!(windows) {
@@ -501,8 +512,11 @@ fn tail_meta(st: &mut St, path: &Path, mtime: SystemTime) -> TailMeta {
         lines.remove(0);
     }
     for line in lines.iter().rev() {
+        if meta.updated == 0 {
+            meta.updated = line_ts(line);
+        }
         scan_meta(line, &mut meta);
-        if meta.title.is_some() && meta.cwd.is_some() {
+        if meta.title.is_some() && meta.cwd.is_some() && meta.updated > 0 {
             break;
         }
     }
@@ -518,6 +532,25 @@ fn tail_meta(st: &mut St, path: &Path, mtime: SystemTime) -> TailMeta {
     }
     st.tails.insert(path.to_owned(), (mtime, meta.clone()));
     meta
+}
+
+/// Время последней записи транскрипта; mtime — запасной вариант, если в файле
+/// не нашлось ни одной записи с меткой времени.
+fn last_update(meta: &TailMeta, mtime: SystemTime) -> i64 {
+    if meta.updated > 0 {
+        meta.updated
+    } else {
+        to_ms(mtime)
+    }
+}
+
+/// Метка времени записи транскрипта: `"timestamp":"2026-11-15T03:48:19.364Z"`.
+fn line_ts(line: &str) -> i64 {
+    const KEY: &str = "\"timestamp\":\"";
+    let Some(idx) = line.find(KEY) else { return 0 };
+    let rest = &line[idx + KEY.len()..];
+    let Some(end) = rest.find('"') else { return 0 };
+    parse_iso_ms(&rest[..end])
 }
 
 fn scan_meta(line: &str, meta: &mut TailMeta) {
@@ -736,5 +769,53 @@ mod tests {
             ]
         );
         assert_eq!(items[2].tool.as_deref(), Some("Bash"));
+    }
+
+    /// Регресс: mtime транскрипта сдвигается и без новых сообщений (живой CLI
+    /// «касается» файла раз в час), поэтому время сессии считается по записям.
+    #[test]
+    fn session_time_comes_from_records() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-time-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("projects").join("p");
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&sessions).unwrap();
+        let sid = "11111111-2222-3333-4444-555555555555";
+        fs::write(
+            project.join(format!("{sid}.jsonl")),
+            "{\"type\":\"user\",\"cwd\":\"D:/p\",\"timestamp\":\"2026-11-15T03:48:19.364Z\",\
+             \"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .unwrap();
+
+        let registry = sessions.join(format!("{}.json", std::process::id()));
+        fs::write(
+            &registry,
+            format!(
+                "{{\"pid\":{},\"sessionId\":\"{sid}\",\"cwd\":\"D:/p\",\"name\":\"n\",\
+                 \"status\":\"idle\",\"statusUpdatedAt\":1794714499387}}",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        let cfg = ClaudeCfg { home: Some(dir.clone()), ..ClaudeCfg::default() };
+        let claude = Claude::new(cfg, Arc::new(Notify::new()));
+
+        // Открытая сессия: время из реестра (оно новее последней записи), а не mtime.
+        let live = claude.scan();
+        assert_eq!(live.len(), 1);
+        assert!(live[0].live);
+        assert_eq!(live[0].updated_at, 1_794_714_499_387);
+
+        // Закрытая сессия: время последней записи, хотя файл только что создан.
+        fs::remove_file(&registry).unwrap();
+        let closed = claude.scan();
+        assert_eq!(closed.len(), 1);
+        assert!(!closed[0].live);
+        assert_eq!(closed[0].updated_at, 1_794_714_499_364);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
