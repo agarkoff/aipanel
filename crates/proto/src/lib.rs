@@ -221,6 +221,12 @@ pub enum AgentMsg {
         session: String,
         models: Vec<ModelInfo>,
     },
+    /// Запрос моделей для окна «Новая сессия»: сессии ещё нет, есть только
+    /// инструмент и каталог.
+    ToolModels {
+        id: String,
+        models: Vec<ModelInfo>,
+    },
     Result {
         id: String,
         ok: bool,
@@ -345,8 +351,15 @@ pub enum ServerMsg {
     Unwatch { session: String },
     Send { id: String, session: String, text: String },
     Interrupt { id: String, session: String },
-    /// Новая сессия: `tool` — `claude` или `opencode`, `cwd` — абсолютный путь.
-    Start { id: String, tool: String, cwd: String },
+    /// Новая сессия: `tool` — `claude` или `opencode`, `cwd` — абсолютный путь,
+    /// `model` — выбранная модель (пусто — по умолчанию).
+    Start {
+        id: String,
+        tool: String,
+        cwd: String,
+        #[serde(default)]
+        model: String,
+    },
     /// Продолжить сессию `session` в другом инструменте `tool`.
     Handoff { id: String, session: String, tool: String },
     /// Убрать сообщение `queue` из очереди opencode-сессии `session`.
@@ -384,6 +397,8 @@ pub enum ServerMsg {
     ReadImage { id: String, session: String, path: String },
     /// Прислать модели, доступные сессии opencode `session`.
     Models { session: String },
+    /// Прислать модели для запуска новой сессии `tool` в каталоге `cwd`.
+    ToolModels { id: String, tool: String, cwd: String },
     /// Переключить сессию `session` на модель `provider`/`model`.
     SetModel {
         id: String,

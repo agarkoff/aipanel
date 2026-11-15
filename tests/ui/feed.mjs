@@ -86,6 +86,12 @@ const models = [
   { provider: 'ollama', id: 'qwen3.5', name: 'Qwen 3.5' },
 ];
 
+// Алиасы, которые «пришлёт агент» для новой сессии Claude Code.
+const claudeModels = [
+  { provider: 'claude', id: 'sonnet', name: 'Sonnet — на каждый день' },
+  { provider: 'claude', id: 'opus', name: 'Opus — самая мощная' },
+];
+
 // ---------------------------------------------------------------- заглушка
 
 const stub = `
@@ -94,8 +100,10 @@ const stub = `
   const items = ${JSON.stringify(items)};
   const commands = ${JSON.stringify(commands)};
   const models = ${JSON.stringify(models)};
+  const claudeModels = ${JSON.stringify(claudeModels)};
   window.__sent = [];
   window.__setModels = [];
+  window.__starts = [];
   class FakeSocket {
     static OPEN = 1;
     constructor() {
@@ -114,6 +122,12 @@ const stub = `
         setTimeout(() => this.emit({ t: 'commands', agent: msg.agent, session: msg.session, commands }), 0);
       } else if (msg.t === 'models') {
         setTimeout(() => this.emit({ t: 'models', agent: msg.agent, session: msg.session, models }), 0);
+      } else if (msg.t === 'tool_models') {
+        const list = msg.tool === 'claude' ? claudeModels : models;
+        setTimeout(() => this.emit({ t: 'tool_models', id: msg.id, models: list }), 0);
+      } else if (msg.t === 'start') {
+        window.__starts.push(msg);
+        setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: false, error: 'тест' }), 0);
       } else if (msg.t === 'send') {
         window.__sent.push(msg);
       } else if (msg.t === 'set_model') {
@@ -573,6 +587,88 @@ try {
   check('окно закрылось после смены модели', switched && !afterModel.open && afterModel.text === '', afterModel);
   const modelHint = await evaluate(`document.getElementById('hint').textContent`);
   check('панель сообщила о выбранной модели', modelHint.includes('GPT 6'), modelHint);
+
+  // ------------------------------------------------------------ новая сессия
+  // В окне запуска модель выбирается списком для выбранного инструмента.
+
+  await evaluate(`document.getElementById('new-session').click()`);
+  await waitFor(`document.getElementById('launch').open`);
+  const launchInit = await evaluate(`({
+    tool: document.getElementById('launch-tool').value,
+    cwd: document.getElementById('launch-cwd').value,
+    model: document.getElementById('launch-model').value,
+  })`);
+  check('окно запуска открылось с инструментом сессии', launchInit.tool === 'opencode', launchInit);
+  check('модель по умолчанию пустая', launchInit.model === '', launchInit);
+
+  // Список моделей opencode приходит от агента и открывается при вводе.
+  await evaluate(`(() => {
+    const m = document.getElementById('launch-model');
+    m.focus();
+    m.value = 'deep';
+    m.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const launchListed = await waitFor(`(() => {
+    const l = document.querySelector('#launch-model ~ .sg-list');
+    return l && !l.hidden && l.querySelectorAll('.sg-item').length === 1;
+  })()`);
+  const launchItem = await evaluate(`(() => {
+    const l = document.querySelector('#launch-model ~ .sg-list');
+    const item = l.querySelector('.sg-item');
+    return { name: item.querySelector('b').textContent, hint: item.querySelector('small')?.textContent || '' };
+  })()`);
+  check(
+    'в окне запуска есть модели opencode',
+    launchListed && launchItem.name === 'DeepSeek V4.1 Flash' && launchItem.hint === 'opencode-go/deepseek-v4.1-flash',
+    launchItem,
+  );
+
+  await evaluate(`document.querySelector('#launch-model ~ .sg-list .sg-item').click()`);
+  await sleep(100);
+  const modelValue = await evaluate(`document.getElementById('launch-model').value`);
+  check('выбор из списка подставляет провайдер/модель', modelValue === 'opencode-go/deepseek-v4.1-flash', modelValue);
+
+  await evaluate(`document.getElementById('launch-form').requestSubmit()`);
+  await waitFor(`window.__starts.length === 1`);
+  const start = await evaluate(`window.__starts[0]`);
+  check(
+    'запуск уходит с выбранной моделью',
+    start.tool === 'opencode' && start.cwd.endsWith('ui-test') && start.model === 'opencode-go/deepseek-v4.1-flash',
+    start,
+  );
+  await evaluate(`document.getElementById('launch').close()`);
+  await sleep(100);
+
+  // Claude Code: список — алиасы, которые принимает --model.
+  await evaluate(`document.getElementById('new-session').click()`);
+  await waitFor(`document.getElementById('launch').open`);
+  await evaluate(`(() => {
+    const t = document.getElementById('launch-tool');
+    t.value = 'claude';
+    t.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  const claudeDefault = await evaluate(`document.getElementById('launch-model').value`);
+  check('при смене инструмента своя модель (у Claude Code пустая)', claudeDefault === '', claudeDefault);
+  await evaluate(`(() => {
+    const m = document.getElementById('launch-model');
+    m.focus();
+    m.value = 'son';
+    m.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const claudeListed = await waitFor(`(() => {
+    const l = document.querySelector('#launch-model ~ .sg-list');
+    return l && !l.hidden && l.querySelectorAll('.sg-item').length === 1;
+  })()`);
+  await evaluate(`document.querySelector('#launch-model ~ .sg-list .sg-item').click()`);
+  await sleep(100);
+  const claudeValue = await evaluate(`document.getElementById('launch-model').value`);
+  check(
+    'у Claude Code подставляется алиас модели',
+    claudeListed && claudeValue === 'sonnet',
+    { claudeListed, claudeValue },
+  );
+  await evaluate(`document.getElementById('launch').close()`);
+  await sleep(100);
 
   // На телефоне список не должен уезжать за экран: поле ввода у нижней кромки,
   // поэтому список раскрывается вверх.

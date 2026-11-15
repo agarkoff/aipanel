@@ -53,6 +53,11 @@ let scrollHoldUntil = 0;
 let launchId = null;
 let launchRequest = null;
 let pendingLaunch = null;
+// Модели для окна «Новая сессия»: список по «компьютер + инструмент».
+const launchModelCache = new Map();
+let launchModelsRequest = null; // { id, key } — ждём ответ для этой пары
+// Последняя выбранная в окне запуска модель, отдельно для каждого инструмента.
+const launchModelChoice = { claude: '', opencode: '' };
 // Продолжение сессии в другом инструменте: id команды и её параметры.
 let handoffId = null;
 let handoffRequest = null;
@@ -157,6 +162,8 @@ function connect() {
     commandsAsked.clear();
     sessionModels.clear();
     modelsAsked.clear();
+    launchModelCache.clear();
+    launchModelsRequest = null;
     if (selected) send({ t: 'watch', agent: selected.agent, session: selected.session });
   };
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
@@ -205,6 +212,13 @@ function onMessage(msg) {
     if (modelsSession && msg.agent === modelsSession.agent && msg.session === modelsSession.session) {
       renderModels(modelsSession);
     }
+  } else if (msg.t === 'tool_models') {
+    const req = launchModelsRequest;
+    if (!req || msg.id !== req.id) return;
+    launchModelsRequest = null;
+    launchModelCache.set(req.key, Array.isArray(msg.models) ? msg.models : []);
+    // Окно запуска открыто на этой же паре компьютер + инструмент.
+    if ($('launch').open && launchModelKey() === req.key) launchModelSuggest.refresh();
   } else if (msg.t === 'result') {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
@@ -1594,6 +1608,61 @@ const cwdSuggest = Suggest.attach($('launch-cwd'), {
   emptyText: 'Такого каталога ещё не было. Можно ввести путь вручную.',
 });
 
+// Модель для новой сессии: у opencode — его список (провайдер/модель), у
+// Claude Code — алиасы, которые принимает `--model`. Поле можно заполнить и
+// вручную: список только подсказывает.
+const launchModelSuggest = Suggest.attach($('launch-model'), {
+  items: launchModelItems,
+  openOnFocus: false,
+  openAllWhenExact: true,
+});
+
+function launchModelKey() {
+  return `${$('launch-agent').value}\n${$('launch-tool').value}`;
+}
+
+function launchModelItems() {
+  const tool = $('launch-tool').value;
+  const list = launchModelCache.get(launchModelKey()) || [];
+  const items = [
+    {
+      value: '',
+      label: tool === 'claude' ? 'По умолчанию' : 'Как в окне (по умолчанию)',
+      hint: '',
+    },
+  ];
+  for (const m of list) {
+    items.push(
+      tool === 'claude'
+        ? { value: m.id, label: m.name, hint: `claude --model ${m.id}` }
+        : { value: `${m.provider}/${m.id}`, label: m.name, hint: `${m.provider}/${m.id}` },
+    );
+  }
+  return items;
+}
+
+function requestLaunchModels() {
+  const agent = $('launch-agent').value;
+  const tool = $('launch-tool').value;
+  const key = launchModelKey();
+  if (!agent || launchModelCache.has(key)) return;
+  if (launchModelsRequest && launchModelsRequest.key === key) return;
+  const id = String(++cmdSeq);
+  if (!send({ t: 'tool_models', id, agent, tool, cwd: $('launch-cwd').value.trim() })) return;
+  launchModelsRequest = { id, key };
+}
+
+// Поле модели при открытии окна и смене инструмента: своё значение у каждого
+// инструмента, список подсказок — для выбранного компьютера и инструмента.
+function syncLaunchModel() {
+  const tool = $('launch-tool').value;
+  $('launch-model').value = launchModelChoice[tool] || '';
+  $('launch-model').placeholder =
+    tool === 'claude' ? 'По умолчанию (например, sonnet)' : 'Как в окне (провайдер/модель)';
+  launchModelSuggest.close();
+  requestLaunchModels();
+}
+
 function openLaunch() {
   const online = agents.filter((a) => a.online);
   if (!online.length) {
@@ -1610,6 +1679,7 @@ function openLaunch() {
   }
   // Каталог открытой сессии — самый вероятный выбор, иначе самый свежий из списка.
   $('launch-cwd').value = sameAgent && cur.session.cwd ? cur.session.cwd : (dirs[0]?.cwd ?? '');
+  syncLaunchModel();
   $('launch-ok').disabled = false;
   launchHint('');
   $('launch').showModal();
@@ -1647,13 +1717,19 @@ $('launch-agent').addEventListener('change', () => {
   const wasSuggested = !cwd || prev.dirs.some((d) => normCwd(d.cwd) === normCwd(cwd));
   const dirs = fillLaunchDirs();
   if (wasSuggested) $('launch-cwd').value = dirs[0]?.cwd ?? '';
+  // У другого компьютера свой набор моделей.
+  launchModelSuggest.close();
+  requestLaunchModels();
 });
+
+$('launch-tool').addEventListener('change', syncLaunchModel);
 
 $('launch-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const agent = $('launch-agent').value;
   const tool = $('launch-tool').value;
   const cwd = $('launch-cwd').value.trim();
+  const model = $('launch-model').value.trim();
   if (!agent) {
     launchHint('Нет подключённых агентов.', true);
     return;
@@ -1666,10 +1742,11 @@ $('launch-form').addEventListener('submit', (e) => {
   const a = agents.find((x) => x.name === agent);
   const keys = new Set(a ? a.sessions.map((s) => s.key) : []);
   const id = String(++cmdSeq);
-  if (!send({ t: 'start', id, agent, tool, cwd })) {
+  if (!send({ t: 'start', id, agent, tool, cwd, model })) {
     launchHint('Нет соединения с сервером.', true);
     return;
   }
+  launchModelChoice[tool] = model;
   launchId = id;
   launchRequest = { agent, tool, cwd, keys };
   $('launch-ok').disabled = true;

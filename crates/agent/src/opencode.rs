@@ -300,11 +300,17 @@ impl OpenCode {
     }
 
     /// Модели, которые можно выбрать в сессии: их отдаёт opencode для её каталога.
-    /// Список большой (все подключённые провайдеры), поэтому в панель уходят
-    /// только провайдер, id и название.
     pub async fn models(&self, id: &str) -> Vec<ModelInfo> {
         let cwd = self.session_dir(id).await;
-        let query: &[(&str, &str)] = if cwd.is_empty() { &[] } else { &[("location[directory]", cwd.as_str())] };
+        self.models_at(&cwd).await
+    }
+
+    /// Модели для каталога: нужны и сессии, и окну «Новая сессия», где сессии
+    /// ещё нет. Список большой (все подключённые провайдеры), поэтому в панель
+    /// уходят только провайдер, id и название.
+    pub async fn models_at(&self, cwd: &str) -> Vec<ModelInfo> {
+        let cwd = cwd.trim();
+        let query: &[(&str, &str)] = if cwd.is_empty() { &[] } else { &[("location[directory]", cwd)] };
         let Ok(v) = self.call_with(reqwest::Method::GET, "/api/model", query, None).await else {
             return Vec::new();
         };
@@ -581,13 +587,19 @@ impl OpenCode {
 
     /// Создаёт новую сессию opencode в каталоге `cwd` и открывает её в окне.
     /// Сессию создаёт API, поэтому она сразу известна панели даже без окна.
-    pub async fn start(&self, cwd: &str) -> Result<Option<String>, String> {
-        self.start_with_prompt(cwd, None).await
+    pub async fn start(&self, cwd: &str, model: &str) -> Result<Option<String>, String> {
+        self.start_with_prompt(cwd, None, model).await
     }
 
-    /// Открывает новую сессию; `prompt` уходит её первым сообщением. В Windows
+    /// Открывает новую сессию; `prompt` уходит её первым сообщением, `model` —
+    /// `провайдер/модель` для новой сессии (пусто — модель окна). В Windows
     /// текст передаётся аргументом окна, иначе — через API.
-    pub async fn start_with_prompt(&self, cwd: &str, prompt: Option<&str>) -> Result<Option<String>, String> {
+    pub async fn start_with_prompt(
+        &self,
+        cwd: &str,
+        prompt: Option<&str>,
+        model: &str,
+    ) -> Result<Option<String>, String> {
         crate::util::session_dir(cwd)?;
         if let Some(text) = prompt {
             if text.encode_utf16().count() > crate::claude::MAX_ARG_UTF16 {
@@ -597,6 +609,7 @@ impl OpenCode {
                 ));
             }
         }
+        let chosen = split_model(model)?;
         let v = self
             .call(
                 reqwest::Method::POST,
@@ -609,6 +622,13 @@ impl OpenCode {
             .or_else(|| v["id"].as_str())
             .ok_or("opencode не вернул идентификатор сессии")?
             .to_owned();
+        // Модель ставим до окна: оно показывает сессию уже с выбранной моделью.
+        if let Some((provider, model)) = chosen {
+            if let Err(e) = self.set_model(&id, provider, model).await {
+                let _ = self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None).await;
+                return Err(e);
+            }
+        }
         if cfg!(windows) {
             let bin = crate::util::resolve_exe(&self.cfg.bin);
             self.launched.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Instant::now());
@@ -624,7 +644,10 @@ impl OpenCode {
                 return Err(e);
             }
         } else if let Some(text) = prompt {
-            self.apply_model(&id).await;
+            // Явно выбранную модель не перебиваем моделью окна.
+            if chosen.is_none() {
+                self.apply_model(&id).await;
+            }
             self.call(reqwest::Method::POST, &format!("/api/session/{id}/prompt"), Some(json!({ "text": text })))
                 .await?;
         }
@@ -1318,6 +1341,27 @@ fn models_from(v: &Value) -> Vec<ModelInfo> {
     out
 }
 
+/// Разбирает `провайдер/модель` из панели. Пусто — модель не выбрана.
+fn split_model(model: &str) -> Result<Option<(&str, &str)>, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Ok(None);
+    }
+    let Some((provider, id)) = model.split_once('/') else {
+        return Err("модель opencode указывается как провайдер/модель".into());
+    };
+    let ok = !provider.is_empty()
+        && !id.is_empty()
+        && model.len() <= 200
+        && model
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '@' | '~'));
+    if !ok {
+        return Err(format!("некорректная модель: {model}"));
+    }
+    Ok(Some((provider, id)))
+}
+
 /// Запоминает модель как последнюю выбранную в окне opencode: при `model = "auto"`
 /// агент берёт её для следующих сообщений, и без этого выбор из панели откатился бы
 /// на модель из окна.
@@ -1387,6 +1431,19 @@ mod tests {
         insert_recent(&mut doc, "n", "y");
         assert_eq!(doc["recent"][0], json!({"providerID": "n", "modelID": "y"}));
         assert_eq!(doc["recent"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn splits_model() {
+        assert_eq!(split_model(""), Ok(None));
+        assert_eq!(
+            split_model(" opencode-go/deepseek-v4.1-flash "),
+            Ok(Some(("opencode-go", "deepseek-v4.1-flash")))
+        );
+        assert_eq!(split_model("openrouter/deepseek/x"), Ok(Some(("openrouter", "deepseek/x"))));
+        assert!(split_model("deepseek").is_err());
+        assert!(split_model("/x").is_err());
+        assert!(split_model("a/b c").is_err());
     }
 
     #[test]

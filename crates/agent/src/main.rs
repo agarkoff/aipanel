@@ -173,12 +173,23 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
-            ServerMsg::Start { id, tool, cwd } => {
+            ServerMsg::ToolModels { id, tool, cwd } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let models = match tool.as_str() {
+                        "claude" => crate::claude::launch_models(),
+                        "opencode" => me.opencode.models_at(&cwd).await,
+                        _ => Vec::new(),
+                    };
+                    let _ = me.out.send(AgentMsg::ToolModels { id, models });
+                });
+            }
+            ServerMsg::Start { id, tool, cwd, model } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
                     let result = match tool.as_str() {
-                        "claude" => me.claude.start(&cwd),
-                        "opencode" => me.opencode.start(&cwd).await,
+                        "claude" => me.claude.start(&cwd, &model),
+                        "opencode" => me.opencode.start(&cwd, &model).await,
                         _ => Err("неизвестный тип сессии".into()),
                     };
                     me.finish(id, result);
@@ -287,8 +298,10 @@ impl Agent {
             _ => return Err("неизвестный тип сессии".into()),
         };
         match tool {
-            "claude" if self.cfg.claude.enabled => self.claude.start_with_prompt(&cwd, Some(&text)),
-            "opencode" if self.cfg.opencode.enabled => self.opencode.start_with_prompt(&cwd, Some(&text)).await,
+            "claude" if self.cfg.claude.enabled => self.claude.start_with_prompt(&cwd, Some(&text), ""),
+            "opencode" if self.cfg.opencode.enabled => {
+                self.opencode.start_with_prompt(&cwd, Some(&text), "").await
+            }
             "claude" | "opencode" => Err(format!("инструмент {tool} выключен в agent.toml")),
             _ => Err("неизвестный тип сессии".into()),
         }

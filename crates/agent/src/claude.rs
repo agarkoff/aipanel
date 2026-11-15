@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Command, Item, Limits, SessionInfo};
+use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, SessionInfo};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -510,8 +510,8 @@ impl Claude {
 
     /// Открывает новую сессию Claude Code в каталоге `cwd`. Идентификатор появится
     /// в списке после того, как Claude Code запишет реестр сессий.
-    pub fn start(&self, cwd: &str) -> Result<Option<String>, String> {
-        self.start_with_prompt(cwd, None)
+    pub fn start(&self, cwd: &str, model: &str) -> Result<Option<String>, String> {
+        self.start_with_prompt(cwd, None, model)
     }
 
     /// Файл настроек Claude Code (`~/.claude.json`) лежит рядом с каталогом данных.
@@ -553,13 +553,18 @@ impl Claude {
         fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
     }
 
-    /// Открывает новую сессию; `prompt` уходит её первым сообщением.
-    pub fn start_with_prompt(&self, cwd: &str, prompt: Option<&str>) -> Result<Option<String>, String> {
+    /// Открывает новую сессию; `prompt` уходит её первым сообщением, `model` —
+    /// алиас или полное имя для `--model` (пусто — модель по умолчанию).
+    pub fn start_with_prompt(&self, cwd: &str, prompt: Option<&str>, model: &str) -> Result<Option<String>, String> {
         let dir = crate::util::session_dir(cwd)?;
         if self.cfg.trust_dirs {
             self.trust_dir(&dir.to_string_lossy())?;
         }
         let mut args = Vec::new();
+        if let Some(model) = model_arg(model)? {
+            args.push("--model".into());
+            args.push(model);
+        }
         if let Some(text) = prompt {
             if text.encode_utf16().count() > MAX_ARG_UTF16 {
                 return Err(format!("сообщение слишком длинное для запуска окна (до {MAX_ARG_UTF16} символов)"));
@@ -699,6 +704,40 @@ impl Claude {
         });
         Ok(())
     }
+}
+
+/// Модели для нового окна Claude Code. CLI принимает алиасы (`/model` и
+/// `--model`), а полные имена зависят от подписки и версии — поэтому списком
+/// идут стабильные алиасы.
+pub fn launch_models() -> Vec<ModelInfo> {
+    const MODELS: &[(&str, &str)] = &[
+        ("fable", "Fable"),
+        ("opus", "Opus — самая мощная"),
+        ("sonnet", "Sonnet — на каждый день"),
+        ("haiku", "Haiku — быстрая"),
+    ];
+    MODELS
+        .iter()
+        .map(|(id, name)| ModelInfo { provider: "claude".into(), id: (*id).into(), name: (*name).into() })
+        .collect()
+}
+
+/// Проверяет модель для `--model`: пусто — флага нет, иначе значение не должно
+/// начинаться с «-» или содержать пробелы, иначе оно станет ещё одним параметром.
+fn model_arg(model: &str) -> Result<Option<String>, String> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Ok(None);
+    }
+    let ok = model.len() <= 100
+        && !model.starts_with('-')
+        && model
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']'));
+    if !ok {
+        return Err(format!("некорректная модель: {model}"));
+    }
+    Ok(Some(model.to_owned()))
 }
 
 /// Встроенные команды Claude Code: собственных файлов у них нет, а меню TUI из
@@ -1146,6 +1185,17 @@ fn parse_queued(line: &str, out: &mut Vec<Item>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_models_are_aliases() {
+        let list = launch_models();
+        assert!(list.iter().any(|m| m.id == "sonnet" && m.provider == "claude"));
+        assert!(model_arg("").unwrap().is_none());
+        assert_eq!(model_arg(" sonnet ").unwrap().as_deref(), Some("sonnet"));
+        assert_eq!(model_arg("sonnet[1m]").unwrap().as_deref(), Some("sonnet[1m]"));
+        assert!(model_arg("--help").is_err());
+        assert!(model_arg("two words").is_err());
+    }
 
     #[test]
     fn reads_front_matter() {
