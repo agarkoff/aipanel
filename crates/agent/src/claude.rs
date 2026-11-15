@@ -24,12 +24,15 @@ use tokio::{
 
 use crate::{
     config::ClaudeCfg,
+    handoff,
     util::{basename, now_ms, parse_iso_ms, to_ms, tool_input, truncate},
 };
 
 const TAIL_META_BYTES: u64 = 256 * 1024;
 const HEAD_META_BYTES: u64 = 64 * 1024;
 const HISTORY_BYTES: u64 = 4 * 1024 * 1024;
+/// Для выжимки достаточно хвоста транскрипта: он содержит последние реплики.
+const HANDOFF_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_CHUNK: u64 = 32 * 1024 * 1024;
 const HISTORY_ITEMS: usize = 200;
 const TEXT_LIMIT: usize = 20_000;
@@ -283,11 +286,57 @@ impl Claude {
         }
     }
 
+    /// Каталог и выжимка из транскрипта для продолжения в другом инструменте.
+    pub fn handoff_source(&self, sid: &str) -> Result<(String, String), String> {
+        let known = self.lock().known.get(sid).cloned();
+        let path = known
+            .as_ref()
+            .and_then(|k| k.path.clone())
+            .or_else(|| self.find_path(sid))
+            .ok_or("транскрипт сессии не найден")?;
+        let cwd = match known.as_ref().map(|k| k.cwd.clone()).filter(|c| !c.is_empty()) {
+            Some(cwd) => cwd,
+            None => {
+                let mtime = fs::metadata(&path).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+                tail_meta(&mut self.lock(), &path, mtime).cwd.unwrap_or_default()
+            }
+        };
+        if cwd.is_empty() {
+            return Err("каталог сессии неизвестен".into());
+        }
+        let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        let start = len.saturating_sub(HANDOFF_BYTES);
+        let (items, _) = read_items(&path, start, len, start > 0);
+        let messages: Vec<(String, String)> = items
+            .into_iter()
+            .filter(|i| i.kind == "text" && (i.role == "user" || i.role == "assistant"))
+            .map(|i| (i.role, i.text))
+            .collect();
+        if messages.is_empty() {
+            return Err("в сессии нет текста для переноса".into());
+        }
+        Ok((cwd.clone(), handoff::build("Claude Code", &cwd, &messages)))
+    }
+
     /// Открывает новую сессию Claude Code в каталоге `cwd`. Идентификатор появится
     /// в списке после того, как Claude Code запишет реестр сессий.
     pub fn start(&self, cwd: &str) -> Result<Option<String>, String> {
+        self.start_with_prompt(cwd, None)
+    }
+
+    /// Открывает новую сессию; `prompt` уходит её первым сообщением.
+    pub fn start_with_prompt(&self, cwd: &str, prompt: Option<&str>) -> Result<Option<String>, String> {
         crate::util::session_dir(cwd)?;
-        crate::platform::spawn_window(&self.cfg.bin, &[], cwd)?;
+        let mut args = Vec::new();
+        if let Some(text) = prompt {
+            if text.encode_utf16().count() > MAX_ARG_UTF16 {
+                return Err(format!("сообщение слишком длинное для запуска окна (до {MAX_ARG_UTF16} символов)"));
+            }
+            // `--` нужен, чтобы текст, начинающийся с «-», не приняли за параметр.
+            args.push("--".into());
+            args.push(text.to_owned());
+        }
+        crate::platform::spawn_window(&self.cfg.bin, &args, cwd)?;
         self.rescan.notify_one();
         Ok(None)
     }

@@ -34,6 +34,9 @@ const nodes = new Map(); // id элемента ленты -> DOM-узел
 let launchId = null;
 let launchRequest = null;
 let pendingLaunch = null;
+// Продолжение сессии в другом инструменте: id команды и её параметры.
+let handoffId = null;
+let handoffRequest = null;
 let copyIdTimer = null;
 // Каталоги, показанные в подсказках для текущего выбранного компьютера.
 let launchDirCache = { agent: '', dirs: [] };
@@ -121,6 +124,7 @@ function onMessage(msg) {
     applyHistory(msg);
   } else if (msg.t === 'result') {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
+    else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
     else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
   }
 }
@@ -234,6 +238,7 @@ function renderHeader() {
     $('session-id').hidden = true;
     $('copy-id').hidden = true;
     badge.hidden = true;
+    $('handoff').hidden = true;
     $('interrupt').hidden = true;
     $('composer').hidden = true;
     return;
@@ -249,6 +254,17 @@ function renderHeader() {
   badge.textContent = agent.online ? STATUS[session.status] || session.status : 'агент не в сети';
   const busy = agent.online && (session.status === 'busy' || session.status === 'shell');
   $('interrupt').hidden = !busy;
+  const target = session.tool === 'claude' ? 'opencode' : session.tool === 'opencode' ? 'claude' : null;
+  const targetName = target === 'claude' ? 'Claude Code' : 'opencode';
+  $('handoff').hidden = !agent.online || !target;
+  if (target) {
+    $('handoff').querySelector('.label').textContent = `В ${targetName}`;
+    $('handoff').setAttribute('aria-label', `Продолжить в ${targetName}`);
+    $('handoff').title =
+      `Продолжить в ${targetName}: в этом каталоге откроется новая сессия ` +
+      'и получит выжимку из переписки этой сессии';
+  }
+  $('handoff').disabled = handoffId !== null;
   const canSend = agent.online && session.delivery !== 'none';
   $('composer').hidden = false;
   $('text').disabled = !canSend;
@@ -619,6 +635,48 @@ function checkPendingLaunch() {
     pendingLaunch = null;
     setHint('Новая сессия не появилась в списке. Откройте её вручную в терминале.', true);
   }
+}
+
+// ------------------------------------------------------------ продолжение сессии
+
+$('handoff').addEventListener('click', () => {
+  const cur = current();
+  if (!cur || handoffId !== null) return;
+  const tool = cur.session.tool === 'claude' ? 'opencode' : 'claude';
+  const name = tool === 'claude' ? 'Claude Code' : 'opencode';
+  const id = String(++cmdSeq);
+  // Снимок ключей: новая сессия ищется как появившаяся в этом каталоге.
+  const keys = new Set(cur.agent.sessions.map((s) => s.key));
+  if (!send({ t: 'handoff', id, agent: cur.agent.name, session: cur.session.key, tool })) {
+    setHint('Нет соединения с сервером.', true);
+    return;
+  }
+  handoffId = id;
+  handoffRequest = { agent: cur.agent.name, tool, cwd: cur.session.cwd, keys };
+  $('handoff').disabled = true;
+  setHint(`Собираем выжимку и открываем сессию ${name} в этом каталоге…`);
+});
+
+function onHandoffResult(msg) {
+  const req = handoffRequest;
+  handoffId = null;
+  handoffRequest = null;
+  $('handoff').disabled = false;
+  if (!req) return;
+  if (!msg.ok) {
+    setHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
+    return;
+  }
+  pendingLaunch = {
+    agent: req.agent,
+    tool: req.tool,
+    cwd: req.cwd,
+    key: msg.session || null,
+    keys: req.keys,
+    until: Date.now() + 90000,
+  };
+  setHint(req.tool === 'claude' ? 'Открываем окно Claude Code…' : 'Открываем окно opencode…');
+  checkPendingLaunch();
 }
 
 // ------------------------------------------------------------ команды

@@ -16,6 +16,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     config::OpenCodeCfg,
+    handoff,
     util::{basename, tool_input, truncate},
 };
 
@@ -222,10 +223,62 @@ impl OpenCode {
         }
     }
 
+    /// Каталог и выжимка из ленты для продолжения в другом инструменте.
+    pub async fn handoff_source(&self, id: &str) -> Result<(String, String), String> {
+        let info = self.get(&format!("/api/session/{id}")).await?;
+        let cwd = info["data"]["location"]["directory"]
+            .as_str()
+            .or(info["location"]["directory"].as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if cwd.is_empty() {
+            return Err("каталог сессии неизвестен".into());
+        }
+        let v = self.get(&format!("/api/session/{id}/message?limit=100&order=desc")).await?;
+        let mut messages: Vec<(String, String)> = Vec::new();
+        for m in v["data"].as_array().into_iter().flatten().rev() {
+            match m["type"].as_str() {
+                Some("user") => messages.push((
+                    "user".into(),
+                    m["text"].as_str().unwrap_or_default().to_owned(),
+                )),
+                Some("assistant") => {
+                    for c in m["content"].as_array().into_iter().flatten() {
+                        if c["type"].as_str() == Some("text") {
+                            messages.push((
+                                "assistant".into(),
+                                c["text"].as_str().unwrap_or_default().to_owned(),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if messages.iter().all(|(_, text)| text.trim().is_empty()) {
+            return Err("в сессии нет текста для переноса".into());
+        }
+        Ok((cwd.clone(), handoff::build("opencode", &cwd, &messages)))
+    }
+
     /// Создаёт новую сессию opencode в каталоге `cwd` и открывает её в окне.
     /// Сессию создаёт API, поэтому она сразу известна панели даже без окна.
     pub async fn start(&self, cwd: &str) -> Result<Option<String>, String> {
+        self.start_with_prompt(cwd, None).await
+    }
+
+    /// Открывает новую сессию; `prompt` уходит её первым сообщением. В Windows
+    /// текст передаётся аргументом окна, иначе — через API.
+    pub async fn start_with_prompt(&self, cwd: &str, prompt: Option<&str>) -> Result<Option<String>, String> {
         crate::util::session_dir(cwd)?;
+        if let Some(text) = prompt {
+            if text.encode_utf16().count() > crate::claude::MAX_ARG_UTF16 {
+                return Err(format!(
+                    "сообщение слишком длинное для запуска окна (до {} символов)",
+                    crate::claude::MAX_ARG_UTF16
+                ));
+            }
+        }
         let v = self
             .call(
                 reqwest::Method::POST,
@@ -241,13 +294,21 @@ impl OpenCode {
         if cfg!(windows) {
             let bin = crate::util::resolve_exe(&self.cfg.bin);
             self.launched.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Instant::now());
-            let args = vec!["-s".to_owned(), id.clone()];
+            let mut args = vec!["-s".to_owned(), id.clone()];
+            // Форма `--prompt=<текст>` не даёт принять текст, начинающийся с «-», за параметр.
+            if let Some(text) = prompt {
+                args.push(format!("--prompt={text}"));
+            }
             if let Err(e) = crate::platform::spawn_window(&bin, &args, cwd) {
                 self.launched.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
                 // Сессия без окна пользователю не нужна: убираем её из списка opencode.
                 let _ = self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None).await;
                 return Err(e);
             }
+        } else if let Some(text) = prompt {
+            self.apply_model(&id).await;
+            self.call(reqwest::Method::POST, &format!("/api/session/{id}/prompt"), Some(json!({ "text": text })))
+                .await?;
         }
         Ok(Some(format!("opencode:{id}")))
     }

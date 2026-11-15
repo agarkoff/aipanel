@@ -3,6 +3,7 @@
 
 mod claude;
 mod config;
+mod handoff;
 mod install;
 mod opencode;
 mod platform;
@@ -122,6 +123,33 @@ impl Agent {
                     me.finish(id, result);
                 });
             }
+            ServerMsg::Handoff { id, session, tool } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result = me.handoff(&session, &tool).await;
+                    me.finish(id, result);
+                });
+            }
+        }
+    }
+
+    /// Продолжает сессию в другом инструменте: собирает выжимку из её переписки
+    /// и открывает новую сессию в том же каталоге.
+    async fn handoff(&self, session: &str, tool: &str) -> Result<Option<String>, String> {
+        let (source, id) = split_key(session)?;
+        if source == tool {
+            return Err("сессия уже открыта в этом инструменте".into());
+        }
+        let (cwd, text) = match source {
+            "claude" => self.claude.handoff_source(id)?,
+            "opencode" => self.opencode.handoff_source(id).await?,
+            _ => return Err("неизвестный тип сессии".into()),
+        };
+        match tool {
+            "claude" if self.cfg.claude.enabled => self.claude.start_with_prompt(&cwd, Some(&text)),
+            "opencode" if self.cfg.opencode.enabled => self.opencode.start_with_prompt(&cwd, Some(&text)).await,
+            "claude" | "opencode" => Err(format!("инструмент {tool} выключен в agent.toml")),
+            _ => Err("неизвестный тип сессии".into()),
         }
     }
 

@@ -334,7 +334,7 @@ button .icon { display: none; }
   /* На узком экране кнопки действий — круглые значки, подписи остаются в aria-label. */
   button .icon { display: inline; }
   button .label { display: none; }
-  #interrupt, .composer button {
+  #interrupt, #handoff, .composer button {
     flex: none;
     width: 44px;
     height: 44px;
@@ -343,7 +343,7 @@ button .icon { display: none; }
     border-radius: 50%;
     line-height: 1;
   }
-  #interrupt { font-size: 16px; }
+  #interrupt, #handoff { font-size: 16px; }
   .composer button { font-size: 22px; font-weight: 600; }
 
   .feed { padding: 12px 12px 16px; gap: 10px; }

@@ -409,6 +409,7 @@ enum BrowserMsg {
     Send { id: String, agent: String, session: String, text: String },
     Interrupt { id: String, agent: String, session: String },
     Start { id: String, agent: String, tool: String, cwd: String },
+    Handoff { id: String, agent: String, session: String, tool: String },
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -505,6 +506,14 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             }
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Start { id: cmd, tool, cwd });
+        }
+        BrowserMsg::Handoff { id, agent, session, tool } => {
+            if !matches!(tool.as_str(), "claude" | "opencode") {
+                reply(&inner, browser, &id, "неизвестный тип сессии");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Handoff { id: cmd, session, tool });
         }
     }
 }
