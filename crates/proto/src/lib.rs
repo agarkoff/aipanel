@@ -203,6 +203,17 @@ pub enum AgentMsg {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         drop: Vec<String>,
     },
+    /// Более ранние элементы ленты сессии, догруженные по `ServerMsg::Older`.
+    /// В отличие от `History` их ставят в начало ленты, а не в конец.
+    Older {
+        session: String,
+        /// Элементы в порядке ленты: от старых к новым.
+        items: Vec<Item>,
+        /// Есть ли ещё более ранние элементы: по нему панель прячет кнопку.
+        more: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Запросы opencode, ожидающие ответа в этой сессии. Полный список: клиент
     /// заменяет им показанные ранее запросы.
     Prompts {
@@ -349,6 +360,9 @@ pub mod b64 {
 pub enum ServerMsg {
     Watch { session: String },
     Unwatch { session: String },
+    /// Догрузить более ранние элементы ленты `session`: агент присылает их
+    /// ответом `AgentMsg::Older`.
+    Older { session: String },
     Send { id: String, session: String, text: String },
     Interrupt { id: String, session: String },
     /// Новая сессия: `tool` — `claude` или `opencode`, `cwd` — абсолютный путь,

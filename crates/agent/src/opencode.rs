@@ -28,6 +28,9 @@ const RESULT_LIMIT: usize = 4_000;
 /// сервиса, но её поля попадают в браузер, поэтому размеры ограничены.
 const PROMPT_FIELDS: usize = 20;
 const PROMPT_OPTIONS: usize = 50;
+/// Сколько сообщений opencode отдаёт за один запрос: столько же догружается
+/// кнопкой «Загрузить ранние сообщения».
+const PAGE: usize = 100;
 /// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
 const LAUNCH_GUARD: Duration = Duration::from_secs(25);
 
@@ -192,6 +195,17 @@ pub struct OpenCode {
     /// Сообщения, показанные сразу после отправки, но ещё не замеченные наблюдением.
     /// Когда наблюдение их увидит (или не найдёт в очереди), оно уберёт их из ленты.
     optimistic: Mutex<HashMap<String, HashSet<String>>>,
+    /// Догрузка ранних сообщений: сессия -> курсор на страницу до показанной.
+    pages: Mutex<HashMap<String, Page>>,
+}
+
+/// Место, с которого продолжается догрузка ранних сообщений сессии.
+#[derive(Default)]
+struct Page {
+    /// Курсор opencode на более старые сообщения; `None` — старых больше нет.
+    cursor: Option<String>,
+    /// Догрузка уже идёт: вторую страницу по тому же курсору не просим.
+    loading: bool,
 }
 
 struct Endpoint {
@@ -215,6 +229,7 @@ impl OpenCode {
             stream,
             launched: Mutex::new(HashMap::new()),
             optimistic: Mutex::new(HashMap::new()),
+            pages: Mutex::new(HashMap::new()),
         }
     }
 
@@ -424,7 +439,7 @@ impl OpenCode {
         loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    let limit = if first { 100 } else { 20 };
+                    let limit = if first { PAGE } else { 20 };
                     let mut items = Vec::new();
                     let mut drop = Vec::new();
                     // Хэши уже доставленных сообщений: очередь может ещё содержать
@@ -441,6 +456,11 @@ impl OpenCode {
                                 convert(m, &mut items);
                             }
                             items.retain(|it| feed.changed(it));
+                            // Первая страница — та, что панель показала сразу:
+                            // её курсор начинает догрузку ранних сообщений.
+                            if first {
+                                self.remember_page(&id, v["cursor"]["next"].as_str());
+                            }
                         }
                         Err(e) => {
                             if first {
@@ -545,6 +565,59 @@ impl OpenCode {
                 }
             }
         }
+    }
+
+    /// Запоминает, откуда продолжится догрузка ранних сообщений. Её начинает
+    /// курсор первой страницы, а дальше — курсор каждой следующей.
+    fn remember_page(&self, id: &str, cursor: Option<&str>) {
+        let cursor = cursor.filter(|c| !c.is_empty()).map(str::to_owned);
+        self.pages
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id.to_owned(), Page { cursor, loading: false });
+    }
+
+    /// Страница ранних сообщений ленты — следующая за уже показанной. `more` —
+    /// остались ли за ней ещё более старые.
+    ///
+    /// Страницы идут по курсору (`cursor.next` из ответа `order=desc`), поэтому не
+    /// пересекаются с показанным: повторно те же сообщения не придут. Курсор
+    /// появился не во всех версиях opencode; там, где его нет, `more` сразу false
+    /// и панель не предлагает догрузку.
+    pub async fn older(&self, id: &str) -> Result<(Vec<Item>, bool), String> {
+        let cursor = {
+            let mut pages = self.pages.lock().unwrap_or_else(|e| e.into_inner());
+            let page = pages.get_mut(id).ok_or("лента сессии ещё не загружена")?;
+            // Второй запрос по тому же курсору вернул бы ту же страницу: пока
+            // первая в пути, второй отвечает «пока ничего».
+            if page.loading {
+                return Ok((Vec::new(), true));
+            }
+            match page.cursor.clone() {
+                Some(cursor) => {
+                    page.loading = true;
+                    cursor
+                }
+                None => return Ok((Vec::new(), false)),
+            }
+        };
+        let limit = PAGE.to_string();
+        let result = self
+            .call_with(
+                reqwest::Method::GET,
+                &format!("/api/session/{id}/message"),
+                &[("limit", limit.as_str()), ("cursor", cursor.as_str())],
+                None,
+            )
+            .await;
+        let mut pages = self.pages.lock().unwrap_or_else(|e| e.into_inner());
+        let page = pages.entry(id.to_owned()).or_default();
+        page.loading = false;
+        let v = result?;
+        let (items, next) = older_page(&v);
+        page.cursor = next;
+        let more = page.cursor.is_some();
+        Ok((items, more))
     }
 
     /// Каталог и выжимка из ленты для продолжения в другом инструменте.
@@ -795,9 +868,9 @@ impl OpenCode {
         if self.is_active(id).await {
             return Err("сессия выполняется — дождитесь завершения или прервите её".into());
         }
-        self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None)
-            .await
-            .map(|_| ())
+        self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None).await?;
+        self.pages.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        Ok(())
     }
 
     async fn is_active(&self, id: &str) -> bool {
@@ -1214,6 +1287,17 @@ fn content_text(v: &Value) -> String {
         Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join("\n"),
         _ => String::new(),
     }
+}
+
+/// Страница ранних сообщений из ответа opencode: элементы в порядке ленты (от
+/// старых к новым) и курсор на следующую, ещё более раннюю страницу.
+fn older_page(v: &Value) -> (Vec<Item>, Option<String>) {
+    let mut items = Vec::new();
+    for m in v["data"].as_array().into_iter().flatten().rev() {
+        convert(m, &mut items);
+    }
+    let next = v["cursor"]["next"].as_str().filter(|c| !c.is_empty()).map(str::to_owned);
+    (items, next)
 }
 
 fn convert(m: &Value, out: &mut Vec<Item>) {
@@ -1658,5 +1742,28 @@ mod tests {
         }));
         assert!(f.is_none());
         assert!(form_prompt(&json!({"id":"frm_3","fields":[]})).is_none());
+    }
+
+    #[test]
+    fn pages_older_messages() {
+        // Страница приходит новыми сообщениями вперёд, а в ленту идёт обратный
+        // порядок; курсор `next` ведёт к следующей, ещё более ранней странице.
+        let v = json!({
+            "data": [
+                {"id":"m3","type":"user","time":{"created":30},"text":"третий"},
+                {"id":"m2","type":"assistant","time":{"created":20},"content":[{"type":"text","text":"ответ"}]},
+                {"id":"m1","type":"user","time":{"created":10},"text":"первый"},
+            ],
+            "cursor": {"next": "cur", "previous": null},
+        });
+        let (items, next) = older_page(&v);
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.text.as_str())).collect();
+        assert_eq!(got, [("m1:0", "первый"), ("m2:text:0", "ответ"), ("m3:0", "третий")]);
+        assert_eq!(next.as_deref(), Some("cur"));
+
+        // Последняя страница: курсора нет — ранних сообщений больше не осталось.
+        assert_eq!(older_page(&json!({"data": [], "cursor": {"next": null}})).1, None);
+        // Старый opencode курсоров не знает: догрузку не предлагаем.
+        assert_eq!(older_page(&json!({"data": []})).1, None);
     }
 }

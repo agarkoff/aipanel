@@ -60,6 +60,12 @@ for (let i = 0; i < 10; i++) add('assistant', 'text', `${filler}\n\n${filler}`);
 add('user', 'text', 'Последний вопрос');
 add('assistant', 'text', 'Короткий ответ');
 
+// Более ранние сообщения, которые «пришлёт агент» по кнопке догрузки.
+const olderItems = [
+  { id: 'o1', ts: now - 200000, role: 'user', kind: 'text', text: 'Самый ранний вопрос' },
+  { id: 'o2', ts: now - 199000, role: 'assistant', kind: 'text', text: 'Самый ранний ответ' },
+];
+
 const session = {
   key: 'opencode:ui-test',
   tool: 'opencode',
@@ -98,10 +104,13 @@ const stub = `
 (() => {
   const session = ${JSON.stringify(session)};
   const items = ${JSON.stringify(items)};
+  const olderItems = ${JSON.stringify(olderItems)};
   const commands = ${JSON.stringify(commands)};
   const models = ${JSON.stringify(models)};
   const claudeModels = ${JSON.stringify(claudeModels)};
   window.__sent = [];
+  window.__older = [];
+  window.__olderPages = [];
   window.__setModels = [];
   window.__starts = [];
   class FakeSocket {
@@ -129,6 +138,11 @@ const stub = `
         window.__starts.push(msg);
         const error = window.__noDir ? 'каталог не найден: ' + msg.cwd : 'тест';
         setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: false, error }), 0);
+      } else if (msg.t === 'older') {
+        window.__older.push(msg);
+        // Страницы задаёт тест: пустой список — ранних сообщений не осталось.
+        const page = window.__olderPages.length ? window.__olderPages.shift() : { items: [], more: false };
+        setTimeout(() => this.emit({ t: 'older', agent: msg.agent, session: msg.session, items: page.items, more: page.more }), 0);
       } else if (msg.t === 'send') {
         window.__sent.push(msg);
       } else if (msg.t === 'set_model') {
@@ -442,6 +456,58 @@ try {
   })()`);
   check('кнопка «в конец» возвращает в конец', reachedEnd && endState.gap <= 1, { reachedEnd, ...endState });
   check('кнопка «в конец» скрывается внизу', endState.hidden, endState);
+
+  // ------------------------------------------------------------ ранние сообщения
+  // Агент присылает только последние сообщения сессии; остальные догружаются,
+  // когда лента доходит до верхней кромки. Старые элементы встают в начало, а
+  // место, которое человек читает, не съезжает.
+
+  const olderState = () => evaluate(`(() => {
+    const feed = document.getElementById('feed');
+    const btn = document.getElementById('older');
+    const first = feed.querySelector('.item');
+    return {
+      hidden: btn.hidden,
+      disabled: btn.disabled,
+      first: feed.firstElementChild === btn,
+      items: feed.querySelectorAll('.item').length,
+      firstItem: first ? first.textContent.replace(/\\s+/g, ' ').trim() : '',
+      count: document.getElementById('pin-count').textContent.trim(),
+      requests: window.__older.length,
+    };
+  })()`);
+  // Верх элемента в окне: при догрузке он должен остаться на месте.
+  const viewTop = () => evaluate(`(() => {
+    const item = [...document.querySelectorAll('#feed .item')].find((n) => n.textContent.includes('Второй вопрос'));
+    return Math.round(item.getBoundingClientRect().top);
+  })()`);
+
+  // Открываем сессию заново: лента снова с одними последними сообщениями.
+  await evaluate(`window.__olderPages = [{ items: ${JSON.stringify(olderItems)}, more: false }]`);
+  await evaluate(`document.getElementById('back').click()`);
+  await waitFor(`!document.getElementById('app').classList.contains('viewing')`);
+  await evaluate(`document.querySelector('#sessions .session').click()`);
+  if (!(await waitFor(`document.querySelectorAll('#feed .item').length === ${items.length}`))) {
+    throw new Error('сессия не открылась заново');
+  }
+
+  const olderBefore = await olderState();
+  check('кнопка ранних сообщений видна в начале ленты', !olderBefore.hidden && olderBefore.first, olderBefore);
+
+  await evaluate(`document.getElementById('feed').scrollTop = 0`);
+  const keepTop = await viewTop();
+  const loaded = await waitFor(
+    `document.querySelectorAll('#feed .item').length === ${items.length + olderItems.length}`,
+    4000,
+  );
+  const olderAfter = await olderState();
+  const movedTop = await viewTop();
+  check('прокрутка к верху догрузила ранние сообщения', loaded && olderAfter.items === items.length + olderItems.length, olderAfter);
+  check('они встали в начало ленты', olderAfter.firstItem.startsWith('Самый ранний вопрос'), olderAfter);
+  check('кнопка осталась первой строкой ленты', olderAfter.first, olderAfter);
+  check('читаемое место не съехало', Math.abs(movedTop - keepTop) <= 2, { keepTop, movedTop });
+  check('закреп теперь считает и ранние', olderAfter.count.endsWith('/ 4'), olderAfter);
+  check('кнопка скрылась: ранних больше нет', olderAfter.hidden, olderAfter);
 
   // ------------------------------------------------------------ слэш-команды
   // Список команд в поле ввода: «/» открывает его, ввод фильтрует, стрелки и
@@ -907,6 +973,7 @@ try {
 } catch (error) {
   failures.push(String(error));
   console.error('Ошибка теста:', error);
+  if (pageErrors.length) console.error('Ошибки страницы:', pageErrors);
   try {
     const shot = await send('Page.captureScreenshot', { format: 'png' });
     const file = path.join(os.tmpdir(), 'aipanel-ui-failure.png');

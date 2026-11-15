@@ -94,6 +94,22 @@ impl Agent {
                     task.abort();
                 }
             }
+            ServerMsg::Older { session } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result = match split_key(&session) {
+                        Ok(("claude", sid)) => me.claude.older(sid),
+                        Ok(("opencode", sid)) => me.opencode.older(sid).await,
+                        Ok(_) => Err("неизвестный тип сессии".into()),
+                        Err(e) => Err(e),
+                    };
+                    let msg = match result {
+                        Ok((items, more)) => AgentMsg::Older { session, items, more, error: None },
+                        Err(e) => AgentMsg::Older { session, items: Vec::new(), more: false, error: Some(e) },
+                    };
+                    let _ = me.out.send(msg);
+                });
+            }
             ServerMsg::Send { id, session, text } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {

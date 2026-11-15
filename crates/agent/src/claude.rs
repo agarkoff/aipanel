@@ -33,6 +33,11 @@ const HEAD_META_BYTES: u64 = 64 * 1024;
 const HISTORY_BYTES: u64 = 4 * 1024 * 1024;
 /// Для выжимки достаточно хвоста транскрипта: он содержит последние реплики.
 const HANDOFF_BYTES: u64 = 2 * 1024 * 1024;
+/// Сколько байт транскрипта читается за одну догрузку ранних сообщений и предел
+/// на один запрос. Строки транскрипта бывают огромными (результаты вызовов),
+/// поэтому читаем, пока не наберётся хоть один целый элемент.
+const OLDER_BYTES: u64 = 1024 * 1024;
+const OLDER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CHUNK: u64 = 32 * 1024 * 1024;
 const HISTORY_ITEMS: usize = 200;
 const TEXT_LIMIT: usize = 20_000;
@@ -98,6 +103,9 @@ struct St {
     known: HashMap<String, Known>,
     tails: HashMap<PathBuf, (SystemTime, TailMeta)>,
     transcripts: HashMap<String, PathBuf>,
+    /// Начало показанной части транскрипта: от него назад читается догрузка
+    /// ранних сообщений. Ноль — показан весь транскрипт.
+    heads: HashMap<String, u64>,
     listed_at: Option<Instant>,
     headless: HashMap<String, oneshot::Sender<()>>,
     launched: HashMap<String, Instant>,
@@ -407,6 +415,7 @@ impl Claude {
         st.known.remove(sid);
         st.tails.remove(&path);
         st.transcripts.remove(sid);
+        st.heads.remove(sid);
         Ok(())
     }
 
@@ -425,10 +434,9 @@ impl Claude {
                     let len = md.len();
                     if first || len < offset {
                         let start = len.saturating_sub(HISTORY_BYTES);
-                        let (mut items, consumed) = read_items(p, start, len, start > 0);
-                        if items.len() > HISTORY_ITEMS {
-                            items.drain(..items.len() - HISTORY_ITEMS);
-                        }
+                        let (items, consumed, begin) = read_items(p, start, len, start > 0, HISTORY_ITEMS);
+                        // С конца показанной части пойдёт догрузка ранних сообщений.
+                        self.lock().heads.insert(sid.clone(), begin);
                         offset = start + consumed;
                         first = false;
                         let _ = out.send(AgentMsg::History {
@@ -438,7 +446,8 @@ impl Claude {
                             drop: Vec::new(),
                         });
                     } else if len > offset {
-                        let (items, consumed) = read_items(p, offset, len.min(offset + MAX_CHUNK), false);
+                        let (items, consumed, _) =
+                            read_items(p, offset, len.min(offset + MAX_CHUNK), false, usize::MAX);
                         offset += consumed;
                         if !items.is_empty() {
                             let _ = out.send(AgentMsg::History {
@@ -465,6 +474,30 @@ impl Claude {
             }
             tokio::time::sleep(Duration::from_millis(700)).await;
         }
+    }
+
+    /// Страница ранних элементов транскрипта — то, что было до показанной ленты.
+    /// `more` — остались ли ещё более старые.
+    pub fn older(&self, sid: &str) -> Result<(Vec<Item>, bool), String> {
+        let known = self.lock().known.get(sid).and_then(|k| k.path.clone());
+        let path = known.or_else(|| self.find_path(sid)).ok_or("транскрипт сессии не найден")?;
+        let mut left = self.lock().heads.get(sid).copied().unwrap_or(0);
+        if left == 0 {
+            return Ok((Vec::new(), false));
+        }
+        let mut items = Vec::new();
+        let mut spent = 0u64;
+        while left > 0 && items.is_empty() && spent < OLDER_MAX_BYTES {
+            let from = left.saturating_sub(OLDER_BYTES);
+            let (page, _, begin) = read_items(&path, from, left, from > 0, usize::MAX);
+            spent += left - from;
+            // Если целых строк в куске нет (одна огромная строка), шагаем дальше
+            // от прочитанного: иначе следующий запрос вернулся бы на то же место.
+            left = if page.is_empty() { from } else { begin };
+            items = page;
+        }
+        self.lock().heads.insert(sid.to_owned(), left);
+        Ok((items, left > 0))
     }
 
     pub async fn send(self: &Arc<Self>, sid: &str, text: &str, out: &UnboundedSender<AgentMsg>) -> Result<(), String> {
@@ -496,7 +529,7 @@ impl Claude {
         }
         let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let start = len.saturating_sub(HANDOFF_BYTES);
-        let (items, _) = read_items(&path, start, len, start > 0);
+        let (items, _, _) = read_items(&path, start, len, start > 0, usize::MAX);
         let messages: Vec<(String, String)> = items
             .into_iter()
             .filter(|i| i.kind == "text" && (i.role == "user" || i.role == "assistant"))
@@ -1010,23 +1043,44 @@ fn read_range(path: &Path, start: u64, end: u64) -> Vec<u8> {
     buf
 }
 
-/// Читает `[start, end)` и разбирает только завершённые строки.
-/// Возвращает элементы ленты и число обработанных байт.
-fn read_items(path: &Path, start: u64, end: u64, skip_first: bool) -> (Vec<Item>, u64) {
+/// Читает `[start, end)` и разбирает только завершённые строки. Возвращает
+/// элементы, число обработанных байт и смещение в файле, с которого начинаются
+/// оставленные элементы (конец прочитанного, если оставлено пусто).
+///
+/// `max_items` ограничивает размер ленты, которую панель получает сразу; обрезка
+/// идёт по строкам, чтобы смещение начала оставшегося было точным — с него
+/// продолжится догрузка ранних сообщений.
+fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: usize) -> (Vec<Item>, u64, u64) {
     let buf = read_range(path, start, end);
     let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
-        return (Vec::new(), 0);
+        return (Vec::new(), 0, start);
     };
-    let mut items = Vec::new();
+    let mut lines: Vec<(u64, Vec<Item>)> = Vec::new();
+    let mut at = 0usize;
     for (i, line) in buf[..last_nl].split(|b| *b == b'\n').enumerate() {
+        let from = at;
+        at += line.len() + 1;
         if i == 0 && skip_first {
             continue;
         }
+        let mut items = Vec::new();
         if let Ok(line) = std::str::from_utf8(line) {
             parse_line(line, &mut items);
         }
+        if !items.is_empty() {
+            lines.push((start + from as u64, items));
+        }
     }
-    (items, last_nl as u64 + 1)
+    let consumed = last_nl as u64 + 1;
+    let mut total: usize = lines.iter().map(|(_, items)| items.len()).sum();
+    let mut cut = 0;
+    while total > max_items && cut < lines.len() {
+        total -= lines[cut].1.len();
+        cut += 1;
+    }
+    lines.drain(..cut);
+    let begin = lines.first().map(|(at, _)| *at).unwrap_or(start + consumed);
+    (lines.into_iter().flat_map(|(_, items)| items).collect(), consumed, begin)
 }
 
 /// Дифф из результата правки: Claude Code кладёт в `toolUseResult` готовый
@@ -1523,6 +1577,47 @@ mod tests {
         let claude = Claude::new(cfg, Arc::new(Notify::new()));
         assert!(claude.trust_dir(r"D:\Projects\demo").is_ok());
         assert!(!dir.join(".claude.json").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Обрезка ленты по числу элементов — построчная: от начала оставшегося
+    /// элемента отсчитывается догрузка ранних сообщений, и она не должна ни
+    /// потерять строку, ни повторить её.
+    #[test]
+    fn trims_history_by_lines_and_remembers_head() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-older-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let line = |uuid: &str, text: &str| {
+            format!(
+                r#"{{"type":"user","uuid":"{uuid}","timestamp":"2026-11-15T10:00:00.000Z","message":{{"role":"user","content":"{text}"}}}}"#
+            )
+        };
+        let body = format!("{}\n{}\n{}\n", line("u1", "первый"), line("u2", "второй"), line("u3", "третий"));
+        fs::write(&path, &body).unwrap();
+        let len = body.len() as u64;
+
+        // Оставляем один элемент: начало оставшегося — строка третьего.
+        let (items, consumed, begin) = read_items(&path, 0, len, false, 1);
+        let third = body.find(&line("u3", "третий")).unwrap() as u64;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "u3:0");
+        assert_eq!(consumed, len);
+        assert_eq!(begin, third);
+
+        // Назад от начала оставшегося читается остальное и без повторов.
+        let (older, _, older_begin) = read_items(&path, 0, begin, false, usize::MAX);
+        let ids: Vec<_> = older.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["u1:0", "u2:0"]);
+        assert_eq!(older_begin, 0);
+
+        // Кусок без целой строки элементов не даёт и байт не съедает: догрузка
+        // продолжит читать с того же места.
+        let cut = third + 5;
+        let (empty, consumed, begin) = read_items(&path, cut, len - 1, false, usize::MAX);
+        assert!(empty.is_empty());
+        assert_eq!((consumed, begin), (0, cut));
         let _ = fs::remove_dir_all(&dir);
     }
 }

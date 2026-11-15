@@ -383,6 +383,17 @@ input, textarea, select {
   box-shadow: 0 2px 10px rgba(0, 0, 0, .18);
 }
 .to-end:hover { background: var(--bg); }
+/* Кнопка догрузки ранних сообщений: первая строка ленты. */
+.older {
+  flex: none;
+  align-self: center;
+  margin: 0 auto;
+  padding: 5px 14px;
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.older:hover:not(:disabled) { color: var(--text); background: var(--panel); }
 .item { max-width: 900px; width: 100%; margin: 0 auto; }
 /* Подсветка сообщения, к которому перешли по закрепу. */
 .item.flash { border-radius: 10px; animation: pin-flash 1.6s ease-out; }

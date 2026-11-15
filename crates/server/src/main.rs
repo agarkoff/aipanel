@@ -506,6 +506,20 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
                 }
             }
         }
+        AgentMsg::Older { session, items, more, error } => {
+            let text = json!({
+                "t": "older", "agent": agent, "session": session,
+                "items": items, "more": more, "error": error,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
         AgentMsg::Prompts { session, mut prompts } => {
             prompts.truncate(MAX_PROMPTS);
             let text = json!({
@@ -689,6 +703,8 @@ fn image_error(status: StatusCode, text: &str) -> Response {
 enum BrowserMsg {
     Watch { agent: String, session: String },
     Unwatch,
+    /// Догрузить более ранние сообщения ленты: агент ответит `older`.
+    Older { agent: String, session: String },
     Send { id: String, agent: String, session: String, text: String },
     Interrupt { id: String, agent: String, session: String },
     Start {
@@ -814,6 +830,17 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             inner.to_agent(&owner, &agent, ServerMsg::Watch { session });
         }
         BrowserMsg::Unwatch => inner.unwatch(browser),
+        BrowserMsg::Older { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Старые сообщения одинаковы для всех, кто смотрит сессию: ответ
+            // агента уходит всем наблюдателям, как и лента.
+            inner.to_agent(&owner, &agent, ServerMsg::Older { session });
+        }
         BrowserMsg::Commands { agent, session } => {
             if !inner.browser_owns(browser, &agent) {
                 return;
@@ -1261,6 +1288,81 @@ mod tests {
         let msg = rx.try_recv().unwrap();
         assert!(msg.contains("\"t\":\"commands\"") && msg.contains("init"), "{msg}");
         assert!(other_rx.try_recv().is_err(), "список ушёл в чужую сессию");
+    }
+
+    #[test]
+    fn older_messages_reach_only_watchers_of_that_session() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let (other, mut other_rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+            },
+        );
+        inner.browsers.insert(
+            2,
+            BrowserEntry {
+                tx: other,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s2".into())),
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Older {
+                session: "opencode:s1".into(),
+                items: vec![aipanel_proto::Item {
+                    id: "m1:0".into(),
+                    ts: 1,
+                    role: "user".into(),
+                    kind: "text".into(),
+                    text: "первый".into(),
+                    tool: None,
+                }],
+                more: true,
+                error: None,
+            },
+        );
+        let msg = rx.try_recv().unwrap();
+        assert!(msg.contains("\"t\":\"older\"") && msg.contains("\"more\":true"), "{msg}");
+        assert!(msg.contains("первый"), "{msg}");
+        assert!(other_rx.try_recv().is_err(), "ранние сообщения ушли в чужую сессию");
+    }
+
+    #[test]
+    fn older_request_goes_to_the_agent() {
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(4);
+        let (browser, _browser_rx) = mpsc::channel::<String>(1);
+        let mut inner = Inner::default();
+        inner.agents.insert(
+            ("alice".into(), "pc".into()),
+            AgentEntry { tx: Some(tx), ..entry() },
+        );
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx: browser,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::Older { agent: "pc".into(), session: "opencode:s1".into() },
+        );
+        let msg = rx.try_recv().unwrap();
+        assert!(matches!(msg, ServerMsg::Older { session } if session == "opencode:s1"), "агент не получил запрос");
     }
 
     #[test]

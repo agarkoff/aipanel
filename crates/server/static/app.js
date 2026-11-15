@@ -70,6 +70,17 @@ let flashTimer = null;
 // иначе первый же ответ агента вернул бы ленту вниз, не дав дочитать сообщение.
 let scrollHoldUntil = 0;
 
+// Ранние сообщения: агент присылает только последние, остальные — по кнопке в
+// начале ленты. Здесь её состояние: запрос отправлен, ответа ещё нет; есть ли
+// что грузить дальше; страховка на случай, если агент не ответил (старая версия
+// не знает команду).
+let olderPending = false;
+let olderMore = true;
+let olderTimer = null;
+// Ссылку на кнопку держим сами: очистка ленты выбрасывает её из документа, и
+// поиск по id после этого её уже не находит.
+const olderBtn = $('older');
+
 // Запуск новой сессии: id команды, её параметры и ожидаемая сессия.
 let launchId = null;
 let launchRequest = null;
@@ -228,6 +239,9 @@ function onMessage(msg) {
   } else if (msg.t === 'history') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyHistory(msg);
+  } else if (msg.t === 'older') {
+    if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
+    applyOlder(msg);
   } else if (msg.t === 'prompts') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyPrompts(msg.prompts || []);
@@ -568,6 +582,7 @@ function select(agent, session) {
   $('sm-id').classList.remove('copied');
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
   resetPin();
+  resetOlder();
   setHint('');
   $('app').classList.add('viewing');
   // Запись в истории нужна, чтобы системная кнопка «Назад» на телефоне
@@ -583,6 +598,7 @@ function closeView() {
   selected = null;
   clearPrompts();
   resetPin();
+  resetOlder();
   send({ t: 'unwatch' });
   // Если сессию закрыли не кнопкой «Назад», текущая запись истории всё ещё
   // помечена как просмотр: без этого следующая сессия не добавила бы новую,
@@ -957,6 +973,33 @@ function buildItem(item, call) {
   return node;
 }
 
+// Один элемент ленты. `target` — куда его поставить: сама лента для обычных
+// обновлений или фрагмент перед ней, когда догружаются ранние сообщения.
+function placeItem(item, target) {
+  const old = nodes.get(item.id);
+  trackCall(item, !old);
+  const node = buildItem(item, item.kind === 'tool_result' ? callFor(item, !old) : null);
+  if (item.id === flashId) node.classList.add('flash');
+  if (old) {
+    const oldDetails = old.querySelector('details');
+    const newDetails = node.querySelector('details');
+    if (oldDetails && newDetails) newDetails.open = oldDetails.open;
+    renderMarkdown.keepOpenImages(old, node);
+    old.replaceWith(node);
+  } else {
+    target.append(node);
+  }
+  nodes.set(item.id, node);
+}
+
+// Своё сообщение из ленты — оно же история для стрелок в поле ввода.
+// `true`, если элемент — запрос из ленты.
+function rememberRequest(item) {
+  if (item.role !== 'user' || (item.kind !== 'text' && item.kind !== 'queued')) return false;
+  feedRequests.set(item.id, item.text);
+  return true;
+}
+
 function applyHistory(msg) {
   const feed = $('feed');
   const stick = Date.now() > scrollHoldUntil && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
@@ -982,26 +1025,13 @@ function applyHistory(msg) {
     resultCalls.delete(id);
   }
   for (const item of msg.items) {
-    // Запросы из ленты — история для стрелок в поле ввода.
-    if (item.role === 'user' && (item.kind === 'text' || item.kind === 'queued')) {
-      feedRequests.set(item.id, item.text);
-      consumeSentRequest(item.text);
-    }
-    const old = nodes.get(item.id);
-    trackCall(item, !old);
-    const node = buildItem(item, item.kind === 'tool_result' ? callFor(item, !old) : null);
-    if (item.id === flashId) node.classList.add('flash');
-    if (old) {
-      const oldDetails = old.querySelector('details');
-      const newDetails = node.querySelector('details');
-      if (oldDetails && newDetails) newDetails.open = oldDetails.open;
-      renderMarkdown.keepOpenImages(old, node);
-      old.replaceWith(node);
-    } else {
-      feed.append(node);
-    }
-    nodes.set(item.id, node);
+    // Отправленное из панели уже в ленте: очередь больше не нужна.
+    if (rememberRequest(item)) consumeSentRequest(item.text);
+    placeItem(item, feed);
   }
+  // Кнопка догрузки — всегда первая строка ленты; очистка выше её выбросила.
+  mountOlder();
+  updateOlder();
   // Закреп показываем до прокрутки в конец: полоса закрепа отнимает у ленты
   // высоту, и прокрутка, сделанная раньше, оставила бы низ последнего сообщения
   // скрытым — без единого следующего обновления, которое это исправило бы.
@@ -1010,15 +1040,107 @@ function applyHistory(msg) {
   updateToEnd();
 }
 
+// ------------------------------------------------------------ ранние сообщения
+
+// Кнопка догрузки живёт первой строкой ленты: очистка ленты выбрасывает её из
+// DOM, поэтому возвращаем на место перед каждым новым элементом.
+function mountOlder() {
+  const feed = $('feed');
+  if (feed.firstChild !== olderBtn) feed.prepend(olderBtn);
+}
+
+function updateOlder() {
+  olderBtn.hidden = !olderMore || !nodes.size;
+  olderBtn.disabled = olderPending;
+  olderBtn.textContent = olderPending ? 'Загрузка…' : 'Загрузить ранние сообщения';
+}
+
+function resetOlder() {
+  clearTimeout(olderTimer);
+  olderPending = false;
+  olderMore = true;
+  mountOlder();
+  updateOlder();
+}
+
+function askOlder() {
+  if (!selected || olderPending || !olderMore || !nodes.size) return;
+  if (!send({ t: 'older', agent: selected.agent, session: selected.session })) return;
+  olderPending = true;
+  updateOlder();
+  // Старая версия агента команду не знает и ответа не пришлёт: не оставляем
+  // кнопку навсегда в «Загрузке».
+  clearTimeout(olderTimer);
+  olderTimer = setTimeout(() => {
+    olderPending = false;
+    updateOlder();
+    setHint('Ранние сообщения не загрузились: агент не ответил.', true);
+  }, 10_000);
+}
+
+// Прокрутка до верхней кромки сама просит более ранние сообщения: доводить до
+// них отдельным нажатием кнопки не нужно. Кнопка остаётся для тех случаев,
+// когда догрузку не вышло запустить прокруткой.
+function askOlderAtTop() {
+  if (!olderMore || olderPending || !nodes.size) return;
+  if ($('feed').scrollTop > 0) return;
+  askOlder();
+}
+
+olderBtn.addEventListener('click', askOlder);
+
+// Ранние сообщения пришли: ставим их в начало ленты, не сдвигая то место,
+// которое человек читает.
+function applyOlder(msg) {
+  clearTimeout(olderTimer);
+  olderPending = false;
+  if (msg.error) {
+    updateOlder();
+    setHint(`Ранние сообщения не загрузились: ${msg.error}`, true);
+    return;
+  }
+  olderMore = msg.more !== false;
+  mountOlder();
+  const feed = $('feed');
+  const pinned = myMessages()[pinIdx] || null;
+  // Держимся за первый элемент ленты: после вставки выше он же должен остаться
+  // на том же месте экрана. Браузер сам подтягивает прокрутку (scroll anchoring),
+  // но не везде и не всегда — остаток доводим вручную.
+  const anchor = olderBtn.nextElementSibling;
+  const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+  const frag = document.createDocumentFragment();
+  // Результаты вызовов сопоставляются между собой внутри старой части ленты:
+  // очередь вызовов новой части им не достаётся.
+  const savedCalls = pendingCalls;
+  pendingCalls = [];
+  for (const item of msg.items || []) {
+    // Такое сообщение уже показано: страницы не пересекаются, но агент может
+    // ответить повторно на второй запрос.
+    if (nodes.has(item.id)) continue;
+    rememberRequest(item);
+    placeItem(item, frag);
+  }
+  pendingCalls = savedCalls;
+  olderBtn.after(frag);
+  if (anchor) {
+    const shift = anchor.getBoundingClientRect().top - anchorTop;
+    if (shift) feed.scrollTop += shift;
+  }
+  // Закреп остаётся на том же сообщении, но его номер среди своих сдвинулся.
+  const list = myMessages();
+  pinIdx = pinned ? list.indexOf(pinned) : list.length - 1;
+  updateOlder();
+  syncPin();
+  updateToEnd();
+}
+
 // ------------------------------------------------------------ закреп и конец ленты
 
 // Свои сообщения в ленте по порядку: отправленные и ещё стоящие в очереди.
+// Порядок берём из DOM: ранние сообщения вставляются в начало ленты, а не в
+// конец, и порядок вставки в `nodes` этому уже не соответствует.
 function myMessages() {
-  const out = [];
-  for (const node of nodes.values()) {
-    if (node.classList.contains('user')) out.push(node);
-  }
-  return out;
+  return [...$('feed').querySelectorAll('.item.user')];
 }
 
 function messageText(node) {
@@ -1150,6 +1272,7 @@ $('feed').addEventListener(
       return;
     }
     followPin();
+    askOlderAtTop();
   },
   { passive: true },
 );
