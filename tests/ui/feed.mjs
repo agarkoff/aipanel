@@ -131,10 +131,21 @@ const assets = new Map([
   ['/icon-192.png', 'image/png'],
 ]);
 
+const imageRequests = [];
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
   if (url.pathname === '/' || url.pathname === '/index.html') {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(fixture);
+    return;
+  }
+  // Картинка с машины агента: настоящий сервер спрашивает её у агента.
+  if (url.pathname === '/api/image') {
+    imageRequests.push(Object.fromEntries(url.searchParams));
+    if (url.searchParams.get('path').endsWith('shot.png')) {
+      res.writeHead(200, { 'Content-Type': 'image/png' }).end(fs.readFileSync(path.join(STATIC, 'icon-192.png')));
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' }).end('файл недоступен');
+    }
     return;
   }
   const type = assets.get(url.pathname);
@@ -583,6 +594,55 @@ try {
   check('клик раскрывает картинку и не уходит по ссылке', img.shown && img.prevented, img);
   check('при перестройке сообщения картинка остаётся раскрытой', img.kept, img);
   check('повторный клик сворачивает картинку', img.hidden, img);
+
+  // Пути к картинкам на машине агента: в тексте, в `коде` и в ссылке. Картинку
+  // отдаёт /api/image с агентом и сессией ленты; ошибка видна текстом.
+  const local = await evaluate(`(async () => {
+    const opts = { localImage: (p) => '/api/image?' + new URLSearchParams({ agent: 'ui-test', session: 's1', path: p }) };
+    const box = document.createElement('div');
+    box.className = 'body md';
+    box.append(renderMarkdown([
+      'Скриншот: D:\\\\Projects\\\\demo\\\\shot.png.',
+      'В коде: \`C:\\\\My Pictures\\\\shot.png\` и [тут](./out/missing.png).',
+      'Не путь: \`convert a.png b.png\`, адрес https://example.com/x.html и слово png.',
+    ].join('\\n\\n'), opts));
+    document.getElementById('feed').append(box);
+    const links = [...box.querySelectorAll('a.img-link')];
+    const paths = links.map((a) => new URL(a.href).searchParams.get('path'));
+    const plain = renderMarkdown('D:\\\\x\\\\shot.png').querySelectorAll('a').length;
+    const open = async (a) => {
+      a.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+      const until = Date.now() + 4000;
+      while (Date.now() < until) {
+        const p = a.nextElementSibling;
+        const img = p && p.querySelector('img');
+        if (img && img.complete && img.naturalWidth > 0) return 'img';
+        if (p && /Не удалось/.test(p.textContent)) return p.textContent;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return 'timeout';
+    };
+    const first = await open(links[0]);
+    const missing = await open(links[2]);
+    const codeWrapped = !!links[1].querySelector('code');
+    box.remove();
+    return { paths, plain, first, missing, codeWrapped };
+  })()`);
+  check(
+    'пути к картинкам распознаны в тексте, коде и ссылке',
+    JSON.stringify(local.paths) ===
+      JSON.stringify(['D:\\Projects\\demo\\shot.png', 'C:\\My Pictures\\shot.png', './out/missing.png']),
+    local,
+  );
+  check('без адреса агента путь остаётся текстом', local.plain === 0, local);
+  check('путь в коде остаётся кодом внутри ссылки', local.codeWrapped, local);
+  check('клик по пути показывает картинку с агента', local.first === 'img', local);
+  check('ошибка загрузки видна текстом', /файл недоступен/.test(local.missing), local);
+  check(
+    'запрос картинки идёт с агентом и сессией',
+    imageRequests.length >= 1 && imageRequests[0].agent === 'ui-test' && imageRequests[0].session === 's1',
+    imageRequests,
+  );
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

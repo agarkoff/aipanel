@@ -8,11 +8,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo};
+use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo, IMAGE_MIMES, MAX_IMAGE_BYTES};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
@@ -22,7 +22,7 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
@@ -46,6 +46,9 @@ const MAX_COMMANDS: usize = 200;
 const MAX_ANSWER: usize = 64_000;
 const PING_EVERY: Duration = Duration::from_secs(25);
 const DEAD_AFTER: Duration = Duration::from_secs(90);
+/// Сколько ждать картинку от агента. Старый агент команду не знает и не ответит вовсе.
+const IMAGE_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_IMAGE_WAITS: usize = 32;
 
 struct AgentEntry {
     conn: u64,
@@ -74,8 +77,17 @@ struct Pending {
     agent: String,
 }
 
+/// Картинка, которую HTTP-запрос браузера ждёт от агента.
+struct ImageWait {
+    owner: String,
+    agent: String,
+    tx: oneshot::Sender<Result<(String, Vec<u8>), String>>,
+}
+
 #[derive(Default)]
 struct Inner {
+    /// id запроса картинки -> HTTP-запрос, который её ждёт.
+    images: HashMap<String, ImageWait>,
     /// Ключ — (пользователь, имя агента): одинаковые имена у разных пользователей не пересекаются.
     agents: BTreeMap<(String, String), AgentEntry>,
     browsers: HashMap<u64, BrowserEntry>,
@@ -260,7 +272,7 @@ fn asset_bytes(content_type: &'static str, body: &'static [u8]) -> Response {
                 header::CONTENT_SECURITY_POLICY,
                 // Картинки по ссылкам из ленты лежат на чужих сайтах, поэтому
                 // img-src шире остального. Грузятся они только по клику на ссылку.
-                "default-src 'self'; img-src 'self' data: https: http:; frame-ancestors 'none'; base-uri 'none'",
+                "default-src 'self'; img-src 'self' data: blob: https: http:; frame-ancestors 'none'; base-uri 'none'",
             ),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),
@@ -537,7 +549,103 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
                 }
             }
         }
+        AgentMsg::Image { id, mime, data, error } => {
+            // Картинку принимаем только от того агента, у которого её просили.
+            let allowed = inner.images.get(&id).is_some_and(|w| w.owner == owner && w.agent == agent);
+            if !allowed {
+                return;
+            }
+            let Some(wait) = inner.images.remove(&id) else {
+                return;
+            };
+            let result = match error {
+                Some(e) => Err(e),
+                None if !IMAGE_MIMES.contains(&mime.as_str()) => Err("неизвестный тип картинки".into()),
+                None => match aipanel_proto::b64::decode(&data) {
+                    Some(bytes) if bytes.len() as u64 <= MAX_IMAGE_BYTES => Ok((mime, bytes)),
+                    Some(_) => Err("картинка слишком большая".into()),
+                    None => Err("агент прислал повреждённые данные".into()),
+                },
+            };
+            let _ = wait.tx.send(result);
+        }
     }
+}
+
+// ---------------------------------------------------------------- картинки
+
+#[derive(Deserialize)]
+struct ImageQuery {
+    agent: String,
+    session: String,
+    path: String,
+}
+
+/// Картинка с машины агента по пути из ленты сессии.
+async fn image(State(app): State<Arc<App>>, headers: HeaderMap, Query(q): Query<ImageQuery>) -> Response {
+    let Some(owner) = app.authed(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let path = q.path.trim().to_owned();
+    if path.is_empty() || path.len() > 4096 || path.chars().any(char::is_control) || q.session.len() > 256 {
+        return image_error(StatusCode::BAD_REQUEST, "некорректный путь");
+    }
+    let (tx, rx) = oneshot::channel();
+    let id = {
+        let mut inner = app.lock();
+        if inner.images.len() >= MAX_IMAGE_WAITS {
+            return image_error(StatusCode::TOO_MANY_REQUESTS, "слишком много картинок загружается сразу");
+        }
+        let id = format!("img:{}", inner.id());
+        let msg = ServerMsg::ReadImage { id: id.clone(), session: q.session, path };
+        if !inner.to_agent(&owner, &q.agent, msg) {
+            return image_error(StatusCode::BAD_GATEWAY, "агент не в сети");
+        }
+        inner.images.insert(id.clone(), ImageWait { owner, agent: q.agent, tx });
+        id
+    };
+    let result = tokio::time::timeout(IMAGE_TIMEOUT, rx).await;
+    app.lock().images.remove(&id);
+    match result {
+        Ok(Ok(Ok((mime, bytes)))) => image_response(&mime, bytes),
+        Ok(Ok(Err(e))) => image_error(StatusCode::NOT_FOUND, &e),
+        _ => image_error(
+            StatusCode::GATEWAY_TIMEOUT,
+            "агент не ответил: возможно, его нужно обновить до версии с показом картинок",
+        ),
+    }
+}
+
+fn image_response(mime: &str, bytes: Vec<u8>) -> Response {
+    let mut resp = bytes.into_response();
+    let h = resp.headers_mut();
+    if let Ok(v) = HeaderValue::from_str(mime) {
+        h.insert(header::CONTENT_TYPE, v);
+    }
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("private, max-age=300"));
+    // SVG, открытый отдельной вкладкой, мог бы выполнить скрипт на домене панели:
+    // sandbox и пустой default-src это запрещают.
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox"),
+    );
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    h.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("inline"));
+    h.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    resp
+}
+
+fn image_error(status: StatusCode, text: &str) -> Response {
+    (
+        status,
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+            (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        text.to_owned(),
+    )
+        .into_response()
 }
 
 // ---------------------------------------------------------------- браузер
@@ -925,6 +1033,7 @@ async fn main() {
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
+        .route("/api/image", get(image))
         .route("/ws", get(browser_ws))
         .route("/agent", get(agent_ws))
         .with_state(app);
@@ -1135,5 +1244,34 @@ mod tests {
         );
         assert!(rx.try_recv().unwrap().contains("\"id\":\"x\""));
         assert!(app.lock().pending.is_empty());
+    }
+
+    #[test]
+    fn image_answer_only_from_asked_agent_and_known_type() {
+        let (tx, mut rx) = oneshot::channel();
+        let mut inner = Inner::default();
+        inner.images.insert("img:1".into(), ImageWait { owner: "alice".into(), agent: "pc".into(), tx });
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let png = AgentMsg::Image {
+            id: "img:1".into(),
+            mime: "image/png".into(),
+            data: aipanel_proto::b64::encode(b"\x89PNG"),
+            error: None,
+        };
+
+        on_agent_msg(&app, "bob", "pc", png.clone());
+        assert!(rx.try_recv().is_err(), "картинку принял чужой агент");
+        on_agent_msg(&app, "alice", "pc", png);
+        assert_eq!(rx.try_recv().unwrap(), Ok(("image/png".to_string(), b"\x89PNG".to_vec())));
+
+        let (tx, mut rx) = oneshot::channel();
+        app.lock().images.insert("img:2".into(), ImageWait { owner: "alice".into(), agent: "pc".into(), tx });
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Image { id: "img:2".into(), mime: "text/html".into(), data: "PGI+".into(), error: None },
+        );
+        assert!(rx.try_recv().unwrap().is_err(), "пропущен не-картиночный тип");
     }
 }

@@ -707,12 +707,22 @@ function diffDetails(text) {
   return details;
 }
 
+// Пути к картинкам в ленте раскрываются через сервер: файл лежит на машине агента.
+function mdOptions() {
+  const cur = selected;
+  if (!cur) return {};
+  return {
+    localImage: (path) =>
+      `/api/image?${new URLSearchParams({ agent: cur.agent, session: cur.session, path })}`,
+  };
+}
+
 function buildItem(item) {
   const node = el('div', `item ${item.role} ${item.kind}`);
   node.dataset.id = item.id;
   if (item.kind === 'text') {
     const body = el('div', 'body md');
-    body.append(renderMarkdown(item.text));
+    body.append(renderMarkdown(item.text, mdOptions()));
     node.append(body);
   } else if (item.kind === 'error') {
     node.append(el('div', 'body', item.text));
@@ -726,7 +736,7 @@ function buildItem(item) {
     cancel.addEventListener('click', () => cancelQueued(item));
     label.append(cancel);
     const body = el('div', 'body md');
-    body.append(renderMarkdown(item.text));
+    body.append(renderMarkdown(item.text, mdOptions()));
     node.append(label, body);
   } else if (item.kind === 'diff') {
     node.append(diffDetails(item.text));

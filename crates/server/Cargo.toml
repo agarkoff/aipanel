@@ -5,7 +5,7 @@ edition.workspace = true
 
 [dependencies]
 aipanel-proto = { path = "../proto" }
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "ws"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio", "ws"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "sync", "signal"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 serde = { version = "1", features = ["derive"] }

@@ -4,6 +4,7 @@
 mod claude;
 mod config;
 mod handoff;
+mod image;
 mod install;
 mod opencode;
 mod platform;
@@ -46,6 +47,8 @@ struct Agent {
     online: AtomicBool,
     force: AtomicBool,
     watchers: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// Каталог каждой известной сессии: от него считаются относительные пути картинок.
+    cwds: Mutex<HashMap<String, String>>,
     // Состояние для команды `status` (см. status.rs).
     started: i64,
     connected_since: AtomicI64,
@@ -194,6 +197,22 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
+            ServerMsg::ReadImage { id, session, path } => {
+                let cwd = self.cwds.lock().unwrap().get(&session).cloned();
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || {
+                    let msg = match image::read(cwd.as_deref(), &path) {
+                        Ok((mime, data)) => {
+                            AgentMsg::Image { id, mime: mime.into(), data: aipanel_proto::b64::encode(&data), error: None }
+                        }
+                        Err(e) => {
+                            util::log(&format!("read image failed: {e}"));
+                            AgentMsg::Image { id, mime: String::new(), data: String::new(), error: Some(e) }
+                        }
+                    };
+                    let _ = out.send(msg);
+                });
+            }
         }
     }
 
@@ -286,6 +305,7 @@ async fn scanner(agent: Arc<Agent>) {
             }
             list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             agent.sessions.store(list.len(), Ordering::Relaxed);
+            *agent.cwds.lock().unwrap() = list.iter().map(|s| (s.key.clone(), s.cwd.clone())).collect();
             if agent.force.swap(false, Ordering::Relaxed) || list != last {
                 let _ = agent.out.send(AgentMsg::Sessions { sessions: list.clone() });
                 last = list;
@@ -430,6 +450,7 @@ async fn run(cfg: Config) {
         online: AtomicBool::new(false),
         force: AtomicBool::new(false),
         watchers: Mutex::new(HashMap::new()),
+        cwds: Mutex::new(HashMap::new()),
         started: util::now_ms(),
         connected_since: AtomicI64::new(0),
         sessions: AtomicUsize::new(0),

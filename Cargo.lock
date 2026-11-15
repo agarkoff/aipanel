@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aipanel-agent"
-version = "3.1.0"
+version = "4.0.0"
 dependencies = [
  "aipanel-proto",
  "futures-util",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-proto"
-version = "3.1.0"
+version = "4.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-server"
-version = "3.1.0"
+version = "4.0.0"
 dependencies = [
  "aipanel-proto",
  "axum",
@@ -54,6 +54,7 @@ dependencies = [
  "axum-core",
  "base64 0.22.1",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -69,6 +70,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sha1 0.10.7",
  "sync_wrapper",
  "tokio",

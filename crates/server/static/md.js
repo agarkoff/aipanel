@@ -10,6 +10,9 @@ const renderMarkdown = (() => {
     return n;
   };
 
+  // Символы имени файла или каталога в пути: латиница, цифры, кириллица, `.-_+@`.
+  const PATH_CH = '\\w\\u0400-\\u04FF.@+\\-';
+
   const INLINE = new RegExp(
     [
       '\\\\([\\\\`*_{}\\[\\]()#+\\-.!|~>])', // 1: экранированный символ
@@ -22,11 +25,36 @@ const renderMarkdown = (() => {
       '\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)', // 9, 10: ссылка
       '(https?:\\/\\/[^\\s<>"\'`]*[^\\s<>"\'`.,;:!?)\\]])', // 11: адрес
       '!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)', // 12, 13: картинка
+      // 14: путь к файлу картинки на машине агента (`C:\x\shot.png`, `./a.png`, `/tmp/b.jpg`)
+      `(?<![${PATH_CH}/\\\\:~])((?:[A-Za-z]:[\\\\/]|~[\\\\/]|\\.{1,2}[\\\\/]|\\/)?(?:[${PATH_CH}]+[\\\\/])*` +
+        `[${PATH_CH}]+\\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico))(?![\\w\\u0400-\\u04FF/\\\\])`,
     ].join('|'),
-    'g',
+    'gi',
   );
 
   const RE_IMAGE_PATH = /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico)$/i;
+  // Путь целиком (в `коде` или в ссылке): тут допустимы и пробелы.
+  const RE_LOCAL_PATH = /^(?:file:\/\/\/?)?[^<>"|*?\n]*[^\s<>"|*?\\/]\.(png|jpe?g|gif|webp|avif|bmp|svg|ico)$/i;
+
+  // Адрес картинки с машины агента; задаётся на время одного вызова renderMarkdown.
+  let localImage = null;
+  // С пробелами — только явный путь (`C:\My Pictures\a.png`), иначе
+  // `convert a.png b.png` из команды стал бы одним «путём».
+  const RE_EXPLICIT_PATH = /^(?:file:\/\/\/?)?(?:[A-Za-z]:[\\/]|\/|~[\\/]|\.{1,2}[\\/])/;
+  const isLocalPath = (s) => !!localImage && !/^[a-z][a-z0-9+.-]+:\/\//i.test(s.replace(/^file:/i, '')) &&
+    RE_LOCAL_PATH.test(s) && (!/\s/.test(s) || RE_EXPLICIT_PATH.test(s));
+
+  // Путь к картинке становится ссылкой-переключателем на /api/image.
+  function localLink(content, path) {
+    const a = node('a');
+    a.append(content);
+    a.href = localImage(path);
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.dataset.local = '1';
+    imageToggle(a);
+    return a;
+  }
 
   // Ссылка ведёт на картинку, если путь в адресе кончается расширением картинки
   // (параметры запроса и якорь не мешают: `photo.jpg?size=large`).
@@ -40,6 +68,7 @@ const renderMarkdown = (() => {
   }
 
   function link(text, href) {
+    if (isLocalPath(href)) return localLink(text, href);
     if (!/^(https?:|mailto:)/i.test(href)) return document.createTextNode(text);
     const a = node('a', text);
     a.href = href;
@@ -78,11 +107,27 @@ const renderMarkdown = (() => {
       img.alt = a.textContent;
       img.referrerPolicy = 'no-referrer';
       img.decoding = 'async';
-      img.addEventListener('error', () =>
-        box.replaceChildren(node('span', 'Не удалось загрузить картинку')), { once: true });
-      img.src = a.href;
+      const fail = (why) => box.replaceChildren(node('span', why || 'Не удалось загрузить картинку'));
+      img.addEventListener('error', () => fail(), { once: true });
+      if (a.dataset.local) {
+        // Картинку с машины агента берём через fetch: так видна причина ошибки
+        // (файла нет, агент не в сети), а не просто сломанная картинка.
+        box.append(node('span', 'Загрузка…'));
+        fetch(a.href, { credentials: 'same-origin' })
+          .then(async (r) => {
+            if (!r.ok) throw new Error((await r.text()) || `ошибка ${r.status}`);
+            return r.blob();
+          })
+          .then((blob) => {
+            img.src = URL.createObjectURL(blob);
+            box.replaceChildren(full);
+          })
+          .catch((e) => fail(`Не удалось загрузить картинку: ${e.message}`));
+      } else {
+        img.src = a.href;
+        box.append(full);
+      }
       full.append(img);
-      box.append(full);
       a.after(box);
       a.imgPreview = box;
     }
@@ -92,6 +137,7 @@ const renderMarkdown = (() => {
   }
 
   function imageLink(alt, href) {
+    if (isLocalPath(href)) return localLink(alt || href.split(/[\\/]/).pop(), href);
     const a = link(alt || href.split(/[?#]/)[0].split('/').pop() || 'картинка', href);
     // `![](…)` без расширения в адресе — тоже картинка, раз так написал автор.
     if (a.nodeType === Node.ELEMENT_NODE && !a.classList.contains('img-link') && /^https?:/i.test(href)) {
@@ -107,13 +153,17 @@ const renderMarkdown = (() => {
       if (m.index > last) parent.append(text.slice(last, m.index));
       last = m.index + m[0].length;
       if (m[1] !== undefined) parent.append(m[1]);
-      else if (m[3] !== undefined) parent.append(node('code', m[3].trim() || m[3]));
+      else if (m[3] !== undefined) {
+        const code = node('code', m[3].trim() || m[3]);
+        parent.append(isLocalPath(code.textContent) ? localLink(code, code.textContent) : code);
+      }
       else if (m[4] !== undefined || m[5] !== undefined) inline(parent.appendChild(node('strong')), m[4] ?? m[5]);
       else if (m[6] !== undefined) inline(parent.appendChild(node('del')), m[6]);
       else if (m[7] !== undefined || m[8] !== undefined) inline(parent.appendChild(node('em')), m[7] ?? m[8]);
       else if (m[9] !== undefined) parent.append(link(m[9], m[10]));
       else if (m[11] !== undefined) parent.append(link(m[11], m[11]));
       else if (m[13] !== undefined) parent.append(imageLink(m[12], m[13]));
+      else if (m[14] !== undefined) parent.append(localImage ? localLink(m[14], m[14]) : m[14]);
     }
     if (last < text.length) parent.append(text.slice(last));
   }
@@ -277,9 +327,16 @@ const renderMarkdown = (() => {
     }
   }
 
-  const render = (text) => {
+  // opts.localImage(path) — адрес картинки с машины агента для пути из текста;
+  // без него пути к файлам остаются обычным текстом.
+  const render = (text, opts = {}) => {
     const root = document.createDocumentFragment();
-    blocks(text.replace(/\r\n?/g, '\n').split('\n'), root);
+    localImage = typeof opts.localImage === 'function' ? opts.localImage : null;
+    try {
+      blocks(text.replace(/\r\n?/g, '\n').split('\n'), root);
+    } finally {
+      localImage = null;
+    }
     return root;
   };
   // Сообщение при обновлении строится заново: так раскрытые картинки переносятся
