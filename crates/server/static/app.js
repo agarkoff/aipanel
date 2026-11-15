@@ -502,7 +502,7 @@ function renderHeader() {
   menuKey = session.key;
   $('more').hidden = false;
   $('sm-model').textContent = session.model || 'неизвестна';
-  renderLimits(agent);
+  renderLimits(agent, session.tool);
   $('sm-id-text').textContent = sessionId(session.key);
   $('sm-handoff').hidden = $('handoff').hidden;
   $('sm-handoff').textContent = target ? `Продолжить в ${targetName}` : '';
@@ -532,12 +532,14 @@ function resetText(ms) {
   return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')} ${hm}`;
 }
 
-// Остаток лимитов подписок на машине агента: строка на инструмент.
+// Остаток лимитов подписки на машине агента. Показываем только тот инструмент,
+// в котором идёт эта сессия: лимит второго в ленте не нужен.
 // Проценты — сколько ещё доступно, а не сколько израсходовано.
-function renderLimits(agent) {
+function renderLimits(agent, tool) {
   const box = $('sm-limits');
   box.replaceChildren();
-  const limits = agent && agent.limits ? agent.limits : [];
+  const all = agent && agent.limits ? agent.limits : [];
+  const limits = all.filter((l) => l.tool === tool);
   if (!limits.length) {
     box.append(el('span', 'sm-limits-empty', agent && agent.online ? 'нет данных' : 'агент не в сети'));
     return;
