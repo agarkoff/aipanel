@@ -10,14 +10,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Item, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo};
+use aipanel_proto::{AgentMsg, Item, Limits, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{
     config::OpenCodeCfg,
     handoff,
-    util::{basename, create_diff, edit_diff, is_edit_tool, tool_path, tool_text, truncate, DIFF_LIMIT},
+    util::{basename, create_diff, edit_diff, is_edit_tool, meter, tool_path, tool_text, truncate, DIFF_LIMIT},
 };
 
 const TEXT_LIMIT: usize = 20_000;
@@ -688,6 +688,45 @@ impl OpenCode {
         self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None)
             .await
             .map(|_| ())
+    }
+
+    /// Остаток лимитов подписки OpenCode Go. Ключ хранится в базе opencode;
+    /// берём его через её же API, чтобы не открывать базу напрямую.
+    pub async fn limits(&self) -> Option<Limits> {
+        let creds = self.get("/api/credential").await.ok()?;
+        let key = creds["data"]
+            .as_array()?
+            .iter()
+            .filter(|c| c["integrationID"].as_str() == Some("opencode-go"))
+            .filter(|c| c["active"].as_bool().unwrap_or(true))
+            .find_map(|c| c["value"]["key"].as_str())
+            .filter(|k| !k.is_empty())?;
+        let resp = self
+            .http
+            .get("https://opencode.ai/zen/go/v1/usage")
+            .bearer_auth(key)
+            .header("user-agent", format!("aipanel-agent/{}", env!("CARGO_PKG_VERSION")))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: Value = resp.json().await.ok()?;
+        let mut meters = Vec::new();
+        for (key, label) in [("rolling", "5 ч"), ("weekly", "неделя"), ("monthly", "месяц")] {
+            let Some(used) = v["usage"][key]["percent"].as_f64() else { continue };
+            let mut m = meter(label, used, v["usage"][key]["resetsAt"].as_str());
+            // Исчерпанный лимит API помечает отдельно: процент мог остаться прежним.
+            if v["usage"][key]["status"].as_str() == Some("rate-limited") {
+                m.left = 0;
+            }
+            meters.push(m);
+        }
+        if meters.is_empty() {
+            return None;
+        }
+        Some(Limits { tool: "opencode".into(), title: "OpenCode Go".into(), meters, updated_at: crate::util::now_ms() })
     }
 
     /// Отвечает на запрос разрешения или на форму с вариантами.

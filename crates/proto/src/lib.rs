@@ -40,6 +40,36 @@ pub struct Item {
     pub tool: Option<String>,
 }
 
+/// Остаток одного окна лимита подписки (сессия, неделя, месяц).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Meter {
+    /// Подпись окна для панели: `5 ч`, `неделя`, `месяц`, `Fable`.
+    pub label: String,
+    /// Сколько процентов лимита ещё доступно, 0–100.
+    pub left: u8,
+    /// Время сброса, мс с эпохи Unix; 0 — неизвестно.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resets_at: i64,
+}
+
+fn is_zero(v: &i64) -> bool {
+    *v == 0
+}
+
+/// Лимиты подписки, которые агент проверяет на своей машине.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Limits {
+    /// `claude` или `opencode`.
+    pub tool: String,
+    /// Заголовок для панели: `Claude Code` или `OpenCode Go`.
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub meters: Vec<Meter>,
+    /// Когда лимиты проверены последний раз, мс с эпохи Unix.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub updated_at: i64,
+}
+
 /// Вариант ответа в запросе opencode.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PromptOption {
@@ -135,6 +165,11 @@ pub enum AgentMsg {
     },
     Sessions {
         sessions: Vec<SessionInfo>,
+    },
+    /// Текущий остаток лимитов подписок на машине агента. Полный список: он
+    /// заменяет показанный ранее.
+    Limits {
+        limits: Vec<Limits>,
     },
     History {
         session: String,

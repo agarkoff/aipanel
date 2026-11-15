@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Item, SessionInfo};
+use aipanel_proto::{AgentMsg, Item, Limits, SessionInfo};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -25,7 +25,7 @@ use tokio::{
 use crate::{
     config::ClaudeCfg,
     handoff,
-    util::{basename, create_diff, edit_diff, now_ms, parse_iso_ms, to_ms, tool_text, truncate, DIFF_LIMIT},
+    util::{basename, create_diff, edit_diff, meter, now_ms, parse_iso_ms, to_ms, tool_text, truncate, DIFF_LIMIT},
 };
 
 const TAIL_META_BYTES: u64 = 256 * 1024;
@@ -105,13 +105,72 @@ pub struct Claude {
     cfg: ClaudeCfg,
     home: PathBuf,
     rescan: Arc<Notify>,
+    /// Запросы остатка лимитов на api.anthropic.com (не к локальным файлам).
+    http: reqwest::Client,
     st: Mutex<St>,
 }
 
 impl Claude {
     pub fn new(cfg: ClaudeCfg, rescan: Arc<Notify>) -> Self {
         let home = cfg.home.clone().unwrap_or_else(|| crate::util::home_dir().join(".claude"));
-        Self { cfg, home, rescan, st: Mutex::new(St::default()) }
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap_or_default();
+        Self { cfg, home, rescan, http, st: Mutex::new(St::default()) }
+    }
+
+    /// Остаток лимитов подписки Claude. Проценты приходят как «использовано»,
+    /// в панель уходит противоположное — сколько ещё доступно.
+    pub async fn limits(&self) -> Option<Limits> {
+        let text = fs::read_to_string(self.home.join(".credentials.json")).ok()?;
+        let cred: Value = serde_json::from_str(&text).ok()?;
+        let token = cred["claudeAiOauth"]["accessToken"].as_str().filter(|t| !t.is_empty())?;
+        let resp = self
+            .http
+            .get("https://api.anthropic.com/api/oauth/usage")
+            .bearer_auth(token)
+            .header("anthropic-beta", "oauth-2025-04-20")
+            .header("user-agent", format!("aipanel-agent/{}", env!("CARGO_PKG_VERSION")))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let v: Value = resp.json().await.ok()?;
+        let mut meters = Vec::new();
+        // Новый ответ — массив `limits` с процентом использования; старый — поля
+        // `five_hour` и `seven_day` с тем же `utilization`.
+        if let Some(list) = v["limits"].as_array() {
+            for limit in list {
+                let label = match limit["kind"].as_str().unwrap_or_default() {
+                    "session" => "5 ч".to_owned(),
+                    "weekly_all" => "неделя".to_owned(),
+                    // Недельный лимит на отдельную модель: у него своё имя.
+                    "weekly_scoped" => limit["scope"]["model"]["display_name"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("неделя")
+                        .to_owned(),
+                    _ => continue,
+                };
+                if let Some(used) = limit["percent"].as_f64() {
+                    meters.push(meter(&label, used, limit["resets_at"].as_str()));
+                }
+            }
+        }
+        if meters.is_empty() {
+            for (key, label) in [("five_hour", "5 ч"), ("seven_day", "неделя")] {
+                if let Some(used) = v[key]["utilization"].as_f64() {
+                    meters.push(meter(label, used, v[key]["resets_at"].as_str()));
+                }
+            }
+        }
+        if meters.is_empty() {
+            return None;
+        }
+        Some(Limits { tool: "claude".into(), title: "Claude Code".into(), meters, updated_at: now_ms() })
     }
 
     fn lock(&self) -> MutexGuard<'_, St> {

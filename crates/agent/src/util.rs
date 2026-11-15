@@ -265,6 +265,16 @@ pub fn parse_iso_ms(s: &str) -> i64 {
     ((days * 24 + h) * 60 + mi) * 60_000 + sec * 1000 + ms
 }
 
+/// Остаток окна лимита: API отдаёт процент использования, панель показывает
+/// противоположное — сколько ещё доступно. `resets_at` — ISO-время сброса (UTC).
+pub fn meter(label: &str, used: f64, resets_at: Option<&str>) -> aipanel_proto::Meter {
+    aipanel_proto::Meter {
+        label: label.to_owned(),
+        left: (100.0 - used).clamp(0.0, 100.0).round() as u8,
+        resets_at: resets_at.map(parse_iso_ms).unwrap_or(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

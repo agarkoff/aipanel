@@ -206,8 +206,72 @@ input, textarea, select {
   background: var(--panel);
 }
 .back { display: none; }
-/* Выпадающая панель сессии (модель и смена агента) есть только на узком экране. */
-.more, .session-menu { display: none; }
+/* Кнопка «модель и лимиты» и её выпадающая панель есть на всех экранах:
+   на компьютере это то же окно, что на телефоне. */
+.top { position: relative; }
+.more:not([hidden]) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
+}
+.more svg { transition: transform .15s; }
+.more[aria-expanded="true"] svg { transform: rotate(180deg); }
+.session-menu:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 8px;
+  z-index: 20;
+  width: min(340px, calc(100vw - 16px));
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
+}
+.sm-row { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sm-key { font-size: 12px; color: var(--muted); }
+.sm-model {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+#sm-handoff { min-height: 36px; }
+/* Идентификатор сессии живёт в панели; копируется нажатием на всю строку. */
+#session-id, #copy-id { display: none; }
+.sm-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  margin: 0 -8px;
+  width: calc(100% + 16px);
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+.sm-id code { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.sm-id svg { flex: none; color: var(--muted); }
+.sm-id:active { background: var(--tool); }
+.sm-id.copied svg { color: var(--idle); }
+/* Остаток лимитов подписок: строка на инструмент, проценты — сколько ещё доступно. */
+.sm-limits { display: flex; flex-direction: column; gap: 6px; }
+.sm-limit { display: flex; flex-direction: column; gap: 1px; }
+.sm-limit-tool { font-size: 12px; font-weight: 600; }
+.sm-limit-meters { font-size: 13px; font-variant-numeric: tabular-nums; }
+.sm-limit.out .sm-limit-meters { color: var(--wait); }
+.sm-limit-reset, .sm-limits-empty { font-size: 11px; color: var(--muted); }
 .titles { min-width: 0; flex: 1; }
 .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subtitle {
@@ -594,64 +658,11 @@ button .icon { display: none; }
   #interrupt, #handoff { font-size: 16px; }
 
   /* Вместо кнопки «⇄» — стрелка вниз; смена агента и модель — в выпадающей панели. */
-  .top { position: relative; }
   #handoff { display: none; }
-  .more:not([hidden]) {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: none;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border-radius: 50%;
-  }
-  .more svg { transition: transform .15s; }
-  .more[aria-expanded="true"] svg { transform: rotate(180deg); }
-  .session-menu:not([hidden]) {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 8px;
-    z-index: 20;
-    width: min(320px, calc(100vw - 16px));
-    padding: 12px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--panel);
-    box-shadow: 0 6px 24px rgba(0, 0, 0, .18);
-  }
-  .sm-row { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-  .sm-key { font-size: 12px; color: var(--muted); }
-  .sm-model {
-    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-    font-size: 14px;
-    overflow-wrap: anywhere;
-  }
+  .more:not([hidden]) { width: 44px; height: 44px; }
+  .session-menu:not([hidden]) { width: min(320px, calc(100vw - 16px)); }
   #sm-handoff { min-height: 44px; }
-  /* Идентификатор сессии на телефоне живёт в панели; копируется нажатием на всю строку. */
-  #session-id, #copy-id { display: none; }
-  .sm-id {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 40px;
-    margin: 0 -8px;
-    width: calc(100% + 16px);
-    padding: 4px 8px;
-    border: 0;
-    border-radius: 8px;
-    background: none;
-    color: var(--text);
-    text-align: left;
-    cursor: pointer;
-  }
-  .sm-id code { flex: 1; min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
-  .sm-id svg { flex: none; color: var(--muted); }
-  .sm-id:active { background: var(--tool); }
-  .sm-id.copied svg { color: var(--idle); }
+  .sm-id { min-height: 40px; }
   .composer button { font-size: 22px; font-weight: 600; }
 
   .feed { padding: 12px 12px 16px; gap: 10px; }

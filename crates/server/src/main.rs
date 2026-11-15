@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, ServerMsg, SessionInfo};
+use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -52,6 +52,8 @@ struct AgentEntry {
     os: String,
     version: String,
     sessions: Vec<SessionInfo>,
+    /// Последние проверенные лимиты подписок на машине агента.
+    limits: Vec<Limits>,
 }
 
 struct BrowserEntry {
@@ -103,6 +105,7 @@ impl Inner {
                     "os": a.os,
                     "version": a.version,
                     "sessions": a.sessions,
+                    "limits": a.limits,
                 })
             })
             .collect();
@@ -399,10 +402,14 @@ async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) {
         for session in watched {
             let _ = tx.try_send(ServerMsg::Watch { session });
         }
-        let sessions = inner.agents.remove(&key).map(|a| a.sessions).unwrap_or_default();
+        let (sessions, limits) = inner
+            .agents
+            .remove(&key)
+            .map(|a| (a.sessions, a.limits))
+            .unwrap_or_default();
         inner.agents.insert(
             key.clone(),
-            AgentEntry { conn, tx: Some(tx), os, version, sessions },
+            AgentEntry { conn, tx: Some(tx), os, version, sessions, limits },
         );
         inner.broadcast_agents();
         conn
@@ -458,6 +465,13 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
             sessions.truncate(MAX_SESSIONS_PER_AGENT);
             if let Some(a) = inner.agents.get_mut(&(owner.to_owned(), agent.to_owned())) {
                 a.sessions = sessions;
+            }
+            inner.broadcast_agents();
+        }
+        AgentMsg::Limits { mut limits } => {
+            limits.truncate(4);
+            if let Some(a) = inner.agents.get_mut(&(owner.to_owned(), agent.to_owned())) {
+                a.limits = limits;
             }
             inner.broadcast_agents();
         }
@@ -978,6 +992,7 @@ mod tests {
             os: "linux".into(),
             version: "0.1".into(),
             sessions: Vec::new(),
+            limits: Vec::new(),
         }
     }
 

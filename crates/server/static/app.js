@@ -502,6 +502,7 @@ function renderHeader() {
   menuKey = session.key;
   $('more').hidden = false;
   $('sm-model').textContent = session.model || 'неизвестна';
+  renderLimits(agent);
   $('sm-id-text').textContent = sessionId(session.key);
   $('sm-handoff').hidden = $('handoff').hidden;
   $('sm-handoff').textContent = target ? `Продолжить в ${targetName}` : '';
@@ -518,6 +519,48 @@ function renderHeader() {
       : session.status === 'stalled'
         ? STALLED_HINT
         : DELIVERY[session.delivery] || '';
+  }
+}
+
+// Время сброса лимита: сегодня — только часы, иначе ещё и дата.
+function resetText(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const now = new Date();
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (d.toDateString() === now.toDateString()) return hm;
+  return `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')} ${hm}`;
+}
+
+// Остаток лимитов подписок на машине агента: строка на инструмент.
+// Проценты — сколько ещё доступно, а не сколько израсходовано.
+function renderLimits(agent) {
+  const box = $('sm-limits');
+  box.replaceChildren();
+  const limits = agent && agent.limits ? agent.limits : [];
+  if (!limits.length) {
+    box.append(el('span', 'sm-limits-empty', agent && agent.online ? 'нет данных' : 'агент не в сети'));
+    return;
+  }
+  for (const limit of limits) {
+    const row = el('div', 'sm-limit');
+    const meters = limit.meters || [];
+    if (meters.some((m) => m.left === 0)) row.classList.add('out');
+    const parts = [];
+    const details = [];
+    for (const m of meters) {
+      parts.push(`${m.label} ${m.left}%`);
+      const reset = resetText(m.resets_at);
+      details.push(`${m.label}: осталось ${m.left}%${reset ? `, сброс ${reset}` : ''}`);
+    }
+    row.append(el('span', 'sm-limit-tool', limit.title || limit.tool));
+    row.append(el('span', 'sm-limit-meters', parts.join(' · ')));
+    // На телефоне подсказка по наведению недоступна, поэтому ближайший сброс
+    // к тому же показан текстом.
+    const nearest = meters.filter((m) => m.resets_at).sort((a, b) => a.resets_at - b.resets_at)[0];
+    if (nearest) row.append(el('span', 'sm-limit-reset', `сброс ${resetText(nearest.resets_at)}`));
+    row.title = `${limit.title || limit.tool}: ${details.join(' · ')}`;
+    box.append(row);
   }
 }
 

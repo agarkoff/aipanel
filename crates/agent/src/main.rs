@@ -20,7 +20,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, ServerMsg, SessionInfo};
+use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::TcpStream,
@@ -40,6 +40,9 @@ struct Agent {
     opencode: Arc<OpenCode>,
     out: mpsc::UnboundedSender<AgentMsg>,
     rescan: Arc<Notify>,
+    /// Будит проверку лимитов: сразу после подключения к серверу.
+    limits_now: Arc<Notify>,
+    force_limits: AtomicBool,
     online: AtomicBool,
     force: AtomicBool,
     watchers: Mutex<HashMap<String, JoinHandle<()>>>,
@@ -284,6 +287,37 @@ async fn scanner(agent: Arc<Agent>) {
     }
 }
 
+/// Раз в несколько минут проверяет остаток лимитов подписок на этой машине
+/// и отправляет серверу, если он изменился.
+async fn limits_watcher(agent: Arc<Agent>) {
+    let mut last: Vec<Limits> = Vec::new();
+    loop {
+        if agent.online.load(Ordering::Relaxed) {
+            let mut list = Vec::new();
+            if agent.cfg.claude.enabled {
+                if let Some(limits) = agent.claude.limits().await {
+                    list.push(limits);
+                }
+            }
+            if agent.cfg.opencode.enabled {
+                if let Some(limits) = agent.opencode.limits().await {
+                    list.push(limits);
+                }
+            }
+            // Неудачный опрос не стирает известные лимиты: пустой список уходит,
+            // только когда сервер сам попросил свежие данные после подключения.
+            if agent.force_limits.swap(false, Ordering::Relaxed) || list != last {
+                let _ = agent.out.send(AgentMsg::Limits { limits: list.clone() });
+                last = list;
+            }
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(180)) => {}
+            _ = agent.limits_now.notified() => {}
+        }
+    }
+}
+
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn connect(cfg: &Config) -> Result<Ws, String> {
@@ -312,9 +346,11 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
         return;
     }
     agent.force.store(true, Ordering::Relaxed);
+    agent.force_limits.store(true, Ordering::Relaxed);
     agent.online.store(true, Ordering::Relaxed);
     agent.connected_since.store(util::now_ms(), Ordering::Relaxed);
     agent.rescan.notify_one();
+    agent.limits_now.notify_one();
 
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     let mut last_rx = Instant::now();
@@ -371,12 +407,15 @@ async fn status_writer(agent: Arc<Agent>) {
 async fn run(cfg: Config) {
     let (out, mut rx) = mpsc::unbounded_channel();
     let rescan = Arc::new(Notify::new());
+    let limits_now = Arc::new(Notify::new());
     let agent = Arc::new(Agent {
         claude: Arc::new(Claude::new(cfg.claude.clone(), Arc::clone(&rescan))),
         opencode: Arc::new(OpenCode::new(cfg.opencode.clone())),
         cfg,
         out,
         rescan,
+        limits_now,
+        force_limits: AtomicBool::new(false),
         online: AtomicBool::new(false),
         force: AtomicBool::new(false),
         watchers: Mutex::new(HashMap::new()),
@@ -386,6 +425,7 @@ async fn run(cfg: Config) {
         last_error: Mutex::new(String::new()),
     });
     tokio::spawn(scanner(Arc::clone(&agent)));
+    tokio::spawn(limits_watcher(Arc::clone(&agent)));
     tokio::spawn(status_writer(Arc::clone(&agent)));
 
     let mut backoff = 1;
