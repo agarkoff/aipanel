@@ -325,9 +325,22 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
+/// Версия выпуска для показа в панели: `major.minor` из версии воркспейса
+/// (`Cargo.toml`, `[workspace.package]`). Патч-разряд не используется и не показывается.
+fn release_version(full: &str) -> String {
+    let mut parts = full.split('.');
+    match (parts.next(), parts.next()) {
+        (Some(major), Some(minor)) => format!("{major}.{minor}"),
+        _ => full.to_string(),
+    }
+}
+
 async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     match app.authed(&headers) {
-        Some(user) => Json(json!({ "user": user })).into_response(),
+        Some(user) => {
+            Json(json!({ "user": user, "version": release_version(env!("CARGO_PKG_VERSION")) }))
+                .into_response()
+        }
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
@@ -894,6 +907,13 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_version_is_major_minor() {
+        assert_eq!(release_version("1.0.0"), "1.0");
+        assert_eq!(release_version("2.13.0"), "2.13");
+        assert_eq!(release_version("3"), "3");
+    }
 
     #[test]
     fn parses_users() {

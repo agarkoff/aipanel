@@ -96,7 +96,8 @@ async function boot() {
   }
   const me = await res.json().catch(() => ({}));
   if (me.user) {
-    $('user').textContent = me.user;
+    $('user').textContent = me.version ? `${me.user} · v${me.version}` : me.user;
+    $('user').title = me.version ? `Версия панели ${me.version}` : '';
     $('user').hidden = false;
   }
   start();
