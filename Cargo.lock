@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "aipanel-agent"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "aipanel-proto",
  "futures-util",
@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-proto"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-server"
-version = "7.0.0"
+version = "7.1.0"
 dependencies = [
  "aipanel-proto",
  "axum",
