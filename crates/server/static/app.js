@@ -99,6 +99,11 @@ let modelSet = null;
 // Основной источник — лента сессии, поэтому в историю попадают и сообщения,
 // отправленные из окна консоли или с другого устройства.
 const feedRequests = new Map(); // id элемента ленты -> текст запроса
+// Вызов инструмента, к которому относится результат: по нему видно, что за
+// вывод (файл из Read, команда Bash) и как его подсветить.
+const toolCalls = new Map(); // id вызова -> элемент ленты tool_use
+const resultCalls = new Map(); // id результата -> элемент ленты tool_use
+let pendingCalls = []; // вызовы Claude Code, результата которых ещё не было
 // Отправленные из этого браузера, но ещё не пришедшие в ленту.
 const sentRequests = new Map(); // "агент\nсессия" -> [текст, ...]
 let histPos = 0; // 0 — черновик, 1 — последний запрос, 2 — предыдущий…
@@ -742,10 +747,15 @@ function diffDetails(text) {
   const body = el('div', 'diff-body');
   const lines = text.split('\n');
   if (lines[lines.length - 1] === '') lines.pop();
-  for (const line of lines) {
+  // Содержимое строк подсвечивается по языку файла; знак +/−/пробел — как был.
+  const code = Highlight.diffLines(lines, info.file);
+  lines.forEach((line, k) => {
     const cls = diffLineClass(line);
-    body.append(el('div', cls ? `diff-line ${cls}` : 'diff-line', line));
-  }
+    const row = el('div', cls ? `diff-line ${cls}` : 'diff-line');
+    if (code[k]) row.append(line.slice(0, 1), code[k]);
+    else row.textContent = line;
+    body.append(row);
+  });
   details.append(summary, body);
   return details;
 }
@@ -760,7 +770,58 @@ function mdOptions() {
   };
 }
 
-function buildItem(item) {
+// Подсветка строится при первом раскрытии: результаты свёрнуты, и в длинной
+// ленте большинство из них так и не откроют. До этого в узле — тот же текст,
+// так что поиск по странице его находит.
+function highlightOnOpen(details, body, build) {
+  let done = false;
+  const run = () => {
+    if (done || !details.open) return;
+    done = true;
+    let view = null;
+    try {
+      view = build();
+    } catch (e) {
+      console.error('подсветка:', e);
+    }
+    if (view) {
+      body.replaceChildren(view);
+      body.classList.add('hl');
+    }
+  };
+  details.addEventListener('toggle', run);
+  run();
+}
+
+// Вызов инструмента для результата. У opencode id результата — id вызова
+// с `:r`. У Claude Code вызов и результат — разные строки транскрипта без
+// общего id в ленте, но результаты идут в порядке вызовов.
+function callFor(item, isNew) {
+  if (resultCalls.has(item.id)) return resultCalls.get(item.id);
+  let call = null;
+  if (item.id.endsWith(':r') && toolCalls.has(item.id.slice(0, -2))) {
+    call = toolCalls.get(item.id.slice(0, -2));
+    pendingCalls = pendingCalls.filter((c) => c !== call);
+  } else if (isNew) {
+    call = pendingCalls.shift() || null;
+  }
+  resultCalls.set(item.id, call);
+  return call;
+}
+
+function trackCall(item, isNew) {
+  if (item.kind === 'tool_use') {
+    toolCalls.set(item.id, item);
+    if (isNew) pendingCalls.push(item);
+  } else if (item.kind === 'text' && item.role === 'assistant' && isNew) {
+    // Ответ модели текстом — результаты вызовов уже пришли: незакрытые
+    // вызовы не должны забрать чужой результат. Своё сообщение из очереди
+    // может прийти посреди работы инструмента, поэтому оно очередь не трогает.
+    pendingCalls = [];
+  }
+}
+
+function buildItem(item, call) {
   const node = el('div', `item ${item.role} ${item.kind}`);
   node.dataset.id = item.id;
   if (item.kind === 'text') {
@@ -789,9 +850,15 @@ function buildItem(item) {
       item.kind === 'thinking' ? 'Размышление'
       : item.kind === 'tool_use' ? `${item.tool || 'инструмент'}: ${firstLine(item.text)}`
       : `Результат: ${firstLine(item.text)}`;
-    details.append(el('summary', '', label), el('div', 'body', item.text));
+    const body = el('div', 'body', item.text);
+    details.append(el('summary', '', label), body);
     // Размышления раскрыты по умолчанию; вызовы инструментов и результаты свёрнуты.
     if (item.kind === 'thinking') details.open = true;
+    if (item.kind === 'tool_use') {
+      highlightOnOpen(details, body, () => Highlight.toolInput(item.text, item.tool));
+    } else if (item.kind === 'tool_result') {
+      highlightOnOpen(details, body, () => Highlight.toolResult(item.text, call && call.tool, call && call.text));
+    }
     node.append(details);
   }
   if (item.ts && (item.kind === 'text' || item.kind === 'error')) {
@@ -806,6 +873,9 @@ function applyHistory(msg) {
   if (msg.reset) {
     nodes.clear();
     feedRequests.clear();
+    toolCalls.clear();
+    resultCalls.clear();
+    pendingCalls = [];
     feed.replaceChildren();
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
   } else if (msg.items.length && !nodes.size) {
@@ -818,6 +888,8 @@ function applyHistory(msg) {
       nodes.delete(id);
     }
     feedRequests.delete(id);
+    toolCalls.delete(id);
+    resultCalls.delete(id);
   }
   for (const item of msg.items) {
     // Запросы из ленты — история для стрелок в поле ввода.
@@ -825,9 +897,10 @@ function applyHistory(msg) {
       feedRequests.set(item.id, item.text);
       consumeSentRequest(item.text);
     }
-    const node = buildItem(item);
-    if (item.id === flashId) node.classList.add('flash');
     const old = nodes.get(item.id);
+    trackCall(item, !old);
+    const node = buildItem(item, item.kind === 'tool_result' ? callFor(item, !old) : null);
+    if (item.id === flashId) node.classList.add('flash');
     if (old) {
       const oldDetails = old.querySelector('details');
       const newDetails = node.querySelector('details');

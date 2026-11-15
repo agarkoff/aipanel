@@ -299,7 +299,17 @@ const renderMarkdown = (() => {
         while (i < lines.length && !close.test(lines[i])) code.push(lines[i++]);
         i++; // закрывающая строка; незакрытый блок идёт до конца текста
         const pre = node('pre');
-        pre.append(node('code', code.join('\n')));
+        const text = code.join('\n');
+        // Язык блока (```kotlin) подсвечивается, если hl.js его знает.
+        const lang = typeof Highlight !== 'undefined' ? Highlight.lang(m[2]) : null;
+        const el = node('code');
+        if (lang) {
+          el.dataset.lang = lang;
+          el.append(Highlight.fragment(text, lang));
+        } else {
+          el.textContent = text;
+        }
+        pre.append(el);
         parent.append(pre);
       } else if ((m = RE_HEADING.exec(line))) {
         inline(parent.appendChild(node(`h${m[1].length}`)), m[2]);

@@ -13,6 +13,16 @@
   --off: #a0a09a;
   --diff-add: #e7f5e9;
   --diff-del: #fbe9e7;
+  /* Подсветка синтаксиса (hl.js) */
+  --hl-k: #a626a4;
+  --hl-t: #b35900;
+  --hl-s: #3c7d23;
+  --hl-n: #b8436a;
+  --hl-c: #76766e;
+  --hl-f: #2f5fbf;
+  --hl-v: #b02e26;
+  --hl-a: #1f7a8c;
+  --hl-m: #8f6a00;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -26,6 +36,15 @@
     --tool: #26282c;
     --diff-add: #1e3524;
     --diff-del: #3b2321;
+    --hl-k: #d197e8;
+    --hl-t: #e5b567;
+    --hl-s: #9ccc7a;
+    --hl-n: #f08fae;
+    --hl-c: #82848a;
+    --hl-f: #7fb0ff;
+    --hl-v: #f2877e;
+    --hl-a: #6cc4d4;
+    --hl-m: #d9bb62;
   }
 }
 
@@ -435,6 +454,39 @@ input, textarea, select {
 .diff-line.del { background: var(--diff-del); }
 .diff-line.hunk { color: var(--accent); }
 .diff-line.meta { color: var(--muted); }
+
+/* Подсветка синтаксиса: классы токенов из hl.js */
+.hl-k { color: var(--hl-k); }
+.hl-t { color: var(--hl-t); }
+.hl-s { color: var(--hl-s); }
+.hl-n { color: var(--hl-n); }
+.hl-c { color: var(--hl-c); font-style: italic; }
+.hl-f { color: var(--hl-f); }
+.hl-v { color: var(--hl-v); }
+.hl-a { color: var(--hl-a); }
+.hl-m { color: var(--hl-m); }
+.hl-p { color: var(--muted); }
+.hl-b { font-weight: 600; }
+.hl-da { color: var(--hl-s); }
+.hl-dd { color: var(--hl-v); }
+.hl-dh { color: var(--accent); }
+/* Вывод с номерами строк (Read, grep): номер — отдельной колонкой, при
+   переносе длинной строки код не заезжает под номер. */
+.hl-row { display: flex; gap: 10px; }
+.hl-ln {
+  flex: none;
+  min-width: 3ch;
+  text-align: right;
+  color: var(--muted);
+  opacity: .7;
+  user-select: none;
+}
+.hl-ln.hl-path { text-align: left; max-width: 45%; overflow-wrap: anywhere; }
+.hl-code { flex: 1; min-width: 0; }
+.hl-note { color: var(--muted); }
+.hl-note.hl-file { color: var(--text); font-weight: 600; margin-top: 4px; }
+.hl-note.hl-file:first-child { margin-top: 0; }
+.hl-diff .diff-line { padding: 0 4px; white-space: pre-wrap; width: auto; }
 
 /* Markdown в сообщениях */
 .item .body.md { white-space: normal; }

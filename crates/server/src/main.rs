@@ -27,6 +27,7 @@ use tokio::sync::{mpsc, oneshot};
 const INDEX_HTML: &str = include_str!("../static/index.html");
 const APP_JS: &str = include_str!("../static/app.js");
 const MD_JS: &str = include_str!("../static/md.js");
+const HL_JS: &str = include_str!("../static/hl.js");
 const SUGGEST_JS: &str = include_str!("../static/suggest.js");
 const STYLE_CSS: &str = include_str!("../static/style.css");
 const ICON_SVG: &str = include_str!("../static/icon.svg");
@@ -1116,6 +1117,7 @@ async fn main() {
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }))
         .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
         .route("/md.js", get(|| async { asset("text/javascript; charset=utf-8", MD_JS) }))
+        .route("/hl.js", get(|| async { asset("text/javascript; charset=utf-8", HL_JS) }))
         .route("/suggest.js", get(|| async { asset("text/javascript; charset=utf-8", SUGGEST_JS) }))
         .route("/style.css", get(|| async { asset("text/css; charset=utf-8", STYLE_CSS) }))
         .route("/icon.svg", get(|| async { asset("image/svg+xml", ICON_SVG) }))

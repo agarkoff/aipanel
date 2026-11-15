@@ -154,6 +154,7 @@ const fixture = fs
 const assets = new Map([
   ['/app.js', 'text/javascript; charset=utf-8'],
   ['/md.js', 'text/javascript; charset=utf-8'],
+  ['/hl.js', 'text/javascript; charset=utf-8'],
   ['/suggest.js', 'text/javascript; charset=utf-8'],
   ['/style.css', 'text/css; charset=utf-8'],
   ['/icon.svg', 'image/svg+xml'],
@@ -827,6 +828,54 @@ try {
     imageRequests.length >= 1 && imageRequests[0].agent === 'ui-test' && imageRequests[0].session === 's1',
     imageRequests,
   );
+
+  // Подсветка: результат Read Claude Code (вызов и результат — разные id),
+  // результат bash opencode (`id:r`), дифф правки и блок кода в ответе.
+  const hl = await evaluate(`(async () => {
+    const extra = [
+      { id: 'h1:0', role: 'assistant', kind: 'tool_use', tool: 'Read', text: 'D:\\\\p\\\\Main.kt' },
+      { id: 'h2:0', role: 'tool', kind: 'tool_result', text: '     1\\tfun main() {}\\n     2\\tval x = "s"\\n' },
+      { id: 'h3:1', role: 'assistant', kind: 'tool_use', tool: 'bash', text: 'git diff' },
+      { id: 'h3:1:r', role: 'tool', kind: 'tool_result',
+        text: 'diff --git a/a.rs b/a.rs\\n--- a/a.rs\\n+++ b/a.rs\\n@@ -1 +1 @@\\n-fn a() {}\\n+fn b() {}\\n' },
+      { id: 'h4:diff', role: 'assistant', kind: 'diff', text: '--- a/x.py\\n+++ b/x.py\\n@@ -1,1 +1,1 @@\\n-def a(): pass\\n+def b(): pass\\n' },
+      { id: 'h5:0', role: 'assistant', kind: 'text', text: 'Код:\\n\\n\`\`\`kotlin\\nval x = 1\\n\`\`\`' },
+    ];
+    applyHistory({ items: extra });
+    const item = (id) => document.querySelector('#feed .item[data-id="' + id + '"]');
+    const read = item('h2:0').querySelector('details');
+    const plainBefore = !read.querySelector('.hl-row');
+    read.open = true;
+    const cmd = item('h3:1').querySelector('details');
+    cmd.open = true;
+    const gitDiff = item('h3:1:r').querySelector('details');
+    gitDiff.open = true;
+    await new Promise((r) => setTimeout(r, 50));
+    const words = (root, cls) => [...root.querySelectorAll('.hl-' + cls)].map((s) => s.textContent);
+    const out = {
+      plainBefore,
+      readRows: read.querySelectorAll('.hl-row').length,
+      readNums: [...read.querySelectorAll('.hl-ln')].map((s) => s.textContent),
+      readKw: words(read, 'k'),
+      readText: read.querySelector('.body').textContent,
+      cmdFn: words(cmd, 'f'),
+      gitDiffKw: words(gitDiff, 'k'),
+      gitDiffAdd: gitDiff.querySelectorAll('.diff-line.add').length,
+      diffKw: words(item('h4:diff'), 'k'),
+      diffRow: item('h4:diff').querySelector('.diff-line.add').textContent,
+      mdKw: words(item('h5:0'), 'k'),
+    };
+    applyHistory({ items: [], drop: extra.map((x) => x.id) });
+    return out;
+  })()`);
+  check('результат подсвечивается только при раскрытии', hl.plainBefore, hl);
+  check('Read: строки с номерами по языку файла', hl.readRows === 2 && hl.readNums.join() === '1,2' &&
+    JSON.stringify(hl.readKw) === '["fun","val"]', hl);
+  check('Read: текст кода без номеров', hl.readText === '1fun main() {}2val x = "s"', hl);
+  check('вызов bash подсвечен как команда', hl.cmdFn.includes('git'), hl);
+  check('git diff в результате — дифф с подсветкой', hl.gitDiffAdd === 1 && hl.gitDiffKw.join() === 'fn,fn', hl);
+  check('дифф правки подсвечен по языку файла', hl.diffKw.join() === 'def,pass,def,pass' && hl.diffRow === '+def b(): pass', hl);
+  check('блок кода в ответе подсвечен', hl.mdKw.join() === 'val', hl);
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
