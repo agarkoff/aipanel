@@ -220,29 +220,9 @@ impl OpenCode {
     /// (`~/.aipanel/opencode/<pid>.json`). Отчёты мёртвых процессов удаляются.
     fn windowed_sessions(&self) -> HashSet<String> {
         let mut out = HashSet::new();
-        let Ok(entries) = std::fs::read_dir(crate::util::aipanel_dir().join("opencode")) else {
-            return out;
-        };
         let now = crate::util::now_ms();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Some(v) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            else {
-                continue;
-            };
-            let pid = v["pid"].as_u64().unwrap_or(0) as u32;
-            if pid == 0 || !crate::platform::pid_alive(pid) {
-                let _ = std::fs::remove_file(&path);
-                continue;
-            }
-            // Плагин обновляет отчёт каждые 5 с; давно не обновлявшийся отчёт устарел.
-            let fresh = v["updated"].as_i64().is_some_and(|u| now - u < 60_000);
-            if let (true, Some(id)) = (fresh, v["sessionID"].as_str()) {
-                out.insert(id.to_owned());
-            }
+        for dir in crate::util::window_reports_dirs() {
+            collect_windowed(&dir, now, &mut out);
         }
         out
     }
@@ -754,6 +734,33 @@ impl OpenCode {
     }
 }
 
+/// Добавляет в `out` сессии, чьи окна живы и чей отчёт свежий.
+fn collect_windowed(dir: &Path, now: i64, out: &mut HashSet<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let Some(v) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        else {
+            continue;
+        };
+        let pid = v["pid"].as_u64().unwrap_or(0) as u32;
+        if pid == 0 || !crate::platform::pid_alive(pid) {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        // Запись обновляется, пока окно живо; старые отчёты не учитываются.
+        let fresh = v["updated"].as_i64().is_some_and(|u| now - u < 60_000);
+        if let (true, Some(id)) = (fresh, v["sessionID"].as_str()) {
+            out.insert(id.to_owned());
+        }
+    }
+}
+
 fn text_hash(text: &str) -> u64 {
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
@@ -1083,6 +1090,28 @@ mod tests {
                 ("m2:text:0", "text", "done"),
             ]
         );
+    }
+
+    #[test]
+    fn collects_live_window_reports() {
+        let dir = std::env::temp_dir().join(format!("aipanel-windows-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = crate::util::now_ms();
+        let report = |pid: u32, sid: &str, updated: i64| {
+            serde_json::json!({"pid": pid, "sessionID": sid, "updated": updated}).to_string()
+        };
+        std::fs::write(dir.join("live.json"), report(std::process::id(), "ses_live", now)).unwrap();
+        // Просроченный отчёт: окно молчит дольше минуты.
+        std::fs::write(dir.join("stale.json"), report(std::process::id(), "ses_stale", now - 120_000)).unwrap();
+        // Отчёт убитого процесса.
+        std::fs::write(dir.join("dead.json"), report(4_294_967_295, "ses_dead", now)).unwrap();
+        std::fs::write(dir.join("not-a-report.txt"), "{}").unwrap();
+
+        let mut out = HashSet::new();
+        collect_windowed(&dir, now, &mut out);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(out.into_iter().collect::<Vec<_>>(), ["ses_live"]);
     }
 
     #[test]

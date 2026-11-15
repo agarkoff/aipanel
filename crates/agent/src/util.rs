@@ -61,6 +61,21 @@ pub fn aipanel_dir() -> PathBuf {
 
 static HOME_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
 
+/// Каталоги, где плагин opencode оставляет отчёты об открытых окнах.
+///
+/// Плагин берёт `AIPANEL_HOME` из окружения процесса opencode, а там его обычно
+/// нет даже у второго экземпляра агента с `--home`: отчёты уходят в `~/.aipanel`.
+/// Поэтому смотрим оба места — профильное и общее, иначе второй агент считает,
+/// что окон нет, и открывает дубли вместо того, чтобы писать в уже открытую сессию.
+pub fn window_reports_dirs() -> Vec<PathBuf> {
+    let mut dirs = vec![aipanel_dir().join("opencode")];
+    let shared = home_dir().join(".aipanel").join("opencode");
+    if !dirs.contains(&shared) {
+        dirs.push(shared);
+    }
+    dirs
+}
+
 /// Переопределяет каталог данных (флаг `--home`). Нужен второму экземпляру
 /// агента, чтобы его состояние, лог и pid не пересекались с основным.
 pub fn set_aipanel_dir(dir: PathBuf) {
