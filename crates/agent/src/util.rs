@@ -109,15 +109,29 @@ pub fn now_ms() -> i64 {
     to_ms(SystemTime::now())
 }
 
+/// Начало ошибки агента «такого каталога нет». По этому началу панель
+/// (`crates/server/static/app.js`, `DIR_MISSING`) предлагает создать каталог
+/// и повторяет запуск с флагом `create`.
+pub const DIR_MISSING: &str = "каталог не найден: ";
+
 /// Каталог для новой сессии должен быть существующим абсолютным путём:
 /// относительный путь зависел бы от каталога, из которого запущен агент.
 pub fn session_dir(cwd: &str) -> Result<&Path, String> {
+    session_dir_with(cwd, false)
+}
+
+/// Как `session_dir`, но `create` разрешает создать отсутствующий каталог:
+/// панель спрашивает об этом у человека и повторяет запуск.
+pub fn session_dir_with(cwd: &str, create: bool) -> Result<&Path, String> {
     let dir = Path::new(cwd);
     if !dir.is_absolute() {
         return Err(format!("укажите абсолютный путь к каталогу: {cwd}"));
     }
     if !dir.is_dir() {
-        return Err(format!("каталог не найден: {cwd}"));
+        if !create {
+            return Err(format!("{DIR_MISSING}{cwd}"));
+        }
+        std::fs::create_dir_all(dir).map_err(|e| format!("не удалось создать каталог {cwd}: {e}"))?;
     }
     Ok(dir)
 }
@@ -312,6 +326,24 @@ mod tests {
         assert_eq!(basename("/home/u/proj/"), "proj");
         assert_eq!(truncate("привет", 3).chars().take(3).collect::<String>(), "при");
         assert_eq!(truncate("abc", 3), "abc");
+    }
+
+    #[test]
+    fn session_dirs() {
+        let base = std::env::temp_dir().join(format!("aipanel-util-{}", now_ms()));
+        let dir = base.join("нет-ещё");
+        let path = dir.to_string_lossy().to_string();
+        assert!(session_dir(&path).unwrap_err().starts_with(DIR_MISSING));
+        assert!(!dir.exists());
+        // Без разрешения каталог не создаётся, с разрешением — создаётся.
+        assert!(session_dir_with(&path, false).is_err());
+        assert!(!dir.exists());
+        assert!(session_dir_with(&path, true).is_ok());
+        assert!(dir.is_dir());
+        assert!(session_dir(&path).is_ok());
+        let rel = session_dir_with("относительный/путь", true).unwrap_err();
+        assert!(rel.contains("абсолютный"), "{rel}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

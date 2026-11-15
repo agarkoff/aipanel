@@ -698,6 +698,9 @@ enum BrowserMsg {
         cwd: String,
         #[serde(default)]
         model: String,
+        /// Разрешение создать каталог, которого ещё нет на машине агента.
+        #[serde(default)]
+        create: bool,
     },
     Handoff { id: String, agent: String, session: String, tool: String },
     CancelQueued { id: String, agent: String, session: String, queue: String },
@@ -859,7 +862,7 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Interrupt { id: cmd, session });
         }
-        BrowserMsg::Start { id, agent, tool, cwd, model } => {
+        BrowserMsg::Start { id, agent, tool, cwd, model, create } => {
             let cwd = cwd.trim().to_owned();
             if !matches!(tool.as_str(), "claude" | "opencode") {
                 reply(&inner, browser, &id, "неизвестный тип сессии");
@@ -875,7 +878,14 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 return;
             }
             let cmd = format!("{browser}:{}", inner.id());
-            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Start { id: cmd, tool, cwd, model });
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::Start { id: cmd, tool, cwd, model, create },
+            );
         }
         BrowserMsg::ToolModels { id, agent, tool, cwd } => {
             if !matches!(tool.as_str(), "claude" | "opencode") {

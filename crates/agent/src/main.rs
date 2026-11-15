@@ -184,13 +184,18 @@ impl Agent {
                     let _ = me.out.send(AgentMsg::ToolModels { id, models });
                 });
             }
-            ServerMsg::Start { id, tool, cwd, model } => {
+            ServerMsg::Start { id, tool, cwd, model, create } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match tool.as_str() {
-                        "claude" => me.claude.start(&cwd, &model),
-                        "opencode" => me.opencode.start(&cwd, &model).await,
-                        _ => Err("неизвестный тип сессии".into()),
+                    // Каталог проверяем здесь: `create` приходит только после
+                    // того, как человек разрешил создать отсутствующий каталог.
+                    let result = match crate::util::session_dir_with(&cwd, create) {
+                        Err(e) => Err(e),
+                        Ok(_) => match tool.as_str() {
+                            "claude" => me.claude.start(&cwd, &model),
+                            "opencode" => me.opencode.start(&cwd, &model).await,
+                            _ => Err("неизвестный тип сессии".into()),
+                        },
                     };
                     me.finish(id, result);
                 });

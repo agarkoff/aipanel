@@ -127,7 +127,8 @@ const stub = `
         setTimeout(() => this.emit({ t: 'tool_models', id: msg.id, models: list }), 0);
       } else if (msg.t === 'start') {
         window.__starts.push(msg);
-        setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: false, error: 'тест' }), 0);
+        const error = window.__noDir ? 'каталог не найден: ' + msg.cwd : 'тест';
+        setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: false, error }), 0);
       } else if (msg.t === 'send') {
         window.__sent.push(msg);
       } else if (msg.t === 'set_model') {
@@ -638,6 +639,31 @@ try {
     start,
   );
   await evaluate(`document.getElementById('launch').close()`);
+  await sleep(100);
+
+  // Каталога нет на машине агента: панель сначала спрашивает, создавать ли его,
+  // и только по ответу повторяет запуск — уже с разрешением создать.
+  await evaluate(`window.__noDir = true`);
+  await evaluate(`document.getElementById('new-session').click()`);
+  await waitFor(`document.getElementById('launch').open`);
+  await evaluate(`(() => {
+    const c = document.getElementById('launch-cwd');
+    c.value = 'D:/Проекты/нет-такого';
+    c.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await evaluate(`document.getElementById('launch-form').requestSubmit()`);
+  const asked = await waitFor(`document.getElementById('mkdir').open`);
+  const mkdirText = await evaluate(`document.getElementById('mkdir-text').textContent`);
+  check('отсутствующий каталог — вопрос о создании', asked && mkdirText.includes('нет-такого'), mkdirText);
+  await evaluate(`document.getElementById('mkdir-form').requestSubmit()`);
+  await waitFor(`window.__starts.length === 3`);
+  const retried = await evaluate(`window.__starts[2]`);
+  check(
+    'создание каталога разрешено повторным запуском',
+    retried.create === true && retried.cwd.endsWith('нет-такого'),
+    retried,
+  );
+  await evaluate(`(() => { window.__noDir = false; document.getElementById('launch').close(); })()`);
   await sleep(100);
 
   // Claude Code: список — алиасы, которые принимает --model.

@@ -74,6 +74,11 @@ let scrollHoldUntil = 0;
 let launchId = null;
 let launchRequest = null;
 let pendingLaunch = null;
+// Начало ошибки агента «такого каталога нет» (`crates/agent/src/util.rs`,
+// `DIR_MISSING`): по нему панель предлагает создать каталог и повторить запуск.
+const DIR_MISSING = 'каталог не найден: ';
+// Запуск, который ждёт ответа на вопрос о создании каталога.
+let mkdirRequest = null;
 // Модели для окна «Новая сессия»: список по «компьютер + инструмент».
 const launchModelCache = new Map();
 let launchModelsRequest = null; // { id, key } — ждём ответ для этой пары
@@ -1899,17 +1904,26 @@ $('launch-form').addEventListener('submit', (e) => {
   }
   const a = agents.find((x) => x.name === agent);
   const keys = new Set(a ? a.sessions.map((s) => s.key) : []);
-  const id = String(++cmdSeq);
-  if (!send({ t: 'start', id, agent, tool, cwd, model })) {
-    launchHint('Нет соединения с сервером.', true);
-    return;
-  }
-  launchModelChoice[tool] = model;
-  launchId = id;
-  launchRequest = { agent, tool, cwd, keys };
-  $('launch-ok').disabled = true;
-  launchHint('Запускаем…');
+  startLaunch({ agent, tool, cwd, model, keys, create: false });
 });
+
+// Отправляет запуск агенту. `create` разрешает создать каталог, которого нет:
+// существование каталога проверяет машина агента, поэтому разрешение приходит
+// только после её ответа «каталог не найден» и вопроса человеку.
+function startLaunch(req) {
+  const id = String(++cmdSeq);
+  const msg = { t: 'start', id, agent: req.agent, tool: req.tool, cwd: req.cwd, model: req.model, create: req.create };
+  if (!send(msg)) {
+    launchHint('Нет соединения с сервером.', true);
+    return false;
+  }
+  launchModelChoice[req.tool] = req.model;
+  launchId = id;
+  launchRequest = req;
+  $('launch-ok').disabled = true;
+  launchHint(req.create ? 'Создаём каталог и запускаем…' : 'Запускаем…');
+  return true;
+}
 
 function onLaunchResult(msg) {
   const req = launchRequest;
@@ -1917,6 +1931,12 @@ function onLaunchResult(msg) {
   launchRequest = null;
   $('launch-ok').disabled = false;
   if (!msg.ok) {
+    // Каталога на машине агента нет: спрашиваем, создавать ли его, и повторяем
+    // запуск уже с разрешением. Остальные ошибки показываем как обычно.
+    if (req && !req.create && String(msg.error || '').startsWith(DIR_MISSING)) {
+      askMkdir(req);
+      return;
+    }
     launchHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
     return;
   }
@@ -1966,6 +1986,54 @@ function checkPendingLaunch() {
     );
   }
 }
+
+// ------------------------------------------------------------ каталог новой сессии
+
+// Существует ли каталог, знает только машина агента: панель узнаёт об этом из
+// ответа на запуск и спрашивает человека, создавать ли каталог. Разрешение уходит
+// тем же запуском с `create`, поэтому каталог появится на той же машине.
+function askMkdir(req) {
+  if (mkdirRequest) return;
+  mkdirRequest = req;
+  $('mkdir-text').textContent = `Каталога «${req.cwd}» на компьютере «${req.agent}» нет. Создать его?`;
+  $('mkdir-hint').textContent = '';
+  $('mkdir-hint').className = 'hint';
+  $('mkdir-ok').disabled = false;
+  $('mkdir-cancel').disabled = false;
+  launchHint(`Каталога «${req.cwd}» нет.`);
+  if (!$('mkdir').open) $('mkdir').showModal();
+}
+
+// Отказ от создания: окно запуска остаётся открытым — путь можно поправить.
+function closeMkdir() {
+  if (!mkdirRequest) return;
+  mkdirRequest = null;
+  $('mkdir').close();
+  launchHint('Каталог не создан.');
+  $('launch-cwd').focus();
+}
+
+$('mkdir-cancel').addEventListener('click', closeMkdir);
+
+// Esc закрывает окно сам, поэтому здесь только сбрасываем ожидающий запуск.
+$('mkdir').addEventListener('cancel', () => {
+  mkdirRequest = null;
+  launchHint('Каталог не создан.');
+  $('launch-cwd').focus();
+});
+
+$('mkdir').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeMkdir();
+});
+
+$('mkdir-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const req = mkdirRequest;
+  if (!req) return;
+  mkdirRequest = null;
+  $('mkdir').close();
+  startLaunch({ ...req, create: true });
+});
 
 // ------------------------------------------------------------ панель сессии (телефон)
 

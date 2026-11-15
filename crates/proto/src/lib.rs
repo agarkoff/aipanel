@@ -352,13 +352,17 @@ pub enum ServerMsg {
     Send { id: String, session: String, text: String },
     Interrupt { id: String, session: String },
     /// Новая сессия: `tool` — `claude` или `opencode`, `cwd` — абсолютный путь,
-    /// `model` — выбранная модель (пусто — по умолчанию).
+    /// `model` — выбранная модель (пусто — по умолчанию). `create` разрешает
+    /// создать каталог, которого нет: панель спрашивает об этом после ответа
+    /// «каталог не найден» и повторяет запуск с этим флагом.
     Start {
         id: String,
         tool: String,
         cwd: String,
         #[serde(default)]
         model: String,
+        #[serde(default)]
+        create: bool,
     },
     /// Продолжить сессию `session` в другом инструменте `tool`.
     Handoff { id: String, session: String, tool: String },
