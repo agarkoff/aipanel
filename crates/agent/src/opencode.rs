@@ -297,18 +297,12 @@ impl OpenCode {
             let Some(id) = s["id"].as_str() else { continue };
             let cwd = s["location"]["directory"].as_str().unwrap_or_default();
             let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or_else(|| basename(cwd));
-            let status = if waiting.contains(id) || asking.contains(id) {
-                "waiting"
-            } else if active.contains(id) || self.recently_launched(id) {
-                "busy"
-            } else if windowed.contains(id) {
-                "idle"
-            } else {
-                // Сервис opencode хранит все сессии и примет сообщение в любую из них,
-                // но открыта ли сессия в каком-то окне, он не сообщает. Поэтому сессия,
-                // которая ничего не выполняет, показывается как неактивная, а не «ждёт ввода».
-                "ready"
-            };
+            let status = session_status(
+                waiting.contains(id) || asking.contains(id),
+                active.contains(id) || self.recently_launched(id),
+                windowed.contains(id),
+                &s["time"],
+            );
             out.push(SessionInfo {
                 key: format!("opencode:{id}"),
                 tool: "opencode".into(),
@@ -727,10 +721,41 @@ impl OpenCode {
         }
     }
 
+    /// Прерывает выполнение сессии.
+    ///
+    /// Если прерывать нечего (`interrupted: false`), просит opencode возобновить
+    /// отложенный ввод: «залипший» ход часто выглядит именно так — сообщение
+    /// принято, но выполнение ещё не запущено, и обычный interrupt ничего не делает.
     pub async fn interrupt(&self, id: &str) -> Result<(), String> {
-        self.call(reqwest::Method::POST, &format!("/api/session/{id}/interrupt"), None)
+        let path = format!("/api/session/{id}/interrupt");
+        if self.call(reqwest::Method::POST, &path, None).await?["interrupted"].as_bool() == Some(true) {
+            return Ok(());
+        }
+        self.call(reqwest::Method::POST, &format!("{path}?resume=true"), None)
             .await
             .map(|_| ())
+    }
+}
+
+/// Статус сессии opencode для панели.
+///
+/// `stalled` — сообщение принято, но opencode ещё не выполняет ход: сессии нет
+/// в списке активных, а отметка занятости новее отметки простоя. Так выглядит
+/// «залипшее» окно: запрос уже в сессии, ответа нет, и обычный `busy` не виден.
+fn session_status(waiting: bool, active: bool, windowed: bool, time: &Value) -> &'static str {
+    if waiting {
+        "waiting"
+    } else if active {
+        "busy"
+    } else if time["busy"].as_i64().unwrap_or(0) > time["idle"].as_i64().unwrap_or(0) {
+        "stalled"
+    } else if windowed {
+        "idle"
+    } else {
+        // Сервис opencode хранит все сессии и примет сообщение в любую из них,
+        // но открыта ли сессия в каком-то окне, он не сообщает. Поэтому сессия,
+        // которая ничего не выполняет, показывается как неактивная, а не «ждёт ввода».
+        "ready"
     }
 }
 
@@ -1112,6 +1137,19 @@ mod tests {
         collect_windowed(&dir, now, &mut out);
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(out.into_iter().collect::<Vec<_>>(), ["ses_live"]);
+    }
+
+    #[test]
+    fn marks_accepted_but_not_running_session() {
+        // Ход принят в 200, простой был в 100: сессия занята, но не выполняется.
+        let accepted = serde_json::json!({"busy": 200, "idle": 100});
+        assert_eq!(session_status(false, false, true, &accepted), "stalled");
+        assert_eq!(session_status(false, true, true, &accepted), "busy");
+        assert_eq!(session_status(true, false, true, &accepted), "waiting");
+        // Ход завершён: простой новее занятости.
+        let finished = serde_json::json!({"busy": 100, "idle": 200});
+        assert_eq!(session_status(false, false, true, &finished), "idle");
+        assert_eq!(session_status(false, false, false, &finished), "ready");
     }
 
     #[test]

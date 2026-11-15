@@ -13,9 +13,13 @@ const STATUS = {
   idle: 'ждёт ввода',
   waiting: 'ждёт ответа',
   shell: 'выполняет команду',
+  stalled: 'принято, нет ответа',
   stopped: 'не запущена',
   ready: 'не активна',
 };
+// Подсказки к состояниям, в которых окно выглядит зависшим, хотя сессия занята.
+const STALLED_HINT =
+  'opencode принял сообщение, но ещё не начал ответ. «Прервать» остановит ход и растолкает очередь.';
 const DELIVERY = {
   console: 'Сессия открыта в терминале: текст будет набран в её консоли и отправлен клавишей Enter.',
   window: 'Сессия не открыта: на компьютере откроется окно консоли с этой сессией, сообщение уйдёт в него первым запросом.',
@@ -39,6 +43,8 @@ let handoffId = null;
 let handoffRequest = null;
 let copyIdTimer = null;
 let cancelQueuedId = null;
+// Прерывание хода: id команды, чтобы показать результат именно для неё.
+let interruptId = null;
 // Запросы opencode, ожидающие ответа: разрешения и формы с вариантами.
 let promptSig = '';
 let promptUid = 0;
@@ -138,6 +144,7 @@ function onMessage(msg) {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
     else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
+    else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
     else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
   }
@@ -156,7 +163,7 @@ function ago(ts) {
 
 function dotClass(s, online) {
   if (!online) return 'dot';
-  if (s.status === 'busy' || s.status === 'shell') return 'dot busy';
+  if (s.status === 'busy' || s.status === 'shell' || s.status === 'stalled') return 'dot busy';
   if (s.status === 'waiting') return 'dot waiting';
   if (s.status === 'idle') return 'dot idle';
   return 'dot';
@@ -268,7 +275,7 @@ function renderHeader() {
   badge.hidden = false;
   badge.className = `badge ${agent.online ? session.status : ''}`;
   badge.textContent = agent.online ? STATUS[session.status] || session.status : 'агент не в сети';
-  const busy = agent.online && (session.status === 'busy' || session.status === 'shell');
+  const busy = agent.online && ['busy', 'shell', 'stalled'].includes(session.status);
   $('interrupt').hidden = !busy;
   const target = session.tool === 'claude' ? 'opencode' : session.tool === 'opencode' ? 'claude' : null;
   const targetName = target === 'claude' ? 'Claude Code' : 'opencode';
@@ -287,7 +294,11 @@ function renderHeader() {
   $('composer').querySelector('button').disabled = !canSend;
   if (!$('hint').dataset.sticky) {
     $('hint').className = 'hint';
-    $('hint').textContent = agent.online ? DELIVERY[session.delivery] || '' : '';
+    $('hint').textContent = !agent.online
+      ? ''
+      : session.status === 'stalled'
+        ? STALLED_HINT
+        : DELIVERY[session.delivery] || '';
   }
 }
 
@@ -1325,8 +1336,18 @@ $('text').addEventListener('keydown', (e) => {
 
 $('interrupt').addEventListener('click', () => {
   if (!selected) return;
-  send({ t: 'interrupt', id: String(++cmdSeq), agent: selected.agent, session: selected.session });
-  setHint('Запрошено прерывание…');
+  interruptId = String(++cmdSeq);
+  send({ t: 'interrupt', id: interruptId, agent: selected.agent, session: selected.session });
+  setHint('Прерываю…');
 });
+
+function onInterruptResult(msg) {
+  interruptId = null;
+  if (!msg.ok) {
+    setHint(`Не удалось прервать: ${msg.error || 'неизвестная ошибка'}`, true);
+    return;
+  }
+  setHint('Ход остановлен. Если запрос был отложен, opencode продолжит его выполнять.');
+}
 
 boot();
