@@ -472,6 +472,22 @@ input, textarea, select {
 }
 .md hr { border: 0; border-top: 1px solid var(--line); margin: .8em 0; }
 .md a { color: var(--accent); }
+/* Ссылка на картинку: по клику под ней раскрывается сама картинка. */
+.md a.img-link::before { content: '▸ '; font-size: .85em; }
+.md a.img-link[aria-expanded="true"]::before { content: '▾ '; }
+.md .img-preview { display: block; margin: .4em 0 .6em; white-space: normal; }
+.md .img-preview[hidden] { display: none; }
+.md .img-preview a { display: inline-block; line-height: 0; }
+.md .img-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--tool);
+}
+.md .img-preview > span { color: var(--muted); font-size: .9em; }
 .md .table-wrap { overflow-x: auto; margin: 0 0 .6em; }
 .md table { border-collapse: collapse; font-size: .95em; }
 .md th, .md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }

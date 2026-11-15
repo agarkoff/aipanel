@@ -258,7 +258,9 @@ fn asset_bytes(content_type: &'static str, body: &'static [u8]) -> Response {
             (header::CACHE_CONTROL, "no-cache"),
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'self'; frame-ancestors 'none'; base-uri 'none'",
+                // Картинки по ссылкам из ленты лежат на чужих сайтах, поэтому
+                // img-src шире остального. Грузятся они только по клику на ссылку.
+                "default-src 'self'; img-src 'self' data: https: http:; frame-ancestors 'none'; base-uri 'none'",
             ),
             (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
             (header::REFERRER_POLICY, "no-referrer"),

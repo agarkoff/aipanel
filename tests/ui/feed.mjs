@@ -128,6 +128,7 @@ const assets = new Map([
   ['/suggest.js', 'text/javascript; charset=utf-8'],
   ['/style.css', 'text/css; charset=utf-8'],
   ['/icon.svg', 'image/svg+xml'],
+  ['/icon-192.png', 'image/png'],
 ]);
 
 const server = http.createServer((req, res) => {
@@ -546,6 +547,42 @@ try {
     mobilePick.text === '/init ' && !mobilePick.open && mobileArgs.text === '/init 24' && !mobileArgs.open,
     { mobilePick, mobileArgs },
   );
+
+  // ------------------------------------------------------------ картинки по ссылкам
+  // Ссылка на картинку: по клику под ней раскрывается картинка, повторный клик
+  // сворачивает; при перестройке сообщения раскрытая картинка остаётся открытой.
+  const img = await evaluate(`(async () => {
+    const src = location.origin + '/icon-192.png';
+    const make = () => {
+      const box = document.createElement('div');
+      box.className = 'body md';
+      box.append(renderMarkdown('Вот фото: ' + src + ' и ещё ![схема](' + src + '?v=2), и [страница](' + location.origin + '/)'));
+      return box;
+    };
+    const box = make();
+    document.getElementById('feed').append(box);
+    const links = [...box.querySelectorAll('a.img-link')];
+    const before = box.querySelectorAll('.img-preview').length;
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    links[0].dispatchEvent(click);
+    const preview = box.querySelector('.img-preview img');
+    await new Promise((r) => (preview.complete ? r() : preview.addEventListener('load', r, { once: true })));
+    const shown = preview.getBoundingClientRect().height > 0 && preview.naturalWidth > 0;
+    const prevented = click.defaultPrevented;
+    const rebuilt = make();
+    renderMarkdown.keepOpenImages(box, rebuilt);
+    const kept = rebuilt.querySelector('a.img-link').getAttribute('aria-expanded') === 'true' &&
+      !rebuilt.querySelector('.img-preview').hidden;
+    links[0].dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+    const hidden = box.querySelector('.img-preview').hidden;
+    box.remove();
+    return { links: links.length, before, shown, prevented, kept, hidden };
+  })()`);
+  check('ссылки на картинки распознаны, обычная ссылка нет', img.links === 2, img);
+  check('картинка не грузится до клика', img.before === 0, img);
+  check('клик раскрывает картинку и не уходит по ссылке', img.shown && img.prevented, img);
+  check('при перестройке сообщения картинка остаётся раскрытой', img.kept, img);
+  check('повторный клик сворачивает картинку', img.hidden, img);
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

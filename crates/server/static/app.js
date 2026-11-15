@@ -779,6 +779,7 @@ function applyHistory(msg) {
       const oldDetails = old.querySelector('details');
       const newDetails = node.querySelector('details');
       if (oldDetails && newDetails) newDetails.open = oldDetails.open;
+      renderMarkdown.keepOpenImages(old, node);
       old.replaceWith(node);
     } else {
       feed.append(node);

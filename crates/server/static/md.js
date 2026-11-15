@@ -21,9 +21,23 @@ const renderMarkdown = (() => {
       '(?<![A-Za-zА-Яа-яЁё0-9_])_([^\\s_](?:[^_]*?[^\\s_])?)_(?![A-Za-zА-Яа-яЁё0-9_])', // 8: курсив
       '\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)', // 9, 10: ссылка
       '(https?:\\/\\/[^\\s<>"\'`]*[^\\s<>"\'`.,;:!?)\\]])', // 11: адрес
+      '!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)', // 12, 13: картинка
     ].join('|'),
     'g',
   );
+
+  const RE_IMAGE_PATH = /\.(png|jpe?g|gif|webp|avif|bmp|svg|ico)$/i;
+
+  // Ссылка ведёт на картинку, если путь в адресе кончается расширением картинки
+  // (параметры запроса и якорь не мешают: `photo.jpg?size=large`).
+  function isImageUrl(href) {
+    try {
+      const url = new URL(href);
+      return /^https?:$/.test(url.protocol) && RE_IMAGE_PATH.test(url.pathname);
+    } catch {
+      return false;
+    }
+  }
 
   function link(text, href) {
     if (!/^(https?:|mailto:)/i.test(href)) return document.createTextNode(text);
@@ -31,6 +45,58 @@ const renderMarkdown = (() => {
     a.href = href;
     a.target = '_blank';
     a.rel = 'noopener noreferrer';
+    if (isImageUrl(href)) imageToggle(a);
+    return a;
+  }
+
+  // Ссылка на картинку раскрывает под собой блок с ней. Картинка грузится только
+  // по клику: чужой сайт не узнаёт об открытии ленты. Ctrl/Cmd/Shift-клик и
+  // средняя кнопка по-прежнему открывают адрес в новой вкладке.
+  function imageToggle(a) {
+    a.classList.add('img-link');
+    a.setAttribute('aria-expanded', 'false');
+    a.title = 'Показать картинку';
+    a.addEventListener('click', (e) => {
+      if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      setImageOpen(a, a.getAttribute('aria-expanded') !== 'true');
+    });
+  }
+
+  function setImageOpen(a, open) {
+    if (!a.classList.contains('img-link')) return;
+    let box = a.imgPreview;
+    if (open && !box) {
+      box = node('span');
+      box.className = 'img-preview';
+      const full = node('a');
+      full.href = a.href;
+      full.target = '_blank';
+      full.rel = 'noopener noreferrer';
+      full.title = 'Открыть в новой вкладке';
+      const img = node('img');
+      img.alt = a.textContent;
+      img.referrerPolicy = 'no-referrer';
+      img.decoding = 'async';
+      img.addEventListener('error', () =>
+        box.replaceChildren(node('span', 'Не удалось загрузить картинку')), { once: true });
+      img.src = a.href;
+      full.append(img);
+      box.append(full);
+      a.after(box);
+      a.imgPreview = box;
+    }
+    if (box) box.hidden = !open;
+    a.setAttribute('aria-expanded', String(open));
+    a.title = open ? 'Скрыть картинку' : 'Показать картинку';
+  }
+
+  function imageLink(alt, href) {
+    const a = link(alt || href.split(/[?#]/)[0].split('/').pop() || 'картинка', href);
+    // `![](…)` без расширения в адресе — тоже картинка, раз так написал автор.
+    if (a.nodeType === Node.ELEMENT_NODE && !a.classList.contains('img-link') && /^https?:/i.test(href)) {
+      imageToggle(a);
+    }
     return a;
   }
 
@@ -47,6 +113,7 @@ const renderMarkdown = (() => {
       else if (m[7] !== undefined || m[8] !== undefined) inline(parent.appendChild(node('em')), m[7] ?? m[8]);
       else if (m[9] !== undefined) parent.append(link(m[9], m[10]));
       else if (m[11] !== undefined) parent.append(link(m[11], m[11]));
+      else if (m[13] !== undefined) parent.append(imageLink(m[12], m[13]));
     }
     if (last < text.length) parent.append(text.slice(last));
   }
@@ -210,9 +277,19 @@ const renderMarkdown = (() => {
     }
   }
 
-  return (text) => {
+  const render = (text) => {
     const root = document.createDocumentFragment();
     blocks(text.replace(/\r\n?/g, '\n').split('\n'), root);
     return root;
   };
+  // Сообщение при обновлении строится заново: так раскрытые картинки переносятся
+  // из старого узла в новый.
+  render.keepOpenImages = (from, to) => {
+    const was = [...from.querySelectorAll('a.img-link')];
+    const now = [...to.querySelectorAll('a.img-link')];
+    was.forEach((a, i) => {
+      if (a.getAttribute('aria-expanded') === 'true' && now[i] && now[i].href === a.href) setImageOpen(now[i], true);
+    });
+  };
+  return render;
 })();
