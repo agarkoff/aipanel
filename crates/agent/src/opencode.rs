@@ -364,28 +364,7 @@ impl OpenCode {
             .ok()
             .and_then(|v| v["data"].as_object().map(|o| o.keys().cloned().collect()))
             .unwrap_or_default();
-        let waiting: HashSet<String> = self
-            .get("/api/permission/request")
-            .await
-            .ok()
-            .and_then(|v| {
-                v["data"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|r| r["sessionID"].as_str().map(str::to_owned)).collect())
-            })
-            .unwrap_or_default();
-        // Вопрос с вариантами ответа тоже останавливает сессию до ответа пользователя.
-        let asking: HashSet<String> = self
-            .get("/api/form")
-            .await
-            .ok()
-            .and_then(|v| {
-                v["data"]
-                    .as_array()
-                    .map(|a| a.iter().filter_map(|r| r["sessionID"].as_str().map(str::to_owned)).collect())
-            })
-            .unwrap_or_default();
-
+        let waiting = self.waiting_sessions(&list, &active).await;
         let windowed = self.windowed_sessions();
         let mut out = Vec::new();
         for s in list["data"].as_array().into_iter().flatten() {
@@ -393,7 +372,7 @@ impl OpenCode {
             let cwd = s["location"]["directory"].as_str().unwrap_or_default();
             let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or_else(|| basename(cwd));
             let status = session_status(
-                waiting.contains(id) || asking.contains(id),
+                waiting.contains(id),
                 active.contains(id) || self.recently_launched(id),
                 windowed.contains(id),
                 &s["time"],
@@ -409,6 +388,43 @@ impl OpenCode {
                 delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
                 model: session_model(&s["model"]),
             });
+        }
+        out
+    }
+
+    /// Сессии, которые ждут ответа пользователя: разрешение на действие или
+    /// форму с вариантами ответа. Оба списка opencode отдаёт по каталогу, а без
+    /// него берёт каталог своего процесса; поэтому спрашиваем каталог каждой
+    /// сессии, которая выглядела бы занятой. Иначе ожидание выбора показывалось
+    /// бы жёлтым «работает» вместо «ждёт ответа». Каталогов столько же, сколько
+    /// проектов у таких сессий, обычно один-два.
+    async fn waiting_sessions(&self, list: &Value, active: &HashSet<String>) -> HashSet<String> {
+        let mut dirs: Vec<&str> = Vec::new();
+        for s in list["data"].as_array().into_iter().flatten() {
+            let Some(id) = s["id"].as_str() else { continue };
+            // Выполняется или принята, но ход ещё не начат — как в `session_status`.
+            let accepted =
+                s["time"]["busy"].as_i64().unwrap_or(0) > s["time"]["idle"].as_i64().unwrap_or(0);
+            if !active.contains(id) && !accepted {
+                continue;
+            }
+            let dir = s["location"]["directory"].as_str().unwrap_or_default();
+            if !dir.is_empty() && !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        let mut out = HashSet::new();
+        for dir in dirs {
+            let query = [("location[directory]", dir)];
+            let (perms, forms) = tokio::join!(
+                self.call_with(reqwest::Method::GET, "/api/permission/request", &query, None),
+                self.call_with(reqwest::Method::GET, "/api/form", &query, None),
+            );
+            for v in [&perms, &forms] {
+                if let Ok(v) = v {
+                    out.extend(prompt_session_ids(v).map(str::to_owned));
+                }
+            }
         }
         out
     }
@@ -1103,6 +1119,12 @@ fn prompts_hash(prompts: &[Prompt]) -> u64 {
     h.finish()
 }
 
+/// Идентификаторы сессий из ответа opencode со списком запросов (`data` — массив
+/// запросов, у каждого свой `sessionID`).
+fn prompt_session_ids(v: &Value) -> impl Iterator<Item = &str> {
+    v["data"].as_array().into_iter().flatten().filter_map(|r| r["sessionID"].as_str())
+}
+
 fn prompt_option(v: &Value) -> Option<PromptOption> {
     let value = v["value"].as_str()?;
     Some(PromptOption {
@@ -1609,6 +1631,24 @@ mod tests {
         let finished = serde_json::json!({"busy": 100, "idle": 200});
         assert_eq!(session_status(false, false, true, &finished), "idle");
         assert_eq!(session_status(false, false, false, &finished), "ready");
+    }
+
+    #[test]
+    fn reads_pending_request_sessions() {
+        // Список запросов opencode: берём сессии, у которых есть неотвеченный
+        // запрос; записи без sessionID пропускаются.
+        let v = json!({
+            "location": {"directory": "D:\\Projects\\demo"},
+            "data": [
+                {"id": "per_1", "sessionID": "ses_a"},
+                {"id": "frm_2", "sessionID": "ses_b"},
+                {"id": "per_3"},
+            ],
+        });
+        assert_eq!(prompt_session_ids(&v).collect::<Vec<_>>(), ["ses_a", "ses_b"]);
+        // Пустой список и ответ без данных — не ошибка, просто никто не ждёт.
+        assert_eq!(prompt_session_ids(&json!({"data": []})).count(), 0);
+        assert_eq!(prompt_session_ids(&json!({})).count(), 0);
     }
 
     #[test]

@@ -103,6 +103,7 @@ const claudeModels = [
 const stub = `
 (() => {
   const session = ${JSON.stringify(session)};
+  window.__session = session;
   const items = ${JSON.stringify(items)};
   const olderItems = ${JSON.stringify(olderItems)};
   const commands = ${JSON.stringify(commands)};
@@ -113,9 +114,21 @@ const stub = `
   window.__olderPages = [];
   window.__setModels = [];
   window.__starts = [];
+  // Уведомления: браузерное разрешение выдано, а сами уведомления записываются,
+  // чтобы тест мог проверить, о чём панель сообщает.
+  window.__notices = [];
+  class FakeNotification {
+    static permission = 'granted';
+    static requestPermission() { return Promise.resolve('granted'); }
+    constructor(title, opts) { window.__notices.push({ title, ...opts }); }
+    close() {}
+  }
+  window.Notification = FakeNotification;
+  window.__sock = null;
   class FakeSocket {
     static OPEN = 1;
     constructor() {
+      window.__sock = this;
       this.readyState = 0;
       setTimeout(() => {
         this.readyState = 1;
@@ -973,6 +986,31 @@ try {
   check('git diff в результате — дифф с подсветкой', hl.gitDiffAdd === 1 && hl.gitDiffKw.join() === 'fn,fn', hl);
   check('дифф правки подсвечен по языку файла', hl.diffKw.join() === 'def,pass,def,pass' && hl.diffRow === '+def b(): pass', hl);
   check('блок кода в ответе подсвечен', hl.mdKw.join() === 'val', hl);
+
+  // Уведомления: конец хода и ожидание выбора. Вторая сессия нужна, чтобы
+  // уведомления не гасились как «пользователь смотрит именно эту сессию».
+  const notices = await evaluate(`(() => {
+    const roster = (status) => [{ name: 'ui-test', online: true, os: 'test', version: 'test',
+      sessions: [{ ...window.__session, key: 'opencode:notice', title: 'Уведомления', status }] }];
+    const load = (status) => window.__sock.emit({ t: 'agents', agents: roster(status) });
+    const count = () => window.__notices.length;
+    load('busy');
+    const busy = count();
+    load('idle');
+    const done = window.__notices.slice(busy).map((n) => n.body || '');
+    load('waiting');
+    const waitingDot = document.querySelector('#sessions .session .dot').className;
+    const waiting = window.__notices.slice(busy + done.length).map((n) => n.body || '');
+    load('idle');
+    const afterAnswer = count() - busy - done.length - waiting.length;
+    window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test', sessions: [window.__session] }] });
+    return { busy, done, waitingDot, waiting, afterAnswer };
+  })()`);
+  check('занятая сессия уведомлений не шлёт', notices.busy === 0, notices);
+  check('конец хода — уведомление браузера', notices.done.length === 1 && notices.done[0].includes('ход завершён'), notices);
+  check('ожидание выбора — красный кружок, не жёлтый', notices.waitingDot === 'dot waiting', notices);
+  check('ожидание выбора — уведомление браузера', notices.waiting.length === 1 && notices.waiting[0].includes('ждёт ответа'), notices);
+  check('от ответа на выбор уведомления нет', notices.afterAnswer === 0, notices);
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
