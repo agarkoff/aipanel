@@ -492,10 +492,10 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
             }
             inner.broadcast_agents();
         }
-        AgentMsg::History { session, reset, items, drop } => {
+        AgentMsg::History { session, reset, items, drop, more } => {
             let text = json!({
                 "t": "history", "agent": agent, "session": session, "reset": reset,
-                "items": items, "drop": drop,
+                "items": items, "drop": drop, "more": more,
             })
             .to_string();
             for b in inner.browsers.values() {

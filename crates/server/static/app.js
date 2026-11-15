@@ -1009,6 +1009,9 @@ function applyHistory(msg) {
     toolCalls.clear();
     resultCalls.clear();
     pendingCalls = [];
+    // Агент сказал, есть ли перед этой лентой более ранние сообщения: если их
+    // нет, кнопки догрузки не будет вовсе.
+    olderMore = msg.more === true;
     feed.replaceChildren();
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
   } else if (msg.items.length && !nodes.size) {
@@ -1058,7 +1061,8 @@ function updateOlder() {
 function resetOlder() {
   clearTimeout(olderTimer);
   olderPending = false;
-  olderMore = true;
+  // Пока агент не сказал, что перед лентой что-то есть, кнопки не показываем.
+  olderMore = false;
   mountOlder();
   updateOlder();
 }

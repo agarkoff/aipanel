@@ -56,6 +56,10 @@ fn is_zero(v: &i64) -> bool {
     *v == 0
 }
 
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
 /// Лимиты подписки, которые агент проверяет на своей машине.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
@@ -202,6 +206,11 @@ pub enum AgentMsg {
         /// сообщение из очереди opencode отправлено и стало обычным сообщением).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         drop: Vec<String>,
+        /// Есть ли перед `items` более ранние элементы, которые догружаются по
+        /// `ServerMsg::Older`. Заполняется в первой ленте (`reset`): по нему
+        /// панель решает, показывать ли кнопку догрузки.
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
     },
     /// Более ранние элементы ленты сессии, догруженные по `ServerMsg::Older`.
     /// В отличие от `History` их ставят в начало ленты, а не в конец.

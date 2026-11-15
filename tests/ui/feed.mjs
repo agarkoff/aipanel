@@ -126,7 +126,7 @@ const stub = `
     send(text) {
       const msg = JSON.parse(text);
       if (msg.t === 'watch') {
-        setTimeout(() => this.emit({ t: 'history', agent: msg.agent, session: msg.session, reset: true, items }), 0);
+        setTimeout(() => this.emit({ t: 'history', agent: msg.agent, session: msg.session, reset: true, items, more: !!window.__more }), 0);
       } else if (msg.t === 'commands') {
         setTimeout(() => this.emit({ t: 'commands', agent: msg.agent, session: msg.session, commands }), 0);
       } else if (msg.t === 'models') {
@@ -332,6 +332,8 @@ try {
   if (!(await waitFor(`document.querySelectorAll('#sessions .session').length === 1`))) {
     throw new Error('сессия не появилась в списке');
   }
+  // Раньше этих сообщений в сессии ничего нет: агент пришлёт ленту без more.
+  await evaluate(`window.__more = false`);
   await evaluate(`document.querySelector('#sessions .session').click()`);
   if (!(await waitFor(`document.querySelectorAll('#feed .item').length === ${items.length}`))) {
     throw new Error(`в ленте не ${items.length} элементов`);
@@ -348,6 +350,7 @@ try {
       preview: document.getElementById('pin-preview').textContent,
       count: document.getElementById('pin-count').textContent,
       toEndHidden: document.getElementById('to-end').hidden,
+      olderHidden: document.getElementById('older').hidden,
       scrollable: feed.scrollHeight > feed.clientHeight,
     };
   })()`);
@@ -361,6 +364,8 @@ try {
   check('закреп показывает последнее своё сообщение', !layout.pinHidden && layout.preview === 'Последний вопрос', layout);
   check('счётчик закрепов', layout.count.trim() === '3 / 3', layout);
   check('кнопка «в конец» скрыта внизу', layout.toEndHidden, layout);
+  // Раньше этих сообщений ничего нет — кнопки догрузки быть не должно.
+  check('кнопки ранних сообщений нет, когда раньше ничего нет', layout.olderHidden, layout);
 
   // Регрессия: общее CSS-правило `.user` (имя в шапке) сжимало свои сообщения
   // в ленте в ноль — они оставались в DOM, но были не видны.
@@ -482,8 +487,8 @@ try {
     return Math.round(item.getBoundingClientRect().top);
   })()`);
 
-  // Открываем сессию заново: лента снова с одними последними сообщениями.
-  await evaluate(`window.__olderPages = [{ items: ${JSON.stringify(olderItems)}, more: false }]`);
+  // Открываем сессию заново: теперь агент говорит, что раньше есть ещё лента.
+  await evaluate(`window.__more = true; window.__olderPages = [{ items: ${JSON.stringify(olderItems)}, more: false }]`);
   await evaluate(`document.getElementById('back').click()`);
   await waitFor(`!document.getElementById('app').classList.contains('viewing')`);
   await evaluate(`document.querySelector('#sessions .session').click()`);

@@ -442,6 +442,9 @@ impl OpenCode {
                     let limit = if first { PAGE } else { 20 };
                     let mut items = Vec::new();
                     let mut drop = Vec::new();
+                    // Есть ли перед первой лентой более ранние сообщения: по этому
+                    // признаку панель показывает кнопку догрузки.
+                    let mut more = false;
                     // Хэши уже доставленных сообщений: очередь может ещё содержать
                     // сообщение, которое уже попало в ленту.
                     let mut delivered: HashSet<u64> = HashSet::new();
@@ -457,9 +460,14 @@ impl OpenCode {
                             }
                             items.retain(|it| feed.changed(it));
                             // Первая страница — та, что панель показала сразу:
-                            // её курсор начинает догрузку ранних сообщений.
+                            // её курсор начинает догрузку ранних сообщений. Курсор
+                            // opencode отдаёт и на последней странице (за концом),
+                            // поэтому о конце говорит неполная страница.
                             if first {
-                                self.remember_page(&id, v["cursor"]["next"].as_str());
+                                let full = v["data"].as_array().map_or(0, Vec::len) >= PAGE;
+                                let cursor = v["cursor"]["next"].as_str().filter(|c| !c.is_empty()).filter(|_| full);
+                                self.remember_page(&id, cursor);
+                                more = cursor.is_some();
                             }
                         }
                         Err(e) => {
@@ -544,6 +552,7 @@ impl OpenCode {
                             reset: first,
                             items,
                             drop,
+                            more,
                         });
                         first = false;
                     }
@@ -560,6 +569,7 @@ impl OpenCode {
                             reset: false,
                             items: vec![item],
                             drop: Vec::new(),
+                            more: false,
                         });
                     }
                 }
@@ -614,9 +624,9 @@ impl OpenCode {
         let page = pages.entry(id.to_owned()).or_default();
         page.loading = false;
         let v = result?;
-        let (items, next) = older_page(&v);
-        page.cursor = next;
-        let more = page.cursor.is_some();
+        let (items, more) = older_page(&v);
+        // Дальше ведёт курсор этой страницы; если она последняя, он уже не нужен.
+        page.cursor = if more { v["cursor"]["next"].as_str().filter(|c| !c.is_empty()).map(str::to_owned) } else { None };
         Ok((items, more))
     }
 
@@ -1290,14 +1300,17 @@ fn content_text(v: &Value) -> String {
 }
 
 /// Страница ранних сообщений из ответа opencode: элементы в порядке ленты (от
-/// старых к новым) и курсор на следующую, ещё более раннюю страницу.
-fn older_page(v: &Value) -> (Vec<Item>, Option<String>) {
+/// старых к новым) и есть ли за ней ещё страница.
+///
+/// Курсор opencode отдаёт и на последней странице, указывая за конец, поэтому о
+/// конце говорит неполная страница: полная — за ней может быть ещё одна.
+fn older_page(v: &Value) -> (Vec<Item>, bool) {
+    let data = v["data"].as_array().map_or(&[][..], Vec::as_slice);
     let mut items = Vec::new();
-    for m in v["data"].as_array().into_iter().flatten().rev() {
+    for m in data.iter().rev() {
         convert(m, &mut items);
     }
-    let next = v["cursor"]["next"].as_str().filter(|c| !c.is_empty()).map(str::to_owned);
-    (items, next)
+    (items, data.len() >= PAGE)
 }
 
 fn convert(m: &Value, out: &mut Vec<Item>) {
@@ -1747,7 +1760,7 @@ mod tests {
     #[test]
     fn pages_older_messages() {
         // Страница приходит новыми сообщениями вперёд, а в ленту идёт обратный
-        // порядок; курсор `next` ведёт к следующей, ещё более ранней странице.
+        // порядок. Неполная страница — последняя: дальше ранних нет.
         let v = json!({
             "data": [
                 {"id":"m3","type":"user","time":{"created":30},"text":"третий"},
@@ -1756,14 +1769,20 @@ mod tests {
             ],
             "cursor": {"next": "cur", "previous": null},
         });
-        let (items, next) = older_page(&v);
+        let (items, more) = older_page(&v);
         let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.text.as_str())).collect();
         assert_eq!(got, [("m1:0", "первый"), ("m2:text:0", "ответ"), ("m3:0", "третий")]);
-        assert_eq!(next.as_deref(), Some("cur"));
+        assert!(!more, "страница короче предела — ранних больше нет");
 
-        // Последняя страница: курсора нет — ранних сообщений больше не осталось.
-        assert_eq!(older_page(&json!({"data": [], "cursor": {"next": null}})).1, None);
-        // Старый opencode курсоров не знает: догрузку не предлагаем.
-        assert_eq!(older_page(&json!({"data": []})).1, None);
+        // Полная страница: opencode мог отдать ровно столько, сколько просили.
+        let full: Vec<Value> = (0..PAGE)
+            .map(|i| json!({"id":format!("m{i}"),"type":"user","time":{"created":i},"text":"x"}))
+            .collect();
+        assert!(older_page(&json!({"data": full, "cursor": {"next": "cur"}})).1);
+
+        // Курсор есть, а страница пустая: это конец переписки.
+        assert!(!older_page(&json!({"data": [], "cursor": {"next": "cur"}})).1);
+        // Старый opencode курсоров не знает — догрузку не предлагаем.
+        assert!(!older_page(&json!({"data": []})).1);
     }
 }

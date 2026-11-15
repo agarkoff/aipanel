@@ -444,6 +444,8 @@ impl Claude {
                             reset: true,
                             items,
                             drop: Vec::new(),
+                            // Перед показанным остался ещё не прочитанный транскрипт.
+                            more: begin > 0,
                         });
                     } else if len > offset {
                         let (items, consumed, _) =
@@ -455,6 +457,7 @@ impl Claude {
                                 reset: false,
                                 items,
                                 drop: Vec::new(),
+                                more: false,
                             });
                         }
                     }
@@ -468,6 +471,7 @@ impl Claude {
                             reset: true,
                             items: vec![],
                             drop: Vec::new(),
+                            more: false,
                         });
                     }
                 }
@@ -720,6 +724,7 @@ impl Claude {
                     session: format!("claude:{sid}"),
                     reset: false,
                     drop: Vec::new(),
+                    more: false,
                     items: vec![Item {
                         id: format!("err-{}", now_ms()),
                         ts: now_ms(),
