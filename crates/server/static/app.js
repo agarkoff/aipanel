@@ -34,6 +34,16 @@ let selected = null; // { agent, session }
 let cmdSeq = 0;
 const nodes = new Map(); // id элемента ленты -> DOM-узел
 
+// Закреп в шапке ленты: показываем последнее своё сообщение, по нажатию переходим
+// к нему, а закреп переключается на предыдущее своё — как в Telegram.
+let pinIdx = -1; // индекс своего сообщения в ленте, на который ведёт закреп
+let pinNewestId = ''; // id самого нового своего сообщения при прошлой отрисовке
+let flashId = ''; // id сообщения, к которому сейчас подсвечен переход
+let flashTimer = null;
+// Пока идёт переход по закрепу, авто-прилипание к концу ленты выключено:
+// иначе первый же ответ агента вернул бы ленту вниз, не дав дочитать сообщение.
+let scrollHoldUntil = 0;
+
 // Запуск новой сессии: id команды, её параметры и ожидаемая сессия.
 let launchId = null;
 let launchRequest = null;
@@ -223,6 +233,7 @@ function select(agent, session) {
   clearTimeout(copyIdTimer);
   $('copy-id').classList.remove('copied');
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
+  resetPin();
   setHint('');
   $('app').classList.add('viewing');
   // Запись в истории нужна, чтобы системная кнопка «Назад» на телефоне
@@ -237,6 +248,7 @@ function closeView() {
   $('app').classList.remove('viewing');
   selected = null;
   clearPrompts();
+  resetPin();
   send({ t: 'unwatch' });
   // Подсказка относилась к открытой сессии; в списке её копия была бы уже не к месту.
   setHint('');
@@ -429,6 +441,7 @@ function diffDetails(text) {
 
 function buildItem(item) {
   const node = el('div', `item ${item.role} ${item.kind}`);
+  node.dataset.id = item.id;
   if (item.kind === 'text') {
     const body = el('div', 'body md');
     body.append(renderMarkdown(item.text));
@@ -468,7 +481,7 @@ function buildItem(item) {
 
 function applyHistory(msg) {
   const feed = $('feed');
-  const stick = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  const stick = Date.now() > scrollHoldUntil && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   if (msg.reset) {
     nodes.clear();
     feedRequests.clear();
@@ -492,6 +505,7 @@ function applyHistory(msg) {
       consumeSentRequest(item.text);
     }
     const node = buildItem(item);
+    if (item.id === flashId) node.classList.add('flash');
     const old = nodes.get(item.id);
     if (old) {
       const oldDetails = old.querySelector('details');
@@ -504,7 +518,108 @@ function applyHistory(msg) {
     nodes.set(item.id, node);
   }
   if (msg.reset || stick) feed.scrollTop = feed.scrollHeight;
+  syncPin();
+  updateToEnd();
 }
+
+// ------------------------------------------------------------ закреп и конец ленты
+
+// Свои сообщения в ленте по порядку: отправленные и ещё стоящие в очереди.
+function myMessages() {
+  const out = [];
+  for (const node of nodes.values()) {
+    if (node.classList.contains('user')) out.push(node);
+  }
+  return out;
+}
+
+function messageText(node) {
+  const body = node.querySelector('.body');
+  return ((body ? body.textContent : node.textContent) || '').replace(/\s+/g, ' ').trim();
+}
+
+function renderPin(list) {
+  $('pin-preview').textContent = messageText(list[pinIdx]) || 'Сообщение';
+  const count = $('pin-count');
+  // Счётчик нужен, только когда закрепов несколько: по нему видно, где мы.
+  count.hidden = list.length < 2;
+  count.textContent = `${pinIdx + 1} / ${list.length}`;
+}
+
+// Лента изменилась: новое своё сообщение снова становится закрепом, а если
+// закреплённое пропало (сообщение ушло из очереди), индекс подтягиваем к концу.
+function syncPin() {
+  const list = myMessages();
+  if (!list.length) {
+    resetPin();
+    return;
+  }
+  const newest = list[list.length - 1].dataset.id || '';
+  if (newest !== pinNewestId) {
+    pinNewestId = newest;
+    pinIdx = list.length - 1;
+  }
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  $('pin').hidden = false;
+  renderPin(list);
+}
+
+function resetPin() {
+  clearFlash();
+  scrollHoldUntil = 0;
+  $('pin').hidden = true;
+  $('pin-preview').textContent = '';
+  $('pin-count').hidden = true;
+  $('to-end').hidden = true;
+  pinIdx = -1;
+  pinNewestId = '';
+}
+
+function clearFlash() {
+  clearTimeout(flashTimer);
+  flashId = '';
+  for (const node of nodes.values()) node.classList.remove('flash');
+}
+
+$('pin').addEventListener('click', () => {
+  const list = myMessages();
+  if (!list.length) return;
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  const node = list[pinIdx];
+  const feed = $('feed');
+  const box = feed.getBoundingClientRect();
+  const item = node.getBoundingClientRect();
+  // Сообщение ставим ближе к верху ленты: так видно и сам запрос, и ответ на него.
+  const top = feed.scrollTop + item.top - box.top - Math.min(120, feed.clientHeight * 0.25);
+  scrollHoldUntil = Date.now() + 600;
+  feed.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  clearFlash();
+  flashId = node.dataset.id || '';
+  node.classList.add('flash');
+  flashTimer = setTimeout(clearFlash, 1600);
+  // Следующее нажатие ведёт к более старому своему сообщению, а после самого
+  // старого закреп возвращается к последнему.
+  pinIdx = pinIdx === 0 ? list.length - 1 : pinIdx - 1;
+  renderPin(list);
+});
+
+function nearEnd() {
+  const feed = $('feed');
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+}
+
+// Кнопка «в конец» — только когда лента прокручена вверх: внизу она не нужна.
+function updateToEnd() {
+  $('to-end').hidden = nodes.size === 0 || nearEnd();
+}
+
+$('to-end').addEventListener('click', () => {
+  scrollHoldUntil = 0;
+  const feed = $('feed');
+  feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+});
+
+$('feed').addEventListener('scroll', updateToEnd, { passive: true });
 
 // ------------------------------------------------------------ запросы opencode
 
