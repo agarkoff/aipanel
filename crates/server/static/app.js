@@ -53,6 +53,10 @@ let handoffId = null;
 let handoffRequest = null;
 let copyIdTimer = null;
 let cancelQueuedId = null;
+// Удаление сессии: id команды и удаляемая сессия. Диалог остаётся открытым,
+// пока агент не ответит, чтобы ошибку было видно.
+let deleteId = null;
+let deleteRequest = null;
 // Прерывание хода: id команды, чтобы показать результат именно для неё.
 let interruptId = null;
 // Запросы opencode, ожидающие ответа: разрешения и формы с вариантами.
@@ -151,6 +155,9 @@ function onMessage(msg) {
     agents = msg.agents;
     renderSessions();
     renderHeader();
+    // Сессию могли удалить в другой вкладке: её ленты больше нет.
+    const open = selected && agents.find((a) => a.name === selected.agent);
+    if (open && !open.sessions.some((s) => s.key === selected.session)) closeView();
     checkPendingLaunch();
   } else if (msg.t === 'history') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
@@ -162,6 +169,7 @@ function onMessage(msg) {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
     else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
+    else if (deleteId && msg.id === deleteId) onDeleteResult(msg);
     else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
     else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
@@ -202,6 +210,7 @@ function renderSessions() {
     const list = a.sessions.filter((s) => !q || `${s.title} ${s.cwd}`.toLowerCase().includes(q));
     if (!list.length) box.append(el('div', 'empty', 'Сессий нет.'));
     for (const s of list) {
+      const row = el('div', 'session-row');
       const btn = el('button', 'session');
       btn.type = 'button';
       if (selected && selected.agent === a.name && selected.session === s.key) btn.classList.add('active');
@@ -212,12 +221,175 @@ function renderSessions() {
         el('span', 'meta', `${s.tool} · ${s.cwd}`),
       );
       btn.addEventListener('click', () => select(a.name, s.key));
-      box.append(btn);
+
+      const swap = el('span', 'swipe-delete', 'Удалить');
+      swap.setAttribute('aria-hidden', 'true');
+
+      // На компьютере сессия удаляется крестиком, на телефоне — смахиванием влево.
+      const del = el('button', 'session-delete', '×');
+      del.type = 'button';
+      del.title = 'Удалить сессию';
+      del.setAttribute('aria-label', 'Удалить сессию');
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        askDelete(a.name, s);
+      });
+
+      row.append(swap, btn, del);
+      attachSwipe(row, btn, () => askDelete(a.name, s));
+      box.append(row);
     }
   }
 }
 
 $('filter').addEventListener('input', renderSessions);
+
+// Смахивание влево по строке сессии — жест телефона. Строка едет за пальцем,
+// а если отпустить дальше порога, открывается подтверждение удаления.
+function attachSwipe(row, btn, onDelete) {
+  const LIMIT = 96;
+  const THRESHOLD = 72;
+  let startX = 0;
+  let startY = 0;
+  let dx = 0;
+  let dy = 0;
+  let tracking = false;
+  let horizontal = false;
+  let swiped = false;
+  row.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' || e.button !== 0) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    dx = 0;
+    dy = 0;
+    tracking = true;
+    horizontal = false;
+    swiped = false;
+    row.classList.add('dragging');
+  });
+  row.addEventListener('pointermove', (e) => {
+    if (!tracking) return;
+    dx = e.clientX - startX;
+    dy = e.clientY - startY;
+    if (!horizontal) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      // Вертикальное движение — это прокрутка списка, а не свайп.
+      if (Math.abs(dx) <= Math.abs(dy) * 1.2) {
+        tracking = false;
+        row.classList.remove('dragging');
+        return;
+      }
+      horizontal = true;
+      row.setPointerCapture(e.pointerId);
+    }
+    btn.style.transform = `translateX(${Math.max(-LIMIT, Math.min(0, dx))}px)`;
+    e.preventDefault();
+  });
+  const end = () => {
+    if (!tracking) return;
+    tracking = false;
+    row.classList.remove('dragging');
+    btn.style.transform = '';
+    if (horizontal && Math.abs(dx) > 8) {
+      swiped = true;
+      // Клик после свайпа не должен открыть сессию.
+      setTimeout(() => {
+        swiped = false;
+      }, 400);
+    }
+    if (horizontal && dx <= -THRESHOLD) {
+      // Открываем окно после возможного click: иначе касание, завершившее
+      // свайп, попало бы в затемнение и сразу закрыло подтверждение.
+      setTimeout(onDelete, 0);
+    }
+    horizontal = false;
+  };
+  row.addEventListener('pointerup', end);
+  row.addEventListener('pointercancel', () => {
+    tracking = false;
+    horizontal = false;
+    row.classList.remove('dragging');
+    btn.style.transform = '';
+  });
+  row.addEventListener(
+    'click',
+    (e) => {
+      if (!swiped) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true,
+  );
+}
+
+// ------------------------------------------------------------ удаление сессии
+
+function deleteHint(text, isError) {
+  const hint = $('delete-hint');
+  hint.textContent = text;
+  hint.className = isError ? 'hint error' : 'hint';
+}
+
+function askDelete(agent, session) {
+  if (deleteId !== null) return;
+  deleteRequest = { agent, session: session.key, title: session.title || session.key };
+  $('delete-text').textContent =
+    `Сессия «${deleteRequest.title}» будет удалена с компьютера без возможности восстановления.`;
+  deleteHint('');
+  $('delete-ok').disabled = false;
+  $('delete-cancel').disabled = false;
+  if (!$('delete-session').open) $('delete-session').showModal();
+}
+
+function closeDeleteDialog() {
+  if (deleteId !== null) return;
+  deleteRequest = null;
+  $('delete-session').close();
+}
+
+$('delete-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (!deleteRequest || deleteId !== null) return;
+  const id = String(++cmdSeq);
+  if (!send({ t: 'delete', id, agent: deleteRequest.agent, session: deleteRequest.session })) {
+    deleteHint('Нет соединения с сервером.', true);
+    return;
+  }
+  deleteId = id;
+  $('delete-ok').disabled = true;
+  $('delete-cancel').disabled = true;
+  deleteHint('Удаляем…');
+});
+
+$('delete-cancel').addEventListener('click', closeDeleteDialog);
+// Пока команда выполняется, окно не закрываем: ошибку должно быть видно.
+$('delete-session').addEventListener('cancel', (e) => {
+  if (deleteId !== null) e.preventDefault();
+  else deleteRequest = null;
+});
+$('delete-session').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeDeleteDialog();
+});
+
+function onDeleteResult(msg) {
+  deleteId = null;
+  $('delete-ok').disabled = false;
+  $('delete-cancel').disabled = false;
+  if (!msg.ok) {
+    deleteHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
+    return;
+  }
+  const req = deleteRequest;
+  deleteRequest = null;
+  $('delete-session').close();
+  if (!req) return;
+  // Убираем строку сразу, не дожидаясь следующего списка от агента.
+  const agent = agents.find((a) => a.name === req.agent);
+  if (agent) agent.sessions = agent.sessions.filter((s) => s.key !== req.session);
+  if (selected && selected.agent === req.agent && selected.session === req.session) closeView();
+  else renderSessions();
+  setHint('Сессия удалена.');
+}
 
 function current() {
   if (!selected) return null;
@@ -258,6 +430,10 @@ function closeView() {
   clearPrompts();
   resetPin();
   send({ t: 'unwatch' });
+  // Если сессию закрыли не кнопкой «Назад», текущая запись истории всё ещё
+  // помечена как просмотр: без этого следующая сессия не добавила бы новую,
+  // и системная кнопка «Назад» увела бы со страницы.
+  if (history.state && history.state.viewing) history.replaceState(null, '');
   // Подсказка относилась к открытой сессии; в списке её копия была бы уже не к месту.
   setHint('');
   renderSessions();

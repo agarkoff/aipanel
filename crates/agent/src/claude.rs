@@ -246,6 +246,36 @@ impl Claude {
             .find(|p| p.is_file())
     }
 
+    /// Удаляет транскрипт закрытой сессии вместе с каталогом её подпроцессов.
+    /// Открытую или выполняющуюся сессию не трогаем: Claude Code дописывал бы
+    /// в удалённый файл.
+    pub fn delete(&self, sid: &str) -> Result<(), String> {
+        let known = self.lock().known.get(sid).cloned();
+        if known.as_ref().is_some_and(|k| k.pid.is_some()) {
+            return Err("сессия открыта в терминале — закройте её перед удалением".into());
+        }
+        {
+            let st = self.lock();
+            if st.headless.contains_key(sid) || st.launched.contains_key(sid) {
+                return Err("сессия выполняется — дождитесь завершения или прервите её".into());
+            }
+        }
+        let path = known
+            .and_then(|k| k.path)
+            .or_else(|| self.find_path(sid))
+            .ok_or("транскрипт сессии не найден")?;
+        fs::remove_file(&path).map_err(|e| format!("не удалось удалить транскрипт: {e}"))?;
+        // Рядом Claude Code хранит транскрипты подпроцессов: <id>/subagents/…
+        if let Some(dir) = path.parent().map(|p| p.join(sid)).filter(|p| p.is_dir()) {
+            let _ = fs::remove_dir_all(dir);
+        }
+        let mut st = self.lock();
+        st.known.remove(sid);
+        st.tails.remove(&path);
+        st.transcripts.remove(sid);
+        Ok(())
+    }
+
     /// Следит за транскриптом и отправляет ленту, пока задачу не отменят.
     pub async fn watch(&self, key: String, sid: String, out: UnboundedSender<AgentMsg>) {
         let mut path: Option<PathBuf> = None;
@@ -769,6 +799,46 @@ mod tests {
             ]
         );
         assert_eq!(items[2].tool.as_deref(), Some("Bash"));
+    }
+
+    /// Удаляется только закрытая сессия: открытую в терминале трогать нельзя.
+    #[test]
+    fn deletes_closed_transcript() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-delete-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("projects").join("p");
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&sessions).unwrap();
+        let sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let path = project.join(format!("{sid}.jsonl"));
+        fs::write(&path, "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n").unwrap();
+        // Рядом Claude Code хранит транскрипты подпроцессов.
+        fs::create_dir_all(project.join(sid).join("subagents")).unwrap();
+
+        let cfg = ClaudeCfg { home: Some(dir.clone()), ..ClaudeCfg::default() };
+        let claude = Claude::new(cfg, Arc::new(Notify::new()));
+        assert_eq!(claude.scan().len(), 1);
+
+        claude.delete(sid).unwrap();
+        assert!(!path.exists());
+        assert!(!project.join(sid).exists());
+
+        // Та же сессия, но открытая: удаление отклоняется.
+        fs::write(&path, "{}\n").unwrap();
+        fs::write(
+            sessions.join(format!("{}.json", std::process::id())),
+            format!(
+                "{{\"pid\":{},\"sessionId\":\"{sid}\",\"cwd\":\"D:/p\",\"name\":\"n\",\"status\":\"idle\"}}",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+        assert!(claude.scan()[0].live);
+        assert!(claude.delete(sid).is_err());
+        assert!(path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Регресс: mtime транскрипта сдвигается и без новых сообщений (живой CLI

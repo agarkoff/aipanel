@@ -670,6 +670,25 @@ impl OpenCode {
             .map(|_| ())
     }
 
+    /// Удаляет сессию через API opencode. Занятую или открытую в окне сессию
+    /// не трогаем: opencode мог бы продолжить писать в неё после удаления.
+    pub async fn delete(&self, id: &str) -> Result<(), String> {
+        if self.windowed_sessions().contains(id) || self.recently_launched(id) {
+            return Err("сессия открыта в окне opencode — закройте её перед удалением".into());
+        }
+        let active = self
+            .get("/api/session/active")
+            .await
+            .ok()
+            .is_some_and(|v| v["data"].get(id).is_some());
+        if active {
+            return Err("сессия выполняется — дождитесь завершения или прервите её".into());
+        }
+        self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None)
+            .await
+            .map(|_| ())
+    }
+
     /// Отвечает на запрос разрешения или на форму с вариантами.
     #[allow(clippy::too_many_arguments)]
     pub async fn reply_prompt(

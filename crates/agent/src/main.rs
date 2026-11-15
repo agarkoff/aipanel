@@ -160,6 +160,18 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
+            ServerMsg::Delete { id, session } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result = match split_key(&session) {
+                        Ok(("claude", sid)) => me.claude.delete(sid),
+                        Ok(("opencode", sid)) => me.opencode.delete(sid).await,
+                        Ok(_) => Err("неизвестный тип сессии".into()),
+                        Err(e) => Err(e),
+                    };
+                    me.finish(id, result.map(|_| None));
+                });
+            }
             ServerMsg::PromptReply { id, session, prompt, kind, decision, answer, message, cancel } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {

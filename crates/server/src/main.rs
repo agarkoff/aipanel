@@ -508,6 +508,7 @@ enum BrowserMsg {
     Start { id: String, agent: String, tool: String, cwd: String },
     Handoff { id: String, agent: String, session: String, tool: String },
     CancelQueued { id: String, agent: String, session: String, queue: String },
+    Delete { id: String, agent: String, session: String },
     PromptReply {
         id: String,
         agent: String,
@@ -648,6 +649,10 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 cmd.clone(),
                 ServerMsg::CancelQueued { id: cmd, session, queue },
             );
+        }
+        BrowserMsg::Delete { id, agent, session } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Delete { id: cmd, session });
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
             if !safe_id(&prompt) {

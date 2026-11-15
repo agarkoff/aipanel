@@ -175,6 +175,8 @@ pub enum ServerMsg {
     Handoff { id: String, session: String, tool: String },
     /// Убрать сообщение `queue` из очереди opencode-сессии `session`.
     CancelQueued { id: String, session: String, queue: String },
+    /// Удалить сессию `session`: транскрипт Claude Code или сессию opencode.
+    Delete { id: String, session: String },
     /// Ответить на запрос opencode `prompt`: разрешение (`decision`), форма
     /// (`answer`) или отмена формы (`cancel`).
     PromptReply {

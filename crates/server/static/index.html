@@ -109,6 +109,18 @@
   </form>
 </dialog>
 
+<dialog id="delete-session" class="launch confirm" aria-labelledby="delete-title">
+  <form id="delete-form">
+    <h2 id="delete-title">Удалить сессию?</h2>
+    <p id="delete-text" class="confirm-text"></p>
+    <p id="delete-hint" class="hint"></p>
+    <div class="actions">
+      <button id="delete-cancel" class="link" type="button">Отмена</button>
+      <button id="delete-ok" class="danger" type="submit">Удалить</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/md.js"></script>
 <script src="/suggest.js"></script>
 <script src="/app.js"></script>

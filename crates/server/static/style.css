@@ -114,7 +114,15 @@ input, textarea, select {
   gap: 6px;
   align-items: center;
 }
+.session-row {
+  position: relative;
+  overflow: hidden;
+  background: var(--wait);
+  touch-action: pan-y;
+}
 .session {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-columns: 10px 1fr auto;
   gap: 2px 8px;
@@ -123,11 +131,53 @@ input, textarea, select {
   text-align: left;
   border: 0;
   border-radius: 0;
-  background: none;
-  padding: 7px 14px;
+  background: var(--panel);
+  padding: 7px 44px 7px 14px;
+  transition: transform .18s ease;
 }
+.session-row.dragging .session { transition: none; }
+.session-row .session { touch-action: pan-y; }
 .session:hover { background: var(--bg); }
 .session.active { background: var(--user); }
+.swipe-delete {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 96px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 13px;
+}
+.session-delete {
+  display: none;
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 2;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 17px;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+}
+@media (hover: hover) and (pointer: fine) {
+  .session-delete { display: flex; }
+  .session-row:hover .session-delete,
+  .session-delete:focus-visible { opacity: 1; pointer-events: auto; }
+}
+.session-delete:hover { background: var(--wait); color: #fff; }
 .session .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session .when { color: var(--muted); font-size: 12px; }
 .session .meta {
@@ -467,6 +517,8 @@ input, textarea, select {
 .launch label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
 .launch .hint { padding: 0; background: none; }
 .launch .actions { display: flex; justify-content: flex-end; gap: 8px; }
+.confirm .confirm-text { margin: 0; overflow-wrap: anywhere; }
+.confirm .danger { background: var(--wait); border-color: var(--wait); color: #fff; }
 
 /* На тач-экране экранная клавиатура меняет высоту окна просмотра, и окно,
    центрированное по вертикали, переезжает как раз между касанием и click:
