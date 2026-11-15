@@ -359,6 +359,9 @@ function askDelete(agent, session) {
   $('delete-text').textContent =
     `Сессия «${deleteRequest.title}» будет удалена с компьютера без возможности восстановления.`;
   deleteHint('');
+  // Галочка включена при каждом открытии: открытую сессию иначе не удалить.
+  $('delete-close').checked = true;
+  $('delete-close').disabled = false;
   $('delete-ok').disabled = false;
   $('delete-cancel').disabled = false;
   if (!$('delete-session').open) $('delete-session').showModal();
@@ -374,11 +377,13 @@ $('delete-form').addEventListener('submit', (e) => {
   e.preventDefault();
   if (!deleteRequest || deleteId !== null) return;
   const id = String(++cmdSeq);
-  if (!send({ t: 'delete', id, agent: deleteRequest.agent, session: deleteRequest.session })) {
+  const close = $('delete-close').checked;
+  if (!send({ t: 'delete', id, agent: deleteRequest.agent, session: deleteRequest.session, close })) {
     deleteHint('Нет соединения с сервером.', true);
     return;
   }
   deleteId = id;
+  $('delete-close').disabled = true;
   $('delete-ok').disabled = true;
   $('delete-cancel').disabled = true;
   deleteHint('Удаляем…');
@@ -396,6 +401,7 @@ $('delete-session').addEventListener('click', (e) => {
 
 function onDeleteResult(msg) {
   deleteId = null;
+  $('delete-close').disabled = false;
   $('delete-ok').disabled = false;
   $('delete-cancel').disabled = false;
   if (!msg.ok) {

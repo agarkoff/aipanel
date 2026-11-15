@@ -336,7 +336,14 @@ pub enum ServerMsg {
     /// Убрать сообщение `queue` из очереди opencode-сессии `session`.
     CancelQueued { id: String, session: String, queue: String },
     /// Удалить сессию `session`: транскрипт Claude Code или сессию opencode.
-    Delete { id: String, session: String },
+    /// `close` — если сессия открыта или выполняется, сначала закрыть её
+    /// (завершить процесс или окно), иначе удаление открытой сессии отклоняется.
+    Delete {
+        id: String,
+        session: String,
+        #[serde(default)]
+        close: bool,
+    },
     /// Ответить на запрос opencode `prompt`: разрешение (`decision`), форма
     /// (`answer`) или отмена формы (`cancel`).
     PromptReply {

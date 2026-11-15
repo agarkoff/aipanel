@@ -49,6 +49,8 @@ const NESTED_SESSION_ENV: [&str; 8] = [
 ];
 /// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
 const LAUNCH_GUARD: Duration = Duration::from_secs(25);
+/// Сколько ждать, пока закрываемая перед удалением сессия завершится.
+pub(crate) const CLOSE_WAIT: Duration = Duration::from_secs(5);
 /// Предел командной строки Windows — 32 767 символов; запас оставлен под служебные аргументы.
 pub const MAX_ARG_UTF16: usize = 12_000;
 
@@ -337,9 +339,51 @@ impl Claude {
     }
 
     /// Удаляет транскрипт закрытой сессии вместе с каталогом её подпроцессов.
-    /// Открытую или выполняющуюся сессию не трогаем: Claude Code дописывал бы
-    /// в удалённый файл.
-    pub fn delete(&self, sid: &str) -> Result<(), String> {
+    /// Открытую или выполняющуюся сессию без `close` не трогаем: Claude Code
+    /// дописывал бы в удалённый файл. С `close` сначала завершаем её процесс.
+    pub async fn delete(&self, sid: &str, close: bool) -> Result<(), String> {
+        if !close {
+            return self.remove(sid);
+        }
+        self.close(sid).await?;
+        // Убитый процесс отпускает транскрипт не сразу, а Windows не удаляет
+        // открытый файл: несколько секунд повторяем попытку.
+        let deadline = Instant::now() + CLOSE_WAIT;
+        loop {
+            match self.remove(sid) {
+                Err(e) if Instant::now() < deadline && e.starts_with("не удалось удалить") => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// Завершает сессию, открытую в терминале или выполняемую фоновым процессом,
+    /// и ждёт, пока процесс завершится.
+    async fn close(&self, sid: &str) -> Result<(), String> {
+        let pid = self.lock().known.get(sid).and_then(|k| k.pid);
+        if let Some(pid) = pid {
+            crate::platform::kill_pid(pid);
+            let deadline = Instant::now() + CLOSE_WAIT;
+            while crate::platform::pid_alive(pid) {
+                if Instant::now() >= deadline {
+                    return Err("не удалось закрыть сессию в терминале".into());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if let Some(k) = self.lock().known.get_mut(sid) {
+                k.pid = None;
+            }
+        }
+        if let Some(kill) = self.lock().headless.remove(sid) {
+            let _ = kill.send(());
+        }
+        self.rescan.notify_one();
+        Ok(())
+    }
+
+    fn remove(&self, sid: &str) -> Result<(), String> {
         let known = self.lock().known.get(sid).cloned();
         if known.as_ref().is_some_and(|k| k.pid.is_some()) {
             return Err("сессия открыта в терминале — закройте её перед удалением".into());
@@ -1251,9 +1295,9 @@ mod tests {
         assert_eq!(items[2].tool.as_deref(), Some("Bash"));
     }
 
-    /// Удаляется только закрытая сессия: открытую в терминале трогать нельзя.
-    #[test]
-    fn deletes_closed_transcript() {
+    /// Без `close` удаляется только закрытая сессия: открытую в терминале трогать нельзя.
+    #[tokio::test]
+    async fn deletes_closed_transcript() {
         let dir = std::env::temp_dir().join(format!("aipanel-claude-delete-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let project = dir.join("projects").join("p");
@@ -1270,7 +1314,7 @@ mod tests {
         let claude = Claude::new(cfg, Arc::new(Notify::new()));
         assert_eq!(claude.scan().len(), 1);
 
-        claude.delete(sid).unwrap();
+        claude.delete(sid, false).await.unwrap();
         assert!(!path.exists());
         assert!(!project.join(sid).exists());
 
@@ -1285,8 +1329,48 @@ mod tests {
         )
         .unwrap();
         assert!(claude.scan()[0].live);
-        assert!(claude.delete(sid).is_err());
+        assert!(claude.delete(sid, false).await.is_err());
         assert!(path.exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// С `close` открытая сессия сначала закрывается: процесс завершается,
+    /// затем удаляется транскрипт.
+    #[tokio::test]
+    async fn closes_open_session_before_delete() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-close-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("projects").join("p");
+        let sessions = dir.join("sessions");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&sessions).unwrap();
+        let sid = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+        let path = project.join(format!("{sid}.jsonl"));
+        fs::write(&path, "{}\n").unwrap();
+
+        // Долгий процесс вместо Claude Code в терминале.
+        let mut child = if cfg!(windows) {
+            std::process::Command::new("ping").args(["-n", "60", "127.0.0.1"]).stdout(Stdio::null()).spawn()
+        } else {
+            std::process::Command::new("sleep").arg("60").spawn()
+        }
+        .unwrap();
+        let pid = child.id();
+        fs::write(
+            sessions.join(format!("{pid}.json")),
+            format!("{{\"pid\":{pid},\"sessionId\":\"{sid}\",\"cwd\":\"D:/p\",\"name\":\"n\",\"status\":\"idle\"}}"),
+        )
+        .unwrap();
+
+        let cfg = ClaudeCfg { home: Some(dir.clone()), ..ClaudeCfg::default() };
+        let claude = Claude::new(cfg, Arc::new(Notify::new()));
+        assert!(claude.scan()[0].live);
+
+        claude.delete(sid, true).await.unwrap();
+        assert!(!path.exists());
+        assert!(!crate::platform::pid_alive(pid));
+        let _ = child.wait();
 
         let _ = fs::remove_dir_all(&dir);
     }

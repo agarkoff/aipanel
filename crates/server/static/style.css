@@ -602,6 +602,8 @@ input, textarea, select {
 .launch .hint { padding: 0; background: none; }
 .launch .actions { display: flex; justify-content: flex-end; gap: 8px; }
 .confirm .confirm-text { margin: 0; overflow-wrap: anywhere; }
+.launch label.check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); cursor: pointer; }
+.launch label.check input { width: auto; margin: 0; flex: none; }
 .confirm .danger { background: var(--wait); border-color: var(--wait); color: #fff; }
 
 /* На тач-экране экранная клавиатура меняет высоту окна просмотра, и окно,

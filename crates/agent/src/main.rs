@@ -177,12 +177,12 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
-            ServerMsg::Delete { id, session } => {
+            ServerMsg::Delete { id, session, close } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
                     let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.delete(sid),
-                        Ok(("opencode", sid)) => me.opencode.delete(sid).await,
+                        Ok(("claude", sid)) => me.claude.delete(sid, close).await,
+                        Ok(("opencode", sid)) => me.opencode.delete(sid, close).await,
                         Ok(_) => Err("неизвестный тип сессии".into()),
                         Err(e) => Err(e),
                     };

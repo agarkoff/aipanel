@@ -728,22 +728,52 @@ impl OpenCode {
     }
 
     /// Удаляет сессию через API opencode. Занятую или открытую в окне сессию
-    /// не трогаем: opencode мог бы продолжить писать в неё после удаления.
-    pub async fn delete(&self, id: &str) -> Result<(), String> {
+    /// без `close` не трогаем: opencode мог бы продолжить писать в неё после
+    /// удаления. С `close` сначала закрываем окна с ней и прерываем ход.
+    pub async fn delete(&self, id: &str, close: bool) -> Result<(), String> {
+        if close {
+            self.close(id).await?;
+        }
         if self.windowed_sessions().contains(id) || self.recently_launched(id) {
             return Err("сессия открыта в окне opencode — закройте её перед удалением".into());
         }
-        let active = self
-            .get("/api/session/active")
-            .await
-            .ok()
-            .is_some_and(|v| v["data"].get(id).is_some());
-        if active {
+        if self.is_active(id).await {
             return Err("сессия выполняется — дождитесь завершения или прервите её".into());
         }
         self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None)
             .await
             .map(|_| ())
+    }
+
+    async fn is_active(&self, id: &str) -> bool {
+        self.get("/api/session/active")
+            .await
+            .ok()
+            .is_some_and(|v| v["data"].get(id).is_some())
+    }
+
+    /// Закрывает окна opencode с сессией `id` и прерывает её ход, затем ждёт,
+    /// пока окна завершатся и сессия перестанет выполняться.
+    async fn close(&self, id: &str) -> Result<(), String> {
+        let pids = window_pids(id);
+        for &pid in &pids {
+            crate::platform::kill_pid(pid);
+        }
+        if self.is_active(id).await {
+            let path = format!("/api/session/{id}/interrupt");
+            let _ = self.call(reqwest::Method::POST, &path, None).await;
+        }
+        let deadline = std::time::Instant::now() + crate::claude::CLOSE_WAIT;
+        loop {
+            let alive = pids.iter().any(|&p| crate::platform::pid_alive(p));
+            if !alive && !self.is_active(id).await {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(if alive { "не удалось закрыть окно opencode" } else { "сессия не прервалась" }.into());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
     }
 
     /// Остаток лимитов подписки OpenCode Go. Ключ хранится в базе opencode;
@@ -876,6 +906,27 @@ fn session_status(waiting: bool, active: bool, windowed: bool, time: &Value) -> 
 
 /// Добавляет в `out` сессии, чьи окна живы и чей отчёт свежий.
 fn collect_windowed(dir: &Path, now: i64, out: &mut HashSet<String>) {
+    each_window(dir, now, |id, _| {
+        out.insert(id.to_owned());
+    });
+}
+
+/// Процессы окон opencode, в которых сейчас открыта сессия `id`.
+fn window_pids(id: &str) -> Vec<u32> {
+    let now = crate::util::now_ms();
+    let mut out = Vec::new();
+    for dir in crate::util::window_reports_dirs() {
+        each_window(&dir, now, |sid, pid| {
+            if sid == id {
+                out.push(pid);
+            }
+        });
+    }
+    out
+}
+
+/// Обходит живые окна opencode со свежим отчётом: `f(id сессии, pid окна)`.
+fn each_window(dir: &Path, now: i64, mut f: impl FnMut(&str, u32)) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -896,7 +947,7 @@ fn collect_windowed(dir: &Path, now: i64, out: &mut HashSet<String>) {
         // Запись обновляется, пока окно живо; старые отчёты не учитываются.
         let fresh = v["updated"].as_i64().is_some_and(|u| now - u < 60_000);
         if let (true, Some(id)) = (fresh, v["sessionID"].as_str()) {
-            out.insert(id.to_owned());
+            f(id, pid);
         }
     }
 }
