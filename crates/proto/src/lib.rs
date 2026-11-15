@@ -20,6 +20,9 @@ pub struct SessionInfo {
     pub updated_at: i64,
     /// Как будет доставлено сообщение: `console`, `headless`, `api`, `none`.
     pub delivery: String,
+    /// Модель последнего ответа (`claude-opus-…`, `anthropic/claude-sonnet-…`); пусто, если неизвестна.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 /// Элемент ленты сессии. Элемент с уже известным `id` заменяет прежний.

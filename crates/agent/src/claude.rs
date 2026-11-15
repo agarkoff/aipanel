@@ -87,6 +87,8 @@ struct TailMeta {
     /// Время последней записи транскрипта (мс от эпохи), а не mtime файла:
     /// живой CLI «касается» файла раз в час, даже когда новых сообщений нет.
     updated: i64,
+    /// Модель последнего ответа ассистента.
+    model: Option<String>,
 }
 
 #[derive(Default)]
@@ -187,6 +189,7 @@ impl Claude {
                     live: true,
                     updated_at: updated,
                     delivery: if cfg!(windows) { "console" } else { "none" }.into(),
+                    model: meta.model.unwrap_or_default(),
                 });
                 known.insert(sid.to_owned(), Known { pid: Some(pid), cwd, path: transcript });
             }
@@ -238,6 +241,7 @@ impl Claude {
                     "headless"
                 }
                 .into(),
+                model: meta.model.unwrap_or_default(),
             });
             known.insert(sid, Known { pid: None, cwd, path: Some(path) });
         }
@@ -601,7 +605,10 @@ fn tail_meta(st: &mut St, path: &Path, mtime: SystemTime) -> TailMeta {
             meta.updated = line_ts(line);
         }
         scan_meta(line, &mut meta);
-        if meta.title.is_some() && meta.cwd.is_some() && meta.updated > 0 {
+        if meta.model.is_none() {
+            meta.model = line_model(line);
+        }
+        if meta.title.is_some() && meta.cwd.is_some() && meta.updated > 0 && meta.model.is_some() {
             break;
         }
     }
@@ -636,6 +643,19 @@ fn line_ts(line: &str) -> i64 {
     let rest = &line[idx + KEY.len()..];
     let Some(end) = rest.find('"') else { return 0 };
     parse_iso_ms(&rest[..end])
+}
+
+/// Модель ответа ассистента: `"type":"assistant"` и `"model":"claude-…"` внутри `message`.
+/// Ищется по подстроке, чтобы не разбирать длинные строки с ответами целиком.
+/// Служебные ответы самого CLI (`<synthetic>`) моделью не считаются.
+fn line_model(line: &str) -> Option<String> {
+    const KEY: &str = "\"model\":\"";
+    if !line.contains("\"type\":\"assistant\"") {
+        return None;
+    }
+    let rest = &line[line.find(KEY)? + KEY.len()..];
+    let model = &rest[..rest.find('"')?];
+    (!model.is_empty() && !model.starts_with('<')).then(|| model.to_owned())
 }
 
 fn scan_meta(line: &str, meta: &mut TailMeta) {
@@ -794,6 +814,14 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_line_model() {
+        let line = r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"\"model\":\"x\""}]}}"#;
+        assert_eq!(line_model(line).as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(line_model(r#"{"type":"assistant","message":{"model":"<synthetic>"}}"#), None);
+        assert_eq!(line_model(r#"{"type":"user","message":{"model":"claude-opus-5-5"}}"#), None);
+    }
 
     #[test]
     fn parses_edit_diff() {

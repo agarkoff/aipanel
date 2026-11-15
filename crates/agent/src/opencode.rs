@@ -312,6 +312,7 @@ impl OpenCode {
                 live: status != "ready",
                 updated_at: s["time"]["updated"].as_i64().unwrap_or(0),
                 delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
+                model: session_model(&s["model"]),
             });
         }
         out
@@ -1106,9 +1107,25 @@ fn convert(m: &Value, out: &mut Vec<Item>) {
     }
 }
 
+/// Модель сессии в виде `провайдер/модель`, как её пишут в конфиге opencode.
+fn session_model(m: &Value) -> String {
+    let id = m["id"].as_str().or(m["modelID"].as_str()).unwrap_or_default();
+    match m["providerID"].as_str() {
+        Some(p) if !p.is_empty() && !id.is_empty() => format!("{p}/{id}"),
+        _ => id.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_session_model() {
+        assert_eq!(session_model(&json!({"id":"m","providerID":"p","variant":"default"})), "p/m");
+        assert_eq!(session_model(&json!({"id":"m"})), "m");
+        assert_eq!(session_model(&Value::Null), "");
+    }
 
     #[test]
     fn converts_messages() {

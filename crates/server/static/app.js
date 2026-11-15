@@ -51,6 +51,8 @@ let pendingLaunch = null;
 // Продолжение сессии в другом инструменте: id команды и её параметры.
 let handoffId = null;
 let handoffRequest = null;
+// Сессия, для которой открыта панель под стрелкой: при переходе к другой панель закрывается.
+let menuKey = null;
 let copyIdTimer = null;
 let cancelQueuedId = null;
 // Удаление сессии: id команды и удаляемая сессия. Диалог остаётся открытым,
@@ -462,6 +464,8 @@ function renderHeader() {
     $('handoff').hidden = true;
     $('interrupt').hidden = true;
     $('composer').hidden = true;
+    $('more').hidden = true;
+    setSessionMenu(false);
     return;
   }
   const { agent, session } = cur;
@@ -486,6 +490,15 @@ function renderHeader() {
       'и получит выжимку из переписки этой сессии';
   }
   $('handoff').disabled = handoffId !== null;
+  // Панель под стрелкой на телефоне: модель и та же кнопка смены агента.
+  if (menuKey !== session.key) setSessionMenu(false);
+  menuKey = session.key;
+  $('more').hidden = false;
+  $('sm-model').textContent = session.model || 'неизвестна';
+  $('sm-handoff').hidden = $('handoff').hidden;
+  $('sm-handoff').textContent = target ? `Продолжить в ${targetName}` : '';
+  $('sm-handoff').title = $('handoff').title;
+  $('sm-handoff').disabled = $('handoff').disabled;
   const canSend = agent.online && session.delivery !== 'none';
   $('composer').hidden = false;
   $('text').disabled = !canSend;
@@ -1563,6 +1576,29 @@ function checkPendingLaunch() {
   }
 }
 
+// ------------------------------------------------------------ панель сессии (телефон)
+
+function setSessionMenu(open) {
+  $('session-menu').hidden = !open;
+  $('more').setAttribute('aria-expanded', String(open));
+}
+
+$('more').addEventListener('click', () => setSessionMenu($('session-menu').hidden));
+$('sm-handoff').addEventListener('click', () => {
+  setSessionMenu(false);
+  $('handoff').click();
+});
+document.addEventListener('click', (e) => {
+  if ($('session-menu').hidden) return;
+  if (!e.target.closest('#session-menu, #more')) setSessionMenu(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('session-menu').hidden) {
+    setSessionMenu(false);
+    $('more').focus();
+  }
+});
+
 // ------------------------------------------------------------ продолжение сессии
 
 $('handoff').addEventListener('click', () => {
@@ -1580,6 +1616,7 @@ $('handoff').addEventListener('click', () => {
   handoffId = id;
   handoffRequest = { agent: cur.agent.name, tool, cwd: cur.session.cwd, keys };
   $('handoff').disabled = true;
+  $('sm-handoff').disabled = true;
   setHint(`Собираем выжимку и открываем сессию ${name} в этом каталоге…`);
 });
 
@@ -1588,6 +1625,7 @@ function onHandoffResult(msg) {
   handoffId = null;
   handoffRequest = null;
   $('handoff').disabled = false;
+  $('sm-handoff').disabled = false;
   if (!req) return;
   if (!msg.ok) {
     setHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
