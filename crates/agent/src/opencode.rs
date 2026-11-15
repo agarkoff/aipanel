@@ -17,7 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::{
     config::OpenCodeCfg,
     handoff,
-    util::{basename, tool_input, truncate},
+    util::{basename, create_diff, edit_diff, is_edit_tool, tool_path, tool_text, truncate, DIFF_LIMIT},
 };
 
 const TEXT_LIMIT: usize = 20_000;
@@ -408,6 +408,18 @@ impl OpenCode {
     }
 }
 
+/// Дифф по входу инструмента, когда готового патча нет (например, write).
+fn input_diff(name: Option<&str>, input: &Value) -> Option<String> {
+    let name = name.filter(|n| is_edit_tool(n))?;
+    let path = tool_path(input).filter(|p| !p.is_empty())?;
+    if name.eq_ignore_ascii_case("write") {
+        return input["content"].as_str().map(|content| create_diff(path, content));
+    }
+    let old = input["oldString"].as_str().or_else(|| input["old_string"].as_str())?;
+    let new = input["newString"].as_str().or_else(|| input["new_string"].as_str())?;
+    Some(edit_diff(path, old, new))
+}
+
 fn content_text(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -444,19 +456,41 @@ fn convert(m: &Value, out: &mut Vec<Item>) {
                         None,
                     ),
                     Some("tool") => {
+                        let name = c["name"].as_str();
                         let state = &c["state"];
                         push(
                             i.to_string(),
                             "assistant",
                             "tool_use",
-                            tool_input(&state["input"]),
-                            c["name"].as_str().map(str::to_owned),
+                            tool_text(name, &state["input"]),
+                            name.map(str::to_owned),
                         );
                         let mut result = content_text(&state["content"]);
                         if result.is_empty() {
                             result = content_text(&state["error"]);
                         }
                         push(format!("{i}:r"), "tool", "tool_result", truncate(&result, RESULT_LIMIT), None);
+
+                        // opencode отдаёт готовые патчи изменённых файлов.
+                        let mut shown = false;
+                        for (j, file) in state["metadata"]["files"].as_array().into_iter().flatten().enumerate() {
+                            let Some(patch) = file["patch"].as_str().filter(|p| !p.trim().is_empty()) else {
+                                continue;
+                            };
+                            shown = true;
+                            push(
+                                format!("{i}:diff{j}"),
+                                "assistant",
+                                "diff",
+                                truncate(patch, DIFF_LIMIT),
+                                None,
+                            );
+                        }
+                        if !shown {
+                            if let Some(text) = input_diff(name, &state["input"]) {
+                                push(format!("{i}:diff"), "assistant", "diff", truncate(&text, DIFF_LIMIT), None);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -478,6 +512,32 @@ fn convert(m: &Value, out: &mut Vec<Item>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converts_edits_to_diffs() {
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m4","type":"assistant","time":{"created":8},"content":[
+                {"type":"tool","name":"edit","state":{"status":"completed",
+                    "input":{"path":"C:\\p\\a.rs","oldString":"old","newString":"new"},
+                    "metadata":{"files":[{"file":"C:/p/a.rs","patch":"--- a/C:/p/a.rs\n+++ b/C:/p/a.rs\n@@ -1 +1 @@\n-old\n+new\n"}]}}},
+                {"type":"tool","name":"write","state":{"status":"completed",
+                    "input":{"path":"C:\\p\\b.txt","content":"x\ny"},
+                    "metadata":{"truncated":false}}}
+            ]}),
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("m4:0", "tool_use", "C:\\p\\a.rs"),
+                ("m4:0:diff0", "diff", "--- a/C:/p/a.rs\n+++ b/C:/p/a.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+                ("m4:1", "tool_use", "C:\\p\\b.txt"),
+                ("m4:1:diff", "diff", "--- /dev/null\n+++ b/C:/p/b.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n"),
+            ]
+        );
+    }
 
     #[test]
     fn converts_messages() {

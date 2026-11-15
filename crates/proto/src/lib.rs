@@ -29,7 +29,7 @@ pub struct Item {
     pub ts: i64,
     /// `user`, `assistant`, `system`.
     pub role: String,
-    /// `text`, `thinking`, `tool_use`, `tool_result`, `error`.
+    /// `text`, `thinking`, `tool_use`, `tool_result`, `diff`, `error`.
     pub kind: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

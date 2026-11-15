@@ -25,7 +25,7 @@ use tokio::{
 use crate::{
     config::ClaudeCfg,
     handoff,
-    util::{basename, now_ms, parse_iso_ms, to_ms, tool_input, truncate},
+    util::{basename, create_diff, edit_diff, now_ms, parse_iso_ms, to_ms, tool_text, truncate, DIFF_LIMIT},
 };
 
 const TAIL_META_BYTES: u64 = 256 * 1024;
@@ -256,12 +256,20 @@ impl Claude {
                         }
                         offset = start + consumed;
                         first = false;
-                        let _ = out.send(AgentMsg::History { session: key.clone(), reset: true, items });
+                        let _ = out.send(AgentMsg::History {
+                            session: key.clone(),
+                            reset: true,
+                            items,
+                        });
                     } else if len > offset {
                         let (items, consumed) = read_items(p, offset, len.min(offset + MAX_CHUNK), false);
                         offset += consumed;
                         if !items.is_empty() {
-                            let _ = out.send(AgentMsg::History { session: key.clone(), reset: false, items });
+                            let _ = out.send(AgentMsg::History {
+                                session: key.clone(),
+                                reset: false,
+                                items,
+                            });
                         }
                     }
                 }
@@ -269,7 +277,11 @@ impl Claude {
                 None => {
                     if !told_empty {
                         told_empty = true;
-                        let _ = out.send(AgentMsg::History { session: key.clone(), reset: true, items: vec![] });
+                        let _ = out.send(AgentMsg::History {
+                            session: key.clone(),
+                            reset: true,
+                            items: vec![],
+                        });
                     }
                 }
             }
@@ -548,6 +560,48 @@ fn read_items(path: &Path, start: u64, end: u64, skip_first: bool) -> (Vec<Item>
     (items, last_nl as u64 + 1)
 }
 
+/// Дифф из результата правки: Claude Code кладёт в `toolUseResult` готовый
+/// `structuredPatch`, а для нового файла — его содержимое.
+fn push_diff(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item>) {
+    let r = &v["toolUseResult"];
+    let Some(file) = r["filePath"].as_str().filter(|p| !p.is_empty()) else { return };
+    let file = file.replace('\\', "/");
+    let mut text = String::new();
+    if let Some(hunks) = r["structuredPatch"].as_array().filter(|h| !h.is_empty()) {
+        text.push_str(&format!("--- a/{file}\n+++ b/{file}\n"));
+        for h in hunks {
+            let old_start = h["oldStart"].as_i64().unwrap_or(0);
+            let old_lines = h["oldLines"].as_i64().unwrap_or(0);
+            let new_start = h["newStart"].as_i64().unwrap_or(0);
+            let new_lines = h["newLines"].as_i64().unwrap_or(0);
+            text.push_str(&format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@\n"));
+            for line in h["lines"].as_array().into_iter().flatten() {
+                if let Some(line) = line.as_str() {
+                    text.push_str(line);
+                    text.push('\n');
+                }
+            }
+        }
+    } else if r["type"].as_str() == Some("create") {
+        if let Some(content) = r["content"].as_str() {
+            text = create_diff(&file, content);
+        }
+    } else if let (Some(old), Some(new)) = (r["oldString"].as_str(), r["newString"].as_str()) {
+        text = edit_diff(&file, old, new);
+    }
+    if text.is_empty() {
+        return;
+    }
+    out.push(Item {
+        id: format!("{uuid}:diff"),
+        ts,
+        role: "assistant".into(),
+        kind: "diff".into(),
+        text: truncate(&text, DIFF_LIMIT),
+        tool: None,
+    });
+}
+
 fn parse_line(line: &str, out: &mut Vec<Item>) {
     // Быстрый отсев: в транскрипте много служебных строк, в том числе очень длинных.
     if !(line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")) {
@@ -564,6 +618,10 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
     }
     let uuid = v["uuid"].as_str().unwrap_or_default();
     let ts = v["timestamp"].as_str().map(parse_iso_ms).unwrap_or(0);
+    // Правка файла: готовый патч лежит в toolUseResult строки с tool_result.
+    if role == "user" {
+        push_diff(&v, uuid, ts, out);
+    }
     let mut push = |idx: usize, role: &str, kind: &str, text: String, tool: Option<String>| {
         out.push(Item { id: format!("{uuid}:{idx}"), ts, role: role.into(), kind: kind.into(), text, tool });
     };
@@ -588,7 +646,7 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
                         i,
                         "assistant",
                         "tool_use",
-                        tool_input(&b["input"]),
+                        tool_text(b["name"].as_str(), &b["input"]),
                         b["name"].as_str().map(str::to_owned),
                     ),
                     Some("tool_result") => {
@@ -614,6 +672,34 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_edit_diff() {
+        let mut items = Vec::new();
+        parse_line(
+            r#"{"type":"user","uuid":"u4","timestamp":"2026-11-05T10:06:22.084Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]},"toolUseResult":{"filePath":"D:\\p\\a.rs","oldString":"x","newString":"y","structuredPatch":[{"oldStart":3,"oldLines":2,"newStart":3,"newLines":3,"lines":[" ctx","-old","+new","+more"]}]}}"#,
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("u4:diff", "diff", "--- a/D:/p/a.rs\n+++ b/D:/p/a.rs\n@@ -3,2 +3,3 @@\n ctx\n-old\n+new\n+more\n"),
+                ("u4:0", "tool_result", "ok"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_created_file_diff() {
+        let mut items = Vec::new();
+        parse_line(
+            r#"{"type":"user","uuid":"u5","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"ok"}]},"toolUseResult":{"type":"create","filePath":"D:\\p\\new.txt","content":"a\nb\n","structuredPatch":[]}}"#,
+            &mut items,
+        );
+        assert_eq!(items[0].kind, "diff");
+        assert_eq!(items[0].text, "--- /dev/null\n+++ b/D:/p/new.txt\n@@ -0,0 +1,2 @@\n+a\n+b\n");
+    }
 
     #[test]
     fn parses_transcript_lines() {

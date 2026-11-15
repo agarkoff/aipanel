@@ -11,6 +11,8 @@
   --idle: #2e9d5b;
   --wait: #c7402d;
   --off: #a0a09a;
+  --diff-add: #e7f5e9;
+  --diff-del: #fbe9e7;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -22,6 +24,8 @@
     --accent: #6ea0ff;
     --user: #24344f;
     --tool: #26282c;
+    --diff-add: #1e3524;
+    --diff-del: #3b2321;
   }
 }
 
@@ -207,6 +211,29 @@ input, textarea, select {
   overflow: auto;
   margin-top: 4px;
 }
+/* Дифф правки файла: раскрыт сразу, удалённые строки красные, добавленные зелёные. */
+.item.diff details { padding: 0; overflow: hidden; }
+.item.diff summary { display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; }
+.item.diff .diff-name { flex: 1; min-width: 0; color: var(--text); }
+.item.diff .diff-stat { flex: none; font-variant-numeric: tabular-nums; }
+.item.diff .diff-body {
+  border-top: 1px solid var(--line);
+  max-height: 480px;
+  overflow: auto;
+  padding: 4px 0;
+}
+.diff-line {
+  font: 12px/1.45 ui-monospace, Consolas, monospace;
+  white-space: pre;
+  width: max-content;
+  min-width: 100%;
+  padding: 0 10px;
+}
+.diff-line.add { background: var(--diff-add); }
+.diff-line.del { background: var(--diff-del); }
+.diff-line.hunk { color: var(--accent); }
+.diff-line.meta { color: var(--muted); }
+
 /* Markdown в сообщениях */
 .item .body.md { white-space: normal; }
 .md > :first-child { margin-top: 0; }
@@ -351,6 +378,7 @@ button .icon { display: none; }
   .item details { padding: 6px 10px; }
   .item summary { padding: 4px 0; }
   .item details .body { max-height: 50dvh; }
+  .item.diff .diff-body { max-height: 50dvh; }
   .md table { font-size: .88em; }
   .md th, .md td { padding: 4px 8px; }
   .md pre { padding: 8px 10px; }

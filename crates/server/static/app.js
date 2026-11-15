@@ -329,6 +329,52 @@ function firstLine(text) {
   return line.length > 140 ? `${line.slice(0, 140)}…` : line;
 }
 
+// Строки диффа: заголовки файлов и хунков — отдельными классами, изменения —
+// зелёным и красным. Классы задаются по первому символу строки.
+function diffLineClass(line) {
+  if (line.startsWith('+++') || line.startsWith('---') || line.startsWith('Index:') || line.startsWith('===')) {
+    return 'meta';
+  }
+  if (line.startsWith('@@')) return 'hunk';
+  if (line.startsWith('+')) return 'add';
+  if (line.startsWith('-')) return 'del';
+  return '';
+}
+
+function diffInfo(text) {
+  let file = '';
+  let add = 0;
+  let del = 0;
+  for (const line of text.split('\n')) {
+    if (!file && line.startsWith('+++ ')) file = line.slice(4).replace(/^b\//, '').trim();
+    else if (line.startsWith('+') && !line.startsWith('+++')) add++;
+    else if (line.startsWith('-') && !line.startsWith('---')) del++;
+  }
+  return { file: file || 'файл', add, del };
+}
+
+// Правка файла: раскрыта сразу, чтобы изменения были видны без клика.
+function diffDetails(text) {
+  const details = el('details', 'diff');
+  details.open = true;
+  const info = diffInfo(text);
+  const summary = el('summary');
+  summary.append(
+    el('span', 'diff-name', `Изменения: ${info.file}`),
+    el('span', 'diff-stat', `+${info.add} −${info.del}`),
+  );
+  if (info.file !== 'файл') summary.title = info.file;
+  const body = el('div', 'diff-body');
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  for (const line of lines) {
+    const cls = diffLineClass(line);
+    body.append(el('div', cls ? `diff-line ${cls}` : 'diff-line', line));
+  }
+  details.append(summary, body);
+  return details;
+}
+
 function buildItem(item) {
   const node = el('div', `item ${item.role} ${item.kind}`);
   if (item.kind === 'text') {
@@ -337,6 +383,8 @@ function buildItem(item) {
     node.append(body);
   } else if (item.kind === 'error') {
     node.append(el('div', 'body', item.text));
+  } else if (item.kind === 'diff') {
+    node.append(diffDetails(item.text));
   } else {
     const details = el('details');
     const label =

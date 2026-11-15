@@ -126,6 +126,95 @@ pub fn tool_input(input: &Value) -> String {
     truncate(&serde_json::to_string_pretty(input).unwrap_or_default(), 4000)
 }
 
+/// Предел размера диффа в ленте: большие правки не должны раздувать сообщение.
+pub const DIFF_LIMIT: usize = 40_000;
+
+/// Инструменты, которые меняют файлы: их содержимое показывается диффом.
+pub fn is_edit_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "edit" | "multiedit" | "write" | "notebookedit" | "patch" | "apply_patch"
+    )
+}
+
+pub fn tool_path(input: &Value) -> Option<&str> {
+    input.get("file_path").or_else(|| input.get("path")).and_then(Value::as_str)
+}
+
+/// Текст вызова инструмента: для правок файлов достаточно пути, содержимое
+/// приходит отдельным элементом ленты с диффом.
+pub fn tool_text(name: Option<&str>, input: &Value) -> String {
+    match name.filter(|n| is_edit_tool(n)).and_then(|_| tool_path(input)) {
+        Some(path) => truncate(path, 4000),
+        None => tool_input(input),
+    }
+}
+
+/// Дифф старого и нового фрагмента без готового патча. Общие строки в начале
+/// и конце показываются контекстом, между ними — удалённое и добавленное.
+pub fn edit_diff(path: &str, old: &str, new: &str) -> String {
+    let old = lines(old);
+    let new = lines(new);
+    let mut prefix = 0;
+    while prefix < old.len() && prefix < new.len() && old[prefix] == new[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < old.len().saturating_sub(prefix)
+        && suffix < new.len().saturating_sub(prefix)
+        && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+
+    let path = slash_path(path);
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n@@ -1,{} +1,{} @@\n", old.len(), new.len());
+    for line in &old[..prefix] {
+        push_line(&mut out, ' ', line);
+    }
+    for line in &old[prefix..old.len() - suffix] {
+        push_line(&mut out, '-', line);
+    }
+    for line in &new[prefix..new.len() - suffix] {
+        push_line(&mut out, '+', line);
+    }
+    for line in &old[old.len() - suffix..] {
+        push_line(&mut out, ' ', line);
+    }
+    out
+}
+
+/// Дифф нового файла: все строки добавленные.
+pub fn create_diff(path: &str, content: &str) -> String {
+    let lines = lines(content);
+    let mut out = format!("--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n", slash_path(path), lines.len());
+    for line in &lines {
+        push_line(&mut out, '+', line);
+    }
+    out
+}
+
+fn lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    lines
+}
+
+fn slash_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn push_line(out: &mut String, sign: char, line: &str) {
+    out.push(sign);
+    out.push_str(line);
+    out.push('\n');
+}
+
 /// `2026-11-05T10:06:22.084Z` -> миллисекунды с эпохи Unix. 0 при ошибке разбора.
 pub fn parse_iso_ms(s: &str) -> i64 {
     let b = s.as_bytes();
@@ -173,5 +262,35 @@ mod tests {
         assert_eq!(basename("/home/u/proj/"), "proj");
         assert_eq!(truncate("привет", 3).chars().take(3).collect::<String>(), "при");
         assert_eq!(truncate("abc", 3), "abc");
+    }
+
+    #[test]
+    fn diffs() {
+        assert_eq!(
+            edit_diff("D:\\p\\a.rs", "one\ntwo\nthree", "one\n2\nthree"),
+            "--- a/D:/p/a.rs\n+++ b/D:/p/a.rs\n@@ -1,3 +1,3 @@\n one\n-two\n+2\n three\n"
+        );
+        assert_eq!(
+            create_diff("n.txt", "x\ny\n"),
+            "--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+x\n+y\n"
+        );
+        // Вставка и удаление без общих строк.
+        assert_eq!(
+            edit_diff("a", "", "new"),
+            "--- a/a\n+++ b/a\n@@ -1,0 +1,1 @@\n+new\n"
+        );
+    }
+
+    #[test]
+    fn edit_tools() {
+        assert!(is_edit_tool("Edit"));
+        assert!(is_edit_tool("write"));
+        assert!(!is_edit_tool("Read"));
+        let input = serde_json::json!({"file_path":"D:\\p\\a.rs","old_string":"a","new_string":"b"});
+        assert_eq!(tool_text(Some("Edit"), &input), "D:\\p\\a.rs");
+        assert_eq!(
+            tool_text(Some("Read"), &serde_json::json!({"file_path":"D:\\p\\a.rs"})),
+            "D:\\p\\a.rs"
+        );
     }
 }
