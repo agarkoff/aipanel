@@ -1520,7 +1520,10 @@ function onLaunchResult(msg) {
     cwd: req.cwd,
     key: msg.session || null,
     keys: req.keys,
-    until: Date.now() + 90000,
+    // У opencode идентификатор известен сразу, у Claude Code — только после того,
+    // как тот запишет реестр (обычно 2-3 секунды). Долгое ожидание в неизвестном
+    // каталоге бесполезно: окно могло остаться на вопросе про доверие.
+    until: Date.now() + (msg.session ? 90000 : 20000),
   };
   setHint(req.tool === 'claude' ? 'Открываем окно Claude Code…' : 'Открываем окно opencode…');
   checkPendingLaunch();
@@ -1550,7 +1553,10 @@ function checkPendingLaunch() {
   }
   if (Date.now() > pendingLaunch.until) {
     pendingLaunch = null;
-    setHint('Новая сессия не появилась в списке. Откройте её вручную в терминале.', true);
+    setHint(
+      'Сессия не появилась в списке. Проверьте окно на компьютере: возможно, оно ждёт ответа на первый вопрос.',
+      true,
+    );
   }
 }
 
@@ -1590,7 +1596,7 @@ function onHandoffResult(msg) {
     cwd: req.cwd,
     key: msg.session || null,
     keys: req.keys,
-    until: Date.now() + 90000,
+    until: Date.now() + (msg.session ? 90000 : 20000),
   };
   setHint(req.tool === 'claude' ? 'Открываем окно Claude Code…' : 'Открываем окно opencode…');
   checkPendingLaunch();

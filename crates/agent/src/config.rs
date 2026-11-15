@@ -32,6 +32,10 @@ pub struct ClaudeCfg {
     pub max_recent: usize,
     /// Дополнительные аргументы при запуске закрытой сессии (`claude --resume <id> ...`).
     pub resume_args: Vec<String>,
+    /// Отмечать каталог доверенным в `~/.claude.json` перед открытием нового окна.
+    /// Иначе Claude Code спрашивает «Is this a project you created or one you trust?»
+    /// и до ответа не заводит сессию — из панели, особенно с телефона, ответить нечем.
+    pub trust_dirs: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -75,6 +79,7 @@ impl Default for ClaudeCfg {
             recent_days: 7,
             max_recent: 30,
             resume_args: Vec::new(),
+            trust_dirs: false,
         }
     }
 }

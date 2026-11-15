@@ -60,6 +60,19 @@ pub fn scrub_env() {
     }
 }
 
+/// Ключ каталога в настройках Claude Code: путь через прямые слэши и без слэша
+/// в конце — так его пишет сам Claude Code.
+fn project_key(path: &str) -> String {
+    let slashed = path.replace('\\', "/");
+    let trimmed = slashed.trim_end_matches('/');
+    // Корень диска Claude записывает со слэшем: «D:/».
+    if trimmed.len() == 2 && trimmed.ends_with(':') {
+        format!("{trimmed}/")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
 #[derive(Clone)]
 struct Known {
     pid: Option<u32>,
@@ -380,9 +393,51 @@ impl Claude {
         self.start_with_prompt(cwd, None)
     }
 
+    /// Файл настроек Claude Code (`~/.claude.json`) лежит рядом с каталогом данных.
+    fn config_path(&self) -> PathBuf {
+        self.home.with_file_name(".claude.json")
+    }
+
+    /// Отмечает каталог доверенным. Панель открывает интерактивное окно, а Claude Code
+    /// в незнакомом каталоге сначала спрашивает, доверять ли ему, и до ответа сессию
+    /// не заводит: из панели такая сессия не видна, окно же стоит на вопросе.
+    fn trust_dir(&self, cwd: &str) -> Result<(), String> {
+        let path = self.config_path();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            // Файла нет — Claude Code заведёт его сам; каталог без записи он не спрашивает.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        let mut cfg: Value = serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let Some(projects) = cfg.get_mut("projects").and_then(Value::as_object_mut) else {
+            return Ok(());
+        };
+        let key = project_key(cwd);
+        // Запись могла быть сделана другим регистром или разделителями — правим её же.
+        let found = projects.keys().find(|k| project_key(k).to_lowercase() == key.to_lowercase()).cloned();
+        let entry = projects.entry(found.unwrap_or(key)).or_insert_with(|| Value::Object(Default::default()));
+        let Some(entry) = entry.as_object_mut() else {
+            return Ok(());
+        };
+        if entry.get("hasTrustDialogAccepted").and_then(Value::as_bool) == Some(true) {
+            return Ok(());
+        }
+        entry.insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+        let out = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+        // Через временный файл: у Claude Code открыто несколько окон, и он перезаписывает
+        // эти настройки сам — обрывок файла сломал бы ему запуск.
+        let tmp = path.with_extension("aipanel-tmp");
+        fs::write(&tmp, out).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
     /// Открывает новую сессию; `prompt` уходит её первым сообщением.
     pub fn start_with_prompt(&self, cwd: &str, prompt: Option<&str>) -> Result<Option<String>, String> {
-        crate::util::session_dir(cwd)?;
+        let dir = crate::util::session_dir(cwd)?;
+        if self.cfg.trust_dirs {
+            self.trust_dir(&dir.to_string_lossy())?;
+        }
         let mut args = Vec::new();
         if let Some(text) = prompt {
             if text.encode_utf16().count() > MAX_ARG_UTF16 {
@@ -886,6 +941,59 @@ mod tests {
         assert!(!closed[0].live);
         assert_eq!(closed[0].updated_at, 1_794_714_499_364);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Ключ каталога совпадает с тем, что пишет Claude Code: прямые слэши, без слэша
+    /// в конце (у корня диска слэш остаётся).
+    #[test]
+    fn trust_key_uses_slashes() {
+        assert_eq!(project_key(r"D:\Projects\demo"), "D:/Projects/demo");
+        assert_eq!(project_key("D:/Projects/demo/"), "D:/Projects/demo");
+        assert_eq!(project_key("D:\\"), "D:/");
+    }
+
+    /// Каталог отмечается доверенным: без этого окно встаёт на вопросе про доверие
+    /// и сессии в панели нет.
+    #[test]
+    fn marks_project_trusted() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-trust-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let settings = dir.join(".claude.json");
+        // Запись уже есть, но другим регистром и без отметки доверия.
+        fs::write(
+            &settings,
+            r#"{"numStartups":730,"projects":{"D:/projects/demo":{"allowedTools":[]},
+               "D:/Projects/Other":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+
+        let cfg = ClaudeCfg { home: Some(dir.join(".claude")), ..ClaudeCfg::default() };
+        let claude = Claude::new(cfg, Arc::new(Notify::new()));
+        claude.trust_dir(r"D:\Projects\demo").unwrap();
+
+        let saved: Value = serde_json::from_str(&fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(saved["numStartups"], 730);
+        // Вторая запись не появилась: правилась существующая, несмотря на регистр.
+        assert_eq!(saved["projects"].as_object().unwrap().len(), 2);
+        assert_eq!(saved["projects"]["D:/projects/demo"]["hasTrustDialogAccepted"], true);
+        assert_eq!(saved["projects"]["D:/projects/demo"]["allowedTools"], serde_json::json!([]));
+        assert!(!dir.join(".claude.aipanel-tmp").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Без файла настроек доверие не трогаем: Claude Code заводит его сам.
+    #[test]
+    fn skips_trust_without_settings_file() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-nosettings-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(".claude")).unwrap();
+        let cfg = ClaudeCfg { home: Some(dir.join(".claude")), ..ClaudeCfg::default() };
+        let claude = Claude::new(cfg, Arc::new(Notify::new()));
+        assert!(claude.trust_dir(r"D:\Projects\demo").is_ok());
+        assert!(!dir.join(".claude.json").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

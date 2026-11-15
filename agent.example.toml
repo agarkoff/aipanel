@@ -27,6 +27,13 @@ max_recent = 30
 #resume_args = ["--permission-mode", "acceptEdits"]
 resume_args = []
 
+# Отмечать каталог доверенным в ~/.claude.json перед открытием нового окна. Claude Code
+# в незнакомом каталоге сначала спрашивает «Is this a project you created or one you
+# trust?» и до ответа не заводит сессию: окно стоит на вопросе, а сессии в панели нет.
+# Из панели, особенно с телефона, ответить нечем — поэтому флаг включает отметку.
+#trust_dirs = true
+trust_dirs = false
+
 [opencode]
 enabled = true
 # Программа для открытия окна неактивной сессии. Если её нет в PATH, ищется ~/.opencode/bin.
