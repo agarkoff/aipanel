@@ -745,6 +745,14 @@ fn push_diff(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item>) {
 }
 
 fn parse_line(line: &str, out: &mut Vec<Item>) {
+    // Сообщение, отправленное в открытую сессию, пока модель работает: Claude Code
+    // не пишет для него отдельную строку `type: user`, а вкладывает в текущий ход
+    // вложением `queued_command`. Без разбора этой строки такие сообщения в ленту
+    // не попадают вовсе.
+    if line.contains("\"type\":\"queued_command\"") {
+        parse_queued(line, out);
+        return;
+    }
     // Быстрый отсев: в транскрипте много служебных строк, в том числе очень длинных.
     if !(line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")) {
         return;
@@ -811,9 +819,77 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
     }
 }
 
+/// Сообщение из очереди, вставленное Claude Code в текущий ход. Отдельной строки
+/// `type: user` у него в транскрипте нет — только вложение `queued_command`
+/// с текстом в `prompt`. Показываем его как своё сообщение в ленте.
+fn parse_queued(line: &str, out: &mut Vec<Item>) {
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    if v["type"].as_str() != Some("attachment") {
+        return;
+    }
+    let a = &v["attachment"];
+    // Уведомления фоновых задач приходят так же, но это не сообщение человека.
+    if a["type"].as_str() != Some("queued_command") || a["origin"]["kind"].as_str() != Some("human") {
+        return;
+    }
+    if v["isSidechain"].as_bool() == Some(true) || v["isMeta"].as_bool() == Some(true) {
+        return;
+    }
+    let text = a["prompt"].as_str().unwrap_or_default();
+    if text.trim().is_empty() {
+        return;
+    }
+    let id = v["uuid"].as_str().or_else(|| a["source_uuid"].as_str()).unwrap_or_default();
+    let ts = a["timestamp"]
+        .as_str()
+        .or_else(|| v["timestamp"].as_str())
+        .map(parse_iso_ms)
+        .unwrap_or(0);
+    out.push(Item {
+        id: format!("{id}:queued"),
+        ts,
+        role: "user".into(),
+        kind: "text".into(),
+        text: truncate(text, TEXT_LIMIT),
+        tool: None,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_queued_command_as_user_message() {
+        let mut items = Vec::new();
+        parse_line(
+            r#"{"parentUuid":"p","isSidechain":false,"attachment":{"type":"queued_command","prompt":"статус?","source_uuid":"src","commandMode":"prompt","origin":{"kind":"human"},"timestamp":"2026-11-15T10:47:21.483Z","humanTurn":true},"type":"attachment","uuid":"a1","timestamp":"2026-11-15T10:47:21.483Z"}"#,
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.role.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(got, [("a1:queued", "user", "text", "статус?")]);
+        assert!(items[0].ts > 0);
+    }
+
+    #[test]
+    fn skips_service_queued_commands() {
+        let mut items = Vec::new();
+        // Уведомление фоновой задачи — не сообщение пользователя.
+        parse_line(
+            r#"{"type":"attachment","uuid":"a2","attachment":{"type":"queued_command","prompt":"<task-notification>","origin":{"kind":"task-notification"},"timestamp":"2026-11-15T10:47:21.483Z"}}"#,
+            &mut items,
+        );
+        // Пустой текст и служебная ветка тоже не попадают в ленту.
+        parse_line(
+            r#"{"type":"attachment","uuid":"a3","attachment":{"type":"queued_command","prompt":"  ","origin":{"kind":"human"}}}"#,
+            &mut items,
+        );
+        parse_line(
+            r#"{"type":"attachment","uuid":"a4","isSidechain":true,"attachment":{"type":"queued_command","prompt":"ветка","origin":{"kind":"human"}}}"#,
+            &mut items,
+        );
+        assert!(items.is_empty());
+    }
 
     #[test]
     fn reads_line_model() {
