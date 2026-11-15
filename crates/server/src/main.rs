@@ -3,7 +3,7 @@
 //! в памяти только списки сессий и активные подключения.
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -20,8 +20,10 @@ use axum::{
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
+use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use serde_json::json;
+use sha2::Sha256;
 use tokio::sync::{mpsc, oneshot};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
@@ -39,7 +41,10 @@ const ICON_512: &[u8] = include_bytes!("../static/icon-512.png");
 const ICON_MASKABLE_512: &[u8] = include_bytes!("../static/icon-maskable-512.png");
 
 const COOKIE: &str = "aipanel_session";
-const MAX_TOKENS: usize = 64;
+/// Сколько живёт вход в браузере. Столько же стоит Max-Age cookie.
+const SESSION_LIFETIME: u64 = 30 * 24 * 60 * 60;
+/// Допустимый разбег часов при проверке времени выдачи входа.
+const SESSION_SKEW: u64 = 300;
 const MAX_SESSIONS_PER_AGENT: usize = 500;
 const MAX_TEXT: usize = 200_000;
 const MAX_PROMPTS: usize = 50;
@@ -95,8 +100,6 @@ struct Inner {
     browsers: HashMap<u64, BrowserEntry>,
     /// id команды на сервере -> ожидающая её команда браузера.
     pending: HashMap<String, Pending>,
-    /// Выданные cookie-токены: (токен, пользователь).
-    tokens: VecDeque<(String, String)>,
     next_id: u64,
     fail_window: Option<Instant>,
     fail_count: u32,
@@ -197,15 +200,27 @@ impl App {
 
     /// Пользователь по cookie браузера.
     fn authed(&self, headers: &HeaderMap) -> Option<String> {
-        let tok = cookie(headers, COOKIE)?;
-        let inner = self.lock();
-        let mut found = None;
-        for (token, user) in &inner.tokens {
-            if ct_eq(token.as_bytes(), tok.as_bytes()) {
-                found = Some(user.clone());
-            }
+        self.user_for_session(cookie(headers, COOKIE)?)
+    }
+
+    /// Пользователь по значению cookie. Подпись каждый раз проверяется по
+    /// текущему `PANEL_USERS`, поэтому вход не зависит от памяти процесса:
+    /// перезапуск и передеплой его не сбрасывают, а изменяемый диск не нужен.
+    fn user_for_session(&self, value: &str) -> Option<String> {
+        let mut parts = value.split('.');
+        let name_hex = parts.next()?;
+        let issued = parts.next()?.parse::<u64>().ok()?;
+        parts.next()?;
+        if parts.next().is_some() {
+            return None;
         }
-        found
+        let now = unix_now();
+        if issued > now.saturating_add(SESSION_SKEW) || now.saturating_sub(issued) > SESSION_LIFETIME {
+            return None;
+        }
+        let name = String::from_utf8(hex_decode(name_hex)?).ok()?;
+        let expected = session_cookie(self.users.get(&name)?, &name, issued);
+        ct_eq(expected.as_bytes(), value.as_bytes()).then_some(name)
     }
 
     /// Пользователь по токену агента.
@@ -255,10 +270,57 @@ fn origin_ok(headers: &HeaderMap) -> bool {
         .any(|h| h.eq_ignore_ascii_case(origin_host))
 }
 
-fn random_token() -> String {
-    let mut buf = [0u8; 32];
-    getrandom::fill(&mut buf).expect("system random source");
-    buf.iter().map(|b| format!("{b:02x}")).collect()
+/// Ключ подписи входа: пароль и токен агента этого пользователя. По ним сервер
+/// и узнаёт вход после перезапуска, поэтому менять их на ходу нельзя — смена
+/// любого из двух завершает прежние входы пользователя.
+fn session_key(user: &User) -> Vec<u8> {
+    let mut key = Vec::with_capacity(user.password.len() + user.token.len() + 24);
+    key.extend_from_slice(b"aipanel-session-v1\0");
+    key.extend_from_slice(user.password.as_bytes());
+    key.push(0);
+    key.extend_from_slice(user.token.as_bytes());
+    key
+}
+
+/// Значение cookie входа: `<hex(имя)>.<время выдачи>.<подпись>`. Ничего не
+/// хранится на сервере, поэтому cookie остаётся действительной после
+/// перезапуска и передеплоя. Срок жизни проверяется по времени выдачи.
+fn session_cookie(user: &User, name: &str, issued: u64) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(&session_key(user)).expect("HMAC accepts keys of any size");
+    mac.update(name.as_bytes());
+    mac.update(b"\0");
+    mac.update(issued.to_string().as_bytes());
+    format!(
+        "{}.{issued}.{}",
+        hex_encode(name.as_bytes()),
+        hex_encode(&mac.finalize().into_bytes())
+    )
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 fn asset(content_type: &'static str, body: &'static str) -> Response {
@@ -314,17 +376,10 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json
         tokio::time::sleep(Duration::from_millis(700)).await;
         return (StatusCode::UNAUTHORIZED, "неверный пароль").into_response();
     };
-    let token = random_token();
-    {
-        let mut inner = app.lock();
-        inner.tokens.push_back((token.clone(), user));
-        while inner.tokens.len() > MAX_TOKENS {
-            inner.tokens.pop_front();
-        }
-    }
+    let token = session_cookie(&app.users[&user], &user, unix_now());
     let secure = header_str(&headers, "x-forwarded-proto").is_some_and(|p| p.eq_ignore_ascii_case("https"));
     let cookie = format!(
-        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000{}",
+        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_LIFETIME}{}",
         if secure { "; Secure" } else { "" }
     );
     let mut resp = StatusCode::NO_CONTENT.into_response();
@@ -334,10 +389,7 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json
     resp
 }
 
-async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
-    if let Some(tok) = cookie(&headers, COOKIE) {
-        app.lock().tokens.retain(|(t, _)| t != tok);
-    }
+async fn logout() -> Response {
     (
         StatusCode::NO_CONTENT,
         [(header::SET_COOKIE, format!("{COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"))],
@@ -1206,6 +1258,72 @@ mod tests {
             "bob": {"password": "bob-pass", "token": "same-token"}
         }"#;
         assert!(parse_users(same_token).is_err());
+    }
+
+    #[test]
+    fn hex_roundtrip() {
+        for s in ["alice", "имя", "a.b-c_d"] {
+            assert_eq!(hex_decode(&hex_encode(s.as_bytes())).unwrap(), s.as_bytes());
+        }
+        assert_eq!(hex_decode("abc"), None);
+        assert_eq!(hex_decode("zz"), None);
+    }
+
+    const SESSION_USERS: &str = r#"{
+        "alice": {"password": "alice-pass", "token": "alice-token"},
+        "bob": {"password": "bob-pass", "token": "bob-token"}
+    }"#;
+
+    fn app_with(raw: &str) -> App {
+        App { inner: Mutex::new(Inner::default()), users: parse_users(raw).unwrap() }
+    }
+
+    #[test]
+    fn session_survives_restart() {
+        let cookie = {
+            let app = app_with(SESSION_USERS);
+            session_cookie(&app.users["alice"], "alice", unix_now())
+        };
+        // Новый экземпляр приложения — это и есть перезапуск после передеплоя.
+        let restarted = app_with(SESSION_USERS);
+        assert_eq!(restarted.user_for_session(&cookie).as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn session_rejects_forgery_and_expiry() {
+        let app = app_with(SESSION_USERS);
+        let now = unix_now();
+        let good = session_cookie(&app.users["alice"], "alice", now);
+        assert_eq!(app.user_for_session(&good).as_deref(), Some("alice"));
+
+        // Имя подменили, подпись осталась от alice.
+        let forged = good.replacen(&hex_encode(b"alice"), &hex_encode(b"bob"), 1);
+        assert_eq!(app.user_for_session(&forged), None, "принята подпись от другого имени");
+        assert_eq!(app.user_for_session(&format!("{good}0")), None, "принята подправленная подпись");
+        assert_eq!(app.user_for_session("мусор"), None);
+        assert_eq!(
+            app.user_for_session(&session_cookie(&app.users["alice"], "ghost", now)),
+            None,
+            "принят вход неизвестного пользователя"
+        );
+
+        let old = session_cookie(&app.users["alice"], "alice", now - SESSION_LIFETIME - 1);
+        assert_eq!(app.user_for_session(&old), None, "принят просроченный вход");
+        let future = session_cookie(&app.users["alice"], "alice", now + SESSION_SKEW + 60);
+        assert_eq!(app.user_for_session(&future), None, "принят вход из будущего");
+    }
+
+    #[test]
+    fn session_dies_with_rotated_credentials() {
+        let now = unix_now();
+        let cookie = {
+            let app = app_with(SESSION_USERS);
+            session_cookie(&app.users["alice"], "alice", now)
+        };
+        let changed = SESSION_USERS.replace("alice-pass", "alice-pass-2");
+        assert_eq!(app_with(&changed).user_for_session(&cookie), None, "вход пережил смену пароля");
+        let changed = SESSION_USERS.replace("alice-token", "alice-token-2");
+        assert_eq!(app_with(&changed).user_for_session(&cookie), None, "вход пережил смену токена");
     }
 
     fn entry() -> AgentEntry {
