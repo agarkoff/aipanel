@@ -676,6 +676,8 @@ try {
 
   // ------------------------------------------------------------ новая сессия
   // В окне запуска модель выбирается списком для выбранного инструмента.
+  // Недавние модели окно запуска показывает первыми: их запоминает браузер.
+  await evaluate(`localStorage.setItem('aipanel.model-recents:opencode', JSON.stringify(['openai/gpt-6']))`);
 
   await evaluate(`document.getElementById('new-session').click()`);
   await waitFor(`document.getElementById('launch').open`);
@@ -686,6 +688,18 @@ try {
   })`);
   check('окно запуска открылось с инструментом сессии', launchInit.tool === 'opencode', launchInit);
   check('модель по умолчанию пустая', launchInit.model === '', launchInit);
+
+  // Клик по пустому полю открывает весь список — набирать имя не обязательно.
+  await evaluate(`document.getElementById('launch-model').click()`);
+  const launchAll = await waitFor(`(() => {
+    const l = document.querySelector('#launch-model ~ .sg-list');
+    return l && !l.hidden && l.querySelectorAll('.sg-item').length === 4;
+  })()`);
+  const launchOrder = await evaluate(
+    `[...document.querySelectorAll('#launch-model ~ .sg-list .sg-item b')].map((n) => n.textContent)`,
+  );
+  check('список моделей открывается без набора', launchAll, launchOrder);
+  check('недавняя модель выше остальных', launchOrder[1] === 'GPT 6', launchOrder);
 
   // Список моделей opencode приходит от агента и открывается при вводе.
   await evaluate(`(() => {
@@ -714,6 +728,25 @@ try {
   const modelValue = await evaluate(`document.getElementById('launch-model').value`);
   check('выбор из списка подставляет провайдер/модель', modelValue === 'opencode-go/deepseek-v4.1-flash', modelValue);
 
+  // Своя строка не принимается: запуск уходит только со значением из списка.
+  await evaluate(`(() => {
+    const m = document.getElementById('launch-model');
+    m.value = 'my-own-model';
+    m.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await evaluate(`document.getElementById('launch-form').requestSubmit()`);
+  await sleep(100);
+  const rejected = await evaluate(`({
+    starts: window.__starts.length,
+    hint: document.getElementById('launch-hint').textContent,
+  })`);
+  check('произвольную модель запуск не принимает', rejected.starts === 0 && rejected.hint.includes('нет в списке'), rejected);
+
+  await evaluate(`(() => {
+    const m = document.getElementById('launch-model');
+    m.value = 'opencode-go/deepseek-v4.1-flash';
+    m.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
   await evaluate(`document.getElementById('launch-form').requestSubmit()`);
   await waitFor(`window.__starts.length === 1`);
   const start = await evaluate(`window.__starts[0]`);

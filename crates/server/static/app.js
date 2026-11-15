@@ -1972,21 +1972,65 @@ const cwdSuggest = Suggest.attach($('launch-cwd'), {
 });
 
 // Модель для новой сессии: у opencode — его список (провайдер/модель), у
-// Claude Code — алиасы, которые принимает `--model`. Поле можно заполнить и
-// вручную: список только подсказывает.
+// Claude Code — алиасы, которые принимает `--model`. Значение можно выбрать
+// только из списка: подсказки открываются по клику, ищут по подстроке, а
+// недавние модели показываются первыми. Пустое поле — модель по умолчанию.
 const launchModelSuggest = Suggest.attach($('launch-model'), {
   items: launchModelItems,
-  openOnFocus: false,
+  // Клик по пустому полю тоже открывает весь список — иначе модель пришлось бы
+  // набирать руками, пока не появится первое совпадение.
+  minChars: 0,
   openAllWhenExact: true,
+  // Моделей у opencode много: список прокручивается, а не обрезается.
+  limit: 0,
+  // «По умолчанию» — всегда сверху, дальше недавние, затем остальные.
+  rank: (item) => (!item.value ? -1 : item.recent ? 0 : 1),
+  emptyText: (q) =>
+    q
+      ? 'Ничего не найдено.'
+      : launchModelsRequest
+        ? 'Загружаем модели…'
+        : 'Список моделей не пришёл: можно запустить без модели.',
+  emptyOnQueryless: true,
 });
+
+// Недавние модели: свежие сверху, отдельно для каждого инструмента. Хранятся в
+// браузере, потому что список opencode зависит от машины и провайдеров, а у
+// Claude Code это алиасы CLI — оба набора нужны при следующем запуске.
+const MODEL_RECENTS = 5;
+const modelRecentsKey = (tool) => `aipanel.model-recents:${tool}`;
+
+function modelRecents(tool) {
+  try {
+    const list = JSON.parse(localStorage.getItem(modelRecentsKey(tool)) || '[]');
+    return Array.isArray(list) ? list.filter((v) => typeof v === 'string' && v) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberModel(tool, value) {
+  value = String(value || '').trim();
+  if (!value) return;
+  const list = [value, ...modelRecents(tool).filter((v) => v !== value)].slice(0, MODEL_RECENTS);
+  try {
+    localStorage.setItem(modelRecentsKey(tool), JSON.stringify(list));
+  } catch {}
+}
 
 function launchModelKey() {
   return `${$('launch-agent').value}\n${$('launch-tool').value}`;
 }
 
+// Значение поля модели: у Claude Code — алиас CLI, у opencode — «провайдер/модель».
+function launchModelValue(tool, m) {
+  return tool === 'claude' ? m.id : `${m.provider}/${m.id}`;
+}
+
 function launchModelItems() {
   const tool = $('launch-tool').value;
   const list = launchModelCache.get(launchModelKey()) || [];
+  const recents = modelRecents(tool);
   const items = [
     {
       value: '',
@@ -1995,14 +2039,38 @@ function launchModelItems() {
     },
   ];
   for (const m of list) {
-    items.push(
-      tool === 'claude'
-        ? { value: m.id, label: m.name, hint: `claude --model ${m.id}` }
-        : { value: `${m.provider}/${m.id}`, label: m.name, hint: `${m.provider}/${m.id}` },
-    );
+    const value = launchModelValue(tool, m);
+    items.push({
+      value,
+      label: m.name || m.id,
+      hint: tool === 'claude' ? `claude --model ${m.id}` : value,
+      recent: recents.includes(value),
+    });
   }
   return items;
 }
+
+// Есть ли значение в списке агента: null — ни в списке, ни в прошлом выборе.
+function launchModelKnown(value) {
+  const tool = $('launch-tool').value;
+  const v = value.trim().toLowerCase();
+  if (!v) return true;
+  const list = launchModelCache.get(launchModelKey());
+  if (!list) {
+    // Список ещё в пути: прошлый выбор пришёл из списка, а свежий набор — нет.
+    return v === (launchModelChoice[tool] || '').toLowerCase() ? true : null;
+  }
+  return list.some((m) => launchModelValue(tool, m).toLowerCase() === v);
+}
+
+// Готовая модель в поле: клик или Tab выделяет значение целиком, чтобы набор
+// сразу заменял его, а не дописывался в конец — иначе фильтр не нашёл бы ничего.
+function selectLaunchModel() {
+  const value = $('launch-model').value.trim();
+  if (value && launchModelKnown(value) === true) $('launch-model').select();
+}
+$('launch-model').addEventListener('focus', selectLaunchModel);
+$('launch-model').addEventListener('click', selectLaunchModel);
 
 function requestLaunchModels() {
   const agent = $('launch-agent').value;
@@ -2021,7 +2089,7 @@ function syncLaunchModel() {
   const tool = $('launch-tool').value;
   $('launch-model').value = launchModelChoice[tool] || '';
   $('launch-model').placeholder =
-    tool === 'claude' ? 'По умолчанию (например, sonnet)' : 'Как в окне (провайдер/модель)';
+    tool === 'claude' ? 'По умолчанию — или выберите из списка' : 'Как в окне — или выберите из списка';
   launchModelSuggest.close();
   requestLaunchModels();
 }
@@ -2102,6 +2170,23 @@ $('launch-form').addEventListener('submit', (e) => {
     $('launch-cwd').focus();
     return;
   }
+  // Модель — только из списка агента. Пустое поле допустимо: это умолчание окна.
+  if (model) {
+    const known = launchModelKnown(model);
+    if (known !== true) {
+      launchHint(
+        known === null
+          ? 'Список моделей ещё не пришёл. Подождите немного или оставьте поле пустым.'
+          : 'Такой модели нет в списке. Выберите пункт из подсказок.',
+        true,
+      );
+      if (known === null) requestLaunchModels();
+      launchModelSuggest.open();
+      $('launch-model').focus();
+      $('launch-model').select();
+      return;
+    }
+  }
   const a = agents.find((x) => x.name === agent);
   const keys = new Set(a ? a.sessions.map((s) => s.key) : []);
   startLaunch({ agent, tool, cwd, model, keys, create: false });
@@ -2140,6 +2225,7 @@ function onLaunchResult(msg) {
     launchHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
     return;
   }
+  rememberModel(req.tool, req.model);
   $('launch').close();
   pendingLaunch = {
     agent: req.agent,
@@ -2474,21 +2560,23 @@ function setSessionModel(m) {
     setModelsHint('Нет соединения с сервером.', true);
     return;
   }
-  modelSet = { id, label };
+  modelSet = { id, label, value: `${m.provider}/${m.id}` };
   setModelsHint(`Переключаем на ${label}…`);
   for (const b of $('models-list').querySelectorAll('.model')) b.disabled = true;
 }
 
 function onModelResult(msg) {
-  const label = modelSet ? modelSet.label : '';
+  const done = modelSet;
   modelSet = null;
   for (const b of $('models-list').querySelectorAll('.model')) b.disabled = false;
   if (!msg.ok) {
     setModelsHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
     return;
   }
+  // Модель только что использовали — она должна быть вверху списка в окне запуска.
+  if (done) rememberModel('opencode', done.value);
   $('models').close();
-  setHint(label ? `Модель: ${label}` : 'Модель переключена.');
+  setHint(done && done.label ? `Модель: ${done.label}` : 'Модель переключена.');
 }
 
 $('models-filter').addEventListener('input', () => {

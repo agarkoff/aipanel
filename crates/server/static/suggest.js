@@ -19,7 +19,8 @@
  *     limit: 12,                          // сколько пунктов показывать (0 — все)
  *     openOnFocus: true,                  // открывать при получении фокуса
  *     openAllWhenExact: false,            // клик по полю с готовым значением — весь список
- *     emptyText: 'Ничего не найдено',     // пункт-заглушка, '' — не показывать
+ *     emptyText: 'Ничего не найдено',     // пункт-заглушка, '' — не показывать;
+ *                                         // можно функцией от запроса (q)
  *     emptyOnQueryless: false,            // заглушка и при пустом запросе («/» — все пункты)
  *     token: (input) => ({ query, start, end }), // режим части поля: подсказки по слову под
  *                                         // курсором, выбор заменяет только его (null — нет слова)
@@ -216,7 +217,7 @@
       list.replaceChildren();
 
       if (!rows.length) {
-        const emptyText = typeof opts.emptyText === 'function' ? opts.emptyText() : opts.emptyText;
+        const emptyText = typeof opts.emptyText === 'function' ? opts.emptyText(q) : opts.emptyText;
         if (!emptyText || (!q && !opts.emptyOnQueryless)) {
           close();
           return;
