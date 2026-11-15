@@ -173,6 +173,7 @@ input, textarea, select {
   background: var(--accent);
 }
 .swipe-action.delete { background: var(--wait); }
+.session-close,
 .session-delete {
   display: none;
   position: absolute;
@@ -194,12 +195,20 @@ input, textarea, select {
   opacity: 0;
   pointer-events: none;
 }
+/* Ближе к тексту — закрытие консоли, у края — удаление. */
+.session-close { right: 40px; color: var(--accent); }
 @media (hover: hover) and (pointer: fine) {
+  .session-close,
   .session-delete { display: flex; }
+  .session-row:hover .session-close,
   .session-row:hover .session-delete,
+  .session-close:focus-visible,
   .session-delete:focus-visible { opacity: 1; pointer-events: auto; }
+  /* Две кнопки справа не должны наезжать на время и название. */
+  .session { padding-right: 68px; }
 }
 .session-delete:hover { background: var(--wait); color: #fff; }
+.session-close:hover { background: var(--accent); color: #fff; }
 .session .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session .when { color: var(--muted); font-size: 12px; }
 .session .meta {

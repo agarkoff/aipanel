@@ -8,6 +8,26 @@ const el = (tag, cls, text) => {
   return node;
 };
 
+// Иконка из путей SVG: текстовый символ вроде «⏻» есть не во всех шрифтах.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+const icon = (paths) => {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '15');
+  svg.setAttribute('height', '15');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.5');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  for (const d of paths) {
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    svg.append(path);
+  }
+  return svg;
+};
+
 const STATUS = {
   busy: 'работает',
   idle: 'ждёт ввода',
@@ -285,8 +305,20 @@ function renderSessions() {
       );
       btn.addEventListener('click', () => select(a.name, s.key));
 
-      const action = el('span', 'swipe-action close', 'Закрыть');
+      const action = el('span', 'swipe-action');
       action.setAttribute('aria-hidden', 'true');
+
+      // На компьютере консоль закрывает кнопка рядом с крестиком, на телефоне — свайп.
+      // У закрытой сессии закрывать нечего: кнопки нет, а свайп сразу ведёт к удалению.
+      const stop = el('button', 'session-close');
+      stop.type = 'button';
+      stop.title = 'Закрыть консоль';
+      stop.setAttribute('aria-label', 'Закрыть консоль');
+      stop.append(icon(['M12.6 4.2a6 6 0 1 1-9.2 0', 'M8 1.5v6']));
+      stop.addEventListener('click', (e) => {
+        e.stopPropagation();
+        askClose(a.name, s);
+      });
 
       // На компьютере сессия удаляется крестиком, на телефоне — смахиванием влево.
       const del = el('button', 'session-delete', '×');
@@ -299,7 +331,9 @@ function renderSessions() {
       });
 
       row.append(action, btn, del);
+      if (s.live) row.append(stop);
       attachSwipe(row, btn, action, {
+        closable: s.live,
         onClose: () => askClose(a.name, s),
         onDelete: () => askDelete(a.name, s),
       });
@@ -313,11 +347,13 @@ $('filter').addEventListener('input', renderSessions);
 // Смахивание влево по строке сессии — жест телефона. Строка едет за пальцем
 // и показывает, что будет при отпускании: до порога — синяя «Закрыть»
 // (консоль сессии закрывается сразу, без подтверждения), дальше — красная
-// «Удалить» с окном подтверждения.
+// «Удалить» с окном подтверждения. У закрытой сессии ступень одна: сразу удаление.
 function attachSwipe(row, btn, action, actions) {
   const CLOSE_AT = 88;
   const DELETE_AT = 168;
-  const LIMIT = DELETE_AT + 16;
+  // Закрывать нечего — порог удаления как у единственной ступени.
+  const delAt = actions.closable ? DELETE_AT : CLOSE_AT;
+  const LIMIT = delAt + 16;
   let startX = 0;
   let startY = 0;
   let dx = 0;
@@ -326,7 +362,7 @@ function attachSwipe(row, btn, action, actions) {
   let horizontal = false;
   let swiped = false;
   const showAction = (dist) => {
-    const del = dist >= DELETE_AT;
+    const del = !actions.closable || dist >= DELETE_AT;
     action.textContent = del ? 'Удалить' : 'Закрыть';
     action.className = del ? 'swipe-action delete' : 'swipe-action close';
   };
@@ -377,11 +413,11 @@ function attachSwipe(row, btn, action, actions) {
         swiped = false;
       }, 400);
     }
-    if (horizontal && dist >= DELETE_AT) {
+    if (horizontal && dist >= delAt) {
       // Открываем окно после возможного click: иначе касание, завершившее
       // свайп, попало бы в затемнение и сразу закрыло подтверждение.
       setTimeout(actions.onDelete, 0);
-    } else if (horizontal && dist >= CLOSE_AT) {
+    } else if (horizontal && actions.closable && dist >= CLOSE_AT) {
       actions.onClose();
     }
     horizontal = false;
