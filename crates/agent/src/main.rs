@@ -140,6 +140,27 @@ impl Agent {
                     let _ = me.out.send(AgentMsg::Commands { session, commands });
                 });
             }
+            ServerMsg::Models { session } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let models = match split_key(&session) {
+                        Ok(("opencode", sid)) => me.opencode.models(sid).await,
+                        _ => Vec::new(),
+                    };
+                    let _ = me.out.send(AgentMsg::Models { session, models });
+                });
+            }
+            ServerMsg::SetModel { id, session, provider, model } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result = match split_key(&session) {
+                        Ok(("opencode", sid)) => me.opencode.set_model(sid, &provider, &model).await,
+                        Ok(_) => Err("смена модели есть только у сессий opencode".into()),
+                        Err(e) => Err(e),
+                    };
+                    me.finish(id, result.map(|_| None));
+                });
+            }
             ServerMsg::Interrupt { id, session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {

@@ -10,7 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Command, Item, Limits, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo};
+use aipanel_proto::{
+    AgentMsg, Command, Item, Limits, ModelInfo, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo,
+};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -276,14 +278,10 @@ impl OpenCode {
     /// настроек opencode). Их отдаёт сам opencode — для каталога сессии,
     /// поэтому список у каждого проекта свой.
     pub async fn commands(&self, id: &str) -> Vec<Command> {
-        let info = self.get(&format!("/api/session/{id}")).await.unwrap_or(Value::Null);
-        let cwd = info["data"]["location"]["directory"]
-            .as_str()
-            .or(info["location"]["directory"].as_str())
-            .unwrap_or_default();
+        let cwd = self.session_dir(id).await;
         // Каталог сессии уточняет список (команды проекта), но без него opencode
         // отдаёт хотя бы пользовательские команды.
-        let query: &[(&str, &str)] = if cwd.is_empty() { &[] } else { &[("location[directory]", cwd)] };
+        let query: &[(&str, &str)] = if cwd.is_empty() { &[] } else { &[("location[directory]", cwd.as_str())] };
         let Ok(v) = self.call_with(reqwest::Method::GET, "/api/command", query, None).await else {
             return Vec::new();
         };
@@ -299,6 +297,40 @@ impl OpenCode {
                 })
             })
             .collect()
+    }
+
+    /// Модели, которые можно выбрать в сессии: их отдаёт opencode для её каталога.
+    /// Список большой (все подключённые провайдеры), поэтому в панель уходят
+    /// только провайдер, id и название.
+    pub async fn models(&self, id: &str) -> Vec<ModelInfo> {
+        let cwd = self.session_dir(id).await;
+        let query: &[(&str, &str)] = if cwd.is_empty() { &[] } else { &[("location[directory]", cwd.as_str())] };
+        let Ok(v) = self.call_with(reqwest::Method::GET, "/api/model", query, None).await else {
+            return Vec::new();
+        };
+        models_from(&v)
+    }
+
+    /// Переключает модель сессии и запоминает выбор там же, откуда его берёт
+    /// `model = "auto"`: иначе следующее сообщение из панели вернуло бы прежнюю.
+    pub async fn set_model(&self, id: &str, provider: &str, model: &str) -> Result<(), String> {
+        if provider.is_empty() || model.is_empty() || provider.len() > 200 || model.len() > 200 {
+            return Err("некорректная модель".into());
+        }
+        let body = json!({ "model": { "providerID": provider, "id": model } });
+        self.call(reqwest::Method::POST, &format!("/api/session/{id}/model"), Some(body)).await?;
+        remember_model(provider, model);
+        Ok(())
+    }
+
+    /// Каталог сессии: от него зависят и команды, и список моделей opencode.
+    async fn session_dir(&self, id: &str) -> String {
+        let info = self.get(&format!("/api/session/{id}")).await.unwrap_or(Value::Null);
+        info["data"]["location"]["directory"]
+            .as_str()
+            .or(info["location"]["directory"].as_str())
+            .unwrap_or_default()
+            .to_owned()
     }
 
     pub async fn scan(&self) -> Vec<SessionInfo> {
@@ -1262,9 +1294,100 @@ fn session_model(m: &Value) -> String {
     }
 }
 
+/// Список моделей из ответа `/api/model`: в панель уходят только провайдер,
+/// id и название, без настроек и возможностей модели.
+fn models_from(v: &Value) -> Vec<ModelInfo> {
+    let mut out = Vec::new();
+    for m in v["data"].as_array().into_iter().flatten() {
+        let Some(provider) = m["providerID"].as_str().filter(|s| !s.is_empty()) else { continue };
+        let Some(id) = m["id"].as_str().or_else(|| m["modelID"].as_str()).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let name = m["name"].as_str().filter(|s| !s.is_empty()).unwrap_or(id);
+        out.push(ModelInfo {
+            provider: provider.to_owned(),
+            id: id.to_owned(),
+            name: name.chars().take(120).collect(),
+        });
+    }
+    out.sort_by(|a, b| {
+        a.provider
+            .cmp(&b.provider)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+    out
+}
+
+/// Запоминает модель как последнюю выбранную в окне opencode: при `model = "auto"`
+/// агент берёт её для следующих сообщений, и без этого выбор из панели откатился бы
+/// на модель из окна.
+fn remember_model(provider: &str, model: &str) {
+    let path = state_file("model.json");
+    let mut v = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({ "recent": [] }));
+    insert_recent(&mut v, provider, model);
+    if let Err(e) = write_json(&path, &v) {
+        crate::util::log(&format!("opencode: не удалось запомнить модель {provider}/{model}: {e}"));
+    }
+}
+
+/// Ставит модель первой в `recent` и убирает прежние вхождения. Остальные поля
+/// файла opencode (избранное, варианты) не трогаем.
+fn insert_recent(v: &mut Value, provider: &str, model: &str) {
+    let mut recent: Vec<Value> = v["recent"].as_array().cloned().unwrap_or_default();
+    recent.retain(|m| !(m["providerID"].as_str() == Some(provider) && m["modelID"].as_str() == Some(model)));
+    recent.insert(0, json!({ "providerID": provider, "modelID": model }));
+    recent.truncate(10);
+    v["recent"] = Value::Array(recent);
+}
+
+/// Перезапись небольших файлов состояния opencode: сначала во временный файл,
+/// иначе окно opencode могло бы прочитать половину.
+fn write_json(path: &Path, v: &Value) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    let text = serde_json::to_string(v).map_err(|e| e.to_string())?;
+    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lists_and_remembers_models() {
+        let v = json!({"data": [
+            {"providerID": "openai", "id": "gpt-6", "name": "GPT 6"},
+            {"providerID": "opencode-go", "id": "deepseek", "name": "DeepSeek"},
+            {"providerID": "broken"},
+        ]});
+        let got: Vec<_> = models_from(&v).into_iter().map(|m| (m.provider, m.id, m.name)).collect();
+        assert_eq!(
+            got,
+            [
+                ("openai".to_owned(), "gpt-6".to_owned(), "GPT 6".to_owned()),
+                ("opencode-go".to_owned(), "deepseek".to_owned(), "DeepSeek".to_owned()),
+            ]
+        );
+
+        let mut doc = json!({
+            "recent": [{"providerID": "a", "modelID": "m"}, {"providerID": "p", "modelID": "x"}],
+            "favorite": ["z"],
+        });
+        insert_recent(&mut doc, "p", "x");
+        assert_eq!(doc["recent"][0], json!({"providerID": "p", "modelID": "x"}));
+        assert_eq!(doc["recent"].as_array().unwrap().len(), 2);
+        assert_eq!(doc["favorite"][0], "z");
+        insert_recent(&mut doc, "n", "y");
+        assert_eq!(doc["recent"][0], json!({"providerID": "n", "modelID": "y"}));
+        assert_eq!(doc["recent"].as_array().unwrap().len(), 3);
+    }
 
     #[test]
     fn formats_session_model() {

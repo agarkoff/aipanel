@@ -69,6 +69,7 @@ const session = {
   live: true,
   updated_at: now,
   delivery: 'api',
+  model: 'opencode-go/deepseek-v4.1-flash',
 };
 
 // Команды, которые «пришлёт агент» в ответ на запрос списка по «/».
@@ -78,6 +79,13 @@ const commands = [
   { name: 'clear', description: 'start a new session' },
 ];
 
+// Модели для окна выбора, которое открывает пункт /models.
+const models = [
+  { provider: 'opencode-go', id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash' },
+  { provider: 'openai', id: 'gpt-6', name: 'GPT 6' },
+  { provider: 'ollama', id: 'qwen3.5', name: 'Qwen 3.5' },
+];
+
 // ---------------------------------------------------------------- заглушка
 
 const stub = `
@@ -85,7 +93,9 @@ const stub = `
   const session = ${JSON.stringify(session)};
   const items = ${JSON.stringify(items)};
   const commands = ${JSON.stringify(commands)};
+  const models = ${JSON.stringify(models)};
   window.__sent = [];
+  window.__setModels = [];
   class FakeSocket {
     static OPEN = 1;
     constructor() {
@@ -102,8 +112,13 @@ const stub = `
         setTimeout(() => this.emit({ t: 'history', agent: msg.agent, session: msg.session, reset: true, items }), 0);
       } else if (msg.t === 'commands') {
         setTimeout(() => this.emit({ t: 'commands', agent: msg.agent, session: msg.session, commands }), 0);
+      } else if (msg.t === 'models') {
+        setTimeout(() => this.emit({ t: 'models', agent: msg.agent, session: msg.session, models }), 0);
       } else if (msg.t === 'send') {
         window.__sent.push(msg);
+      } else if (msg.t === 'set_model') {
+        window.__setModels.push(msg);
+        setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: true }), 0);
       }
     }
     close() { this.readyState = 3; }
@@ -443,12 +458,12 @@ try {
   const listed = await waitFor(
     `(() => {
       const list = document.querySelector('#composer .sg-list');
-      return list && !list.hidden && list.querySelectorAll('.sg-item').length === ${commands.length};
+      return list && !list.hidden && list.querySelectorAll('.sg-item').length === ${commands.length + 1};
     })()`,
   );
   const all = await slashState();
   check('«/» открывает список команд', listed && all.open, all);
-  check('в списке команды с описаниями', all.items.join(',') === 'init,review,clear', all);
+  check('в списке команды с описаниями', all.items.join(',') === 'clear,init,models,review', all);
 
   await typeSlash('/cl');
   await sleep(100);
@@ -510,6 +525,55 @@ try {
   const escaped = await slashState();
   check('Escape закрывает список', !escaped.open && escaped.text === '/i', escaped);
 
+  // ------------------------------------------------------------ выбор модели
+  // `/models` — действие панели: не подставляется в текст, а открывает окно
+  // со списком моделей opencode.
+
+  const modelsState = () => evaluate(`(() => {
+    const dlg = document.getElementById('models');
+    const rows = [...dlg.querySelectorAll('.model')];
+    return {
+      open: dlg.open,
+      text: document.getElementById('text').value,
+      rows: rows.map((b) => b.querySelector('.model-name').textContent),
+      current: (dlg.querySelector('.model.current') || {}).title || '',
+      hint: document.getElementById('models-hint').textContent,
+      hintError: document.getElementById('models-hint').classList.contains('error'),
+    };
+  })()`);
+
+  await typeSlash('/mod');
+  await waitFor(`(() => { const l = document.querySelector('#composer .sg-list'); return l && !l.hidden && l.querySelectorAll('.sg-item').length === 1; })()`);
+  await press('ArrowDown');
+  await press('Enter');
+  await sleep(150);
+  const dialog = await modelsState();
+  check('пункт /models открывает окно выбора модели', dialog.open && dialog.rows.length === 3, dialog);
+  check('в окне все модели с названиями', dialog.rows.join(',') === 'DeepSeek V4.1 Flash,GPT 6,Qwen 3.5', dialog);
+  check('текущая модель отмечена', dialog.current === 'opencode-go/deepseek-v4.1-flash', dialog);
+  check('/models не подставляется в текст', dialog.text === '', dialog);
+
+  await evaluate(`(() => {
+    const f = document.getElementById('models-filter');
+    f.value = 'gpt';
+    f.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  const filteredModels = await modelsState();
+  check('фильтр в окне моделей', filteredModels.rows.join(',') === 'GPT 6', filteredModels);
+
+  await evaluate(`document.querySelector('#models .model').click()`);
+  const switched = await waitFor(`!document.getElementById('models').open`, 3000);
+  const chosenModel = await evaluate(`window.__setModels`);
+  check(
+    'выбор модели уходит агенту',
+    chosenModel.length === 1 && chosenModel[0].provider === 'openai' && chosenModel[0].model === 'gpt-6',
+    chosenModel,
+  );
+  const afterModel = await modelsState();
+  check('окно закрылось после смены модели', switched && !afterModel.open && afterModel.text === '', afterModel);
+  const modelHint = await evaluate(`document.getElementById('hint').textContent`);
+  check('панель сообщила о выбранной модели', modelHint.includes('GPT 6'), modelHint);
+
   // На телефоне список не должен уезжать за экран: поле ввода у нижней кромки,
   // поэтому список раскрывается вверх.
   await send('Emulation.setDeviceMetricsOverride', {
@@ -555,11 +619,35 @@ try {
   const mobileArgs = await slashState();
   check(
     'на телефоне команда с параметрами набирается так же',
-    mobilePick.text === '/init ' && !mobilePick.open && mobileArgs.text === '/init 24' && !mobileArgs.open,
+    mobilePick.text === '/clear ' && !mobilePick.open && mobileArgs.text === '/clear 24' && !mobileArgs.open,
     { mobilePick, mobileArgs },
   );
 
-  // ------------------------------------------------------------ картинки по ссылкам
+  // Окно выбора модели на телефоне тоже должно помещаться в экран.
+  await typeSlash('/mod');
+  await waitFor(`(() => { const l = document.querySelector('#composer .sg-list'); return l && !l.hidden && l.querySelectorAll('.sg-item').length === 1; })()`);
+  await press('ArrowDown');
+  await press('Enter');
+  await sleep(150);
+  const narrowDialog = await evaluate(`(() => {
+    const dlg = document.getElementById('models');
+    const box = dlg.getBoundingClientRect();
+    return {
+      open: dlg.open,
+      rows: dlg.querySelectorAll('.model').length,
+      top: box.top,
+      bottom: box.bottom,
+      vh: innerHeight,
+    };
+  })()`);
+  check(
+    'на телефоне окно моделей целиком на экране',
+    narrowDialog.open && narrowDialog.rows === 3 && narrowDialog.top >= 0 && narrowDialog.bottom <= narrowDialog.vh + 1,
+    narrowDialog,
+  );
+  await evaluate(`document.getElementById('models').close()`);
+
+// ------------------------------------------------------------ картинки по ссылкам
   // Ссылка на картинку: по клику под ней раскрывается картинка, повторный клик
   // сворачивает; при перестройке сообщения раскрытая картинка остаётся открытой.
   const img = await evaluate(`(async () => {

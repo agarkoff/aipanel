@@ -81,6 +81,17 @@ pub struct Command {
     pub description: String,
 }
 
+/// Модель, доступная в сессии opencode. Панель показывает их списком по `/models`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Провайдер: `opencode-go`, `openrouter`, `ollama`.
+    pub provider: String,
+    /// Идентификатор модели у провайдера: `deepseek-v4.1-flash`.
+    pub id: String,
+    /// Название для панели: `DeepSeek V4.1 Flash`.
+    pub name: String,
+}
+
 /// Вариант ответа в запросе opencode.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PromptOption {
@@ -204,6 +215,11 @@ pub enum AgentMsg {
     Commands {
         session: String,
         commands: Vec<Command>,
+    },
+    /// Модели, доступные в сессии opencode; весь список, как и у команд.
+    Models {
+        session: String,
+        models: Vec<ModelInfo>,
     },
     Result {
         id: String,
@@ -366,4 +382,13 @@ pub enum ServerMsg {
     /// Прочитать картинку `path` с машины агента: путь из ленты сессии `session`,
     /// относительный считается от её каталога. Ответ — `AgentMsg::Image`.
     ReadImage { id: String, session: String, path: String },
+    /// Прислать модели, доступные сессии opencode `session`.
+    Models { session: String },
+    /// Переключить сессию `session` на модель `provider`/`model`.
+    SetModel {
+        id: String,
+        session: String,
+        provider: String,
+        model: String,
+    },
 }

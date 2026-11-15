@@ -82,6 +82,13 @@ let launchDirCache = { agent: '', dirs: [] };
 const sessionCommands = new Map();
 // Когда команды уже запрошены: чтобы не спрашивать агента на каждое нажатие.
 const commandsAsked = new Map();
+// Модели сессий opencode для окна выбора в `/models`.
+const sessionModels = new Map();
+const modelsAsked = new Map();
+// Для какой сессии открыто окно выбора модели и что в нём показано.
+let modelsSession = null; // { agent, session, current }
+// Отправленная смена модели: id команды и подпись выбранной модели.
+let modelSet = null;
 
 // История запросов для стрелок вверх/вниз в поле ввода.
 // Основной источник — лента сессии, поэтому в историю попадают и сообщения,
@@ -148,6 +155,8 @@ function connect() {
     // После переподключения агент мог перезапуститься: списки команд берём заново.
     sessionCommands.clear();
     commandsAsked.clear();
+    sessionModels.clear();
+    modelsAsked.clear();
     if (selected) send({ t: 'watch', agent: selected.agent, session: selected.session });
   };
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
@@ -188,12 +197,21 @@ function onMessage(msg) {
     sessionCommands.set(key, Array.isArray(msg.commands) ? msg.commands : []);
     // Список уже открыт на «/»: подставляем пришедшие команды на место заглушки.
     if (selected && msg.agent === selected.agent && msg.session === selected.session) slash.refresh();
+  } else if (msg.t === 'models') {
+    const key = commandKey(msg.agent, msg.session);
+    modelsAsked.delete(key);
+    sessionModels.set(key, Array.isArray(msg.models) ? msg.models : []);
+    // Окно выбора уже открыто и ждёт список.
+    if (modelsSession && msg.agent === modelsSession.agent && msg.session === modelsSession.session) {
+      renderModels(modelsSession);
+    }
   } else if (msg.t === 'result') {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
     else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
     else if (deleteId && msg.id === deleteId) onDeleteResult(msg);
     else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
+    else if (modelSet && msg.id === modelSet.id) onModelResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
     else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
   }
@@ -1799,6 +1817,15 @@ const slash = Suggest.attach($('text'), {
   text: (item) => `/${item.value} `,
   // Совпадение с начала имени — выше совпадения в середине.
   rank: (item, q) => (q && item.value.toLowerCase().startsWith(q) ? 0 : 1),
+  // `models` — не текстовая команда, а действие панели: окно выбора модели.
+  onSelect: (item) => {
+    if (item.action !== 'models') return;
+    $('text').value = '';
+    resetHistoryNav();
+    autoGrow();
+    openModels();
+    return false;
+  },
 });
 
 function commandKey(agent, session) {
@@ -1823,7 +1850,14 @@ function slashItems() {
     askCommands(cur.agent.name, cur.session.key);
     return [];
   }
-  return list.map((c) => ({ value: c.name, label: c.name, hint: c.description || '' }));
+  const items = list.map((c) => ({ value: c.name, label: c.name, hint: c.description || '' }));
+  // Команды `/models` в API opencode нет — она живёт в его TUI. Зато модели
+  // можно менять из панели, поэтому пункт добавляем сами.
+  if (cur.session.tool === 'opencode' && !items.some((i) => i.value === 'models')) {
+    items.push({ value: 'models', label: 'models', hint: 'Сменить модель сессии', action: 'models' });
+    items.sort((a, b) => a.value.localeCompare(b.value));
+  }
+  return items;
 }
 
 // Слово после `/` в начале сообщения: только там список и открывается —
@@ -1864,6 +1898,110 @@ function slashEmptyText() {
   if (asked && Date.now() - asked > 6000) return 'Список не пришёл: возможно, агент старой версии.';
   return 'Загружаем команды…';
 }
+
+// ------------------------------------------------------------ модель сессии
+
+// `/models` — не команда opencode, а действие панели: список моделей приходит
+// от агента, выбор уходит обратно и агент переключает сессию.
+function askModels(agent, session) {
+  const key = commandKey(agent, session);
+  const asked = modelsAsked.get(key);
+  if (asked && Date.now() - asked < 10000) return;
+  if (!send({ t: 'models', agent, session })) return;
+  modelsAsked.set(key, Date.now());
+}
+
+function openModels() {
+  const cur = current();
+  if (!cur || cur.session.tool !== 'opencode') return;
+  modelsSession = { agent: cur.agent.name, session: cur.session.key, current: cur.session.model || '' };
+  $('models-filter').value = '';
+  setModelsHint('');
+  renderModels(modelsSession);
+  if (!$('models').open) $('models').showModal();
+  $('models-filter').focus();
+  askModels(modelsSession.agent, modelsSession.session);
+}
+
+function setModelsHint(text, isError) {
+  const hint = $('models-hint');
+  hint.textContent = text;
+  hint.className = isError ? 'hint error' : 'hint';
+}
+
+function renderModels(req) {
+  const list = $('models-list');
+  list.replaceChildren();
+  const all = sessionModels.get(commandKey(req.agent, req.session));
+  if (!all) {
+    list.append(el('div', 'models-empty', 'Загружаем модели…'));
+    return;
+  }
+  const q = $('models-filter').value.trim().toLowerCase();
+  const rows = all.filter((m) => !q || `${m.name} ${m.provider} ${m.id}`.toLowerCase().includes(q));
+  if (!rows.length) {
+    list.append(el('div', 'models-empty', all.length ? 'Ничего не найдено.' : 'Список моделей пуст.'));
+    return;
+  }
+  for (const m of rows) {
+    const full = `${m.provider}/${m.id}`;
+    const btn = el('button', 'model');
+    btn.type = 'button';
+    if (full === req.current) btn.classList.add('current');
+    btn.title = full;
+    btn.append(el('span', 'model-name', m.name || m.id), el('span', 'model-meta', full));
+    btn.addEventListener('click', () => setSessionModel(m));
+    list.append(btn);
+  }
+}
+
+function setSessionModel(m) {
+  if (!modelsSession || modelSet) return;
+  const id = String(++cmdSeq);
+  const label = m.name || m.id;
+  const ok = send({
+    t: 'set_model',
+    id,
+    agent: modelsSession.agent,
+    session: modelsSession.session,
+    provider: m.provider,
+    model: m.id,
+  });
+  if (!ok) {
+    setModelsHint('Нет соединения с сервером.', true);
+    return;
+  }
+  modelSet = { id, label };
+  setModelsHint(`Переключаем на ${label}…`);
+  for (const b of $('models-list').querySelectorAll('.model')) b.disabled = true;
+}
+
+function onModelResult(msg) {
+  const label = modelSet ? modelSet.label : '';
+  modelSet = null;
+  for (const b of $('models-list').querySelectorAll('.model')) b.disabled = false;
+  if (!msg.ok) {
+    setModelsHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
+    return;
+  }
+  $('models').close();
+  setHint(label ? `Модель: ${label}` : 'Модель переключена.');
+}
+
+$('models-filter').addEventListener('input', () => {
+  if (modelsSession) renderModels(modelsSession);
+});
+// Enter в фильтре выбирает первую подходящую модель — как в списке команд.
+$('models-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const first = $('models-list').querySelector('.model');
+  if (first) first.click();
+});
+$('models-cancel').addEventListener('click', () => $('models').close());
+$('models').addEventListener('close', () => {
+  modelsSession = null;
+  setModelsHint('');
+});
 
 $('composer').addEventListener('submit', (e) => {
   e.preventDefault();

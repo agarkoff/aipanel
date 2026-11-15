@@ -606,6 +606,33 @@ input, textarea, select {
 .launch label.check input { width: auto; margin: 0; flex: none; }
 .confirm .danger { background: var(--wait); border-color: var(--wait); color: #fff; }
 
+/* Выбор модели: строки в прокручиваемом списке, текущая отмечена. */
+.models .models-list {
+  display: grid;
+  gap: 2px;
+  margin: 0 -6px;
+  max-height: min(48dvh, 380px);
+  overflow-y: auto;
+}
+.models .model {
+  display: grid;
+  gap: 1px;
+  width: 100%;
+  padding: 7px 8px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: inherit;
+  cursor: pointer;
+}
+.models .model:hover, .models .model:focus-visible { border-color: var(--accent); }
+.models .model.current { background: var(--tool); }
+.models .model-name { overflow-wrap: anywhere; }
+.models .model-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.models .model:disabled { opacity: .6; cursor: default; }
+.models .models-empty { padding: 6px 2px; color: var(--muted); font-size: 13px; }
+
 /* На тач-экране экранная клавиатура меняет высоту окна просмотра, и окно,
    центрированное по вертикали, переезжает как раз между касанием и click:
    палец попадает уже мимо кнопки, а запуск не уходит. Прижимаем окно к верху,

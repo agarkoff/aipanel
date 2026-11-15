@@ -43,6 +43,7 @@ const MAX_SESSIONS_PER_AGENT: usize = 500;
 const MAX_TEXT: usize = 200_000;
 const MAX_PROMPTS: usize = 50;
 const MAX_COMMANDS: usize = 200;
+const MAX_MODELS: usize = 600;
 const MAX_ANSWER: usize = 64_000;
 const PING_EVERY: Duration = Duration::from_secs(25);
 const DEAD_AFTER: Duration = Duration::from_secs(90);
@@ -532,6 +533,20 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
                 }
             }
         }
+        AgentMsg::Models { session, mut models } => {
+            models.truncate(MAX_MODELS);
+            let text = json!({
+                "t": "models", "agent": agent, "session": session, "models": models,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
         AgentMsg::Result { id, ok, error, session } => {
             // Отвечать на команду может только тот агент, которому она отправлена.
             let allowed = inner
@@ -669,6 +684,10 @@ enum BrowserMsg {
     },
     /// Попросить у агента команды сессии для списка, который открывается по `/`.
     Commands { agent: String, session: String },
+    /// Попросить у агента модели сессии для окна выбора в `/models`.
+    Models { agent: String, session: String },
+    /// Переключить сессию на модель `provider`/`model`.
+    SetModel { id: String, agent: String, session: String, provider: String, model: String },
     PromptReply {
         id: String,
         agent: String,
@@ -771,6 +790,32 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             };
             // Ответ агент присылает всем, кто смотрит эту сессию: список общий.
             inner.to_agent(&owner, &agent, ServerMsg::Commands { session });
+        }
+        BrowserMsg::Models { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            inner.to_agent(&owner, &agent, ServerMsg::Models { session });
+        }
+        BrowserMsg::SetModel { id, agent, session, provider, model } => {
+            let provider = provider.trim().to_owned();
+            let model = model.trim().to_owned();
+            if provider.is_empty() || model.is_empty() || provider.len() > 200 || model.len() > 200 {
+                reply(&inner, browser, &id, "некорректная модель");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::SetModel { id: cmd, session, provider, model },
+            );
         }
         BrowserMsg::Send { id, agent, session, text } => {
             if text.trim().is_empty() || text.len() > MAX_TEXT {

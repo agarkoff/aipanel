@@ -14,7 +14,7 @@
  *     // необязательные настройки:
  *     filter: (item, query) => true,      // query уже приведён к нижнему регистру
  *     render: (item, query) => '<b>…</b>',
- *     onSelect: (item) => {},
+ *     onSelect: (item) => {},             // false — не подставлять значение (своё действие)
  *     minChars: 1,                        // сколько символов ввести до открытия
  *     limit: 12,                          // сколько пунктов показывать (0 — все)
  *     openOnFocus: true,                  // открывать при получении фокуса
@@ -185,6 +185,12 @@
     function choose(n) {
       const item = rows[n];
       if (n < 0 || !item) return;
+      // Обработчик выбора может забрать выбор себе (открыть окно, отправить
+      // действие) и вернуть false — тогда значение поля он не меняет.
+      if (opts.onSelect && opts.onSelect(item) === false) {
+        close();
+        return;
+      }
       if (opts.token) {
         const w = word();
         if (!w) return;
@@ -202,7 +208,6 @@
         input.value = valueOf(item);
         close();
       }
-      if (opts.onSelect) opts.onSelect(item);
     }
 
     function show(list0, q) {

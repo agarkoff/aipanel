@@ -148,6 +148,18 @@
   </form>
 </dialog>
 
+<dialog id="models" class="launch models" aria-labelledby="models-title">
+  <form id="models-form">
+    <h2 id="models-title">Модель сессии</h2>
+    <input id="models-filter" type="search" placeholder="Название или провайдер" autocomplete="off" spellcheck="false">
+    <div id="models-list" class="models-list" role="listbox" aria-label="Модели"></div>
+    <p id="models-hint" class="hint"></p>
+    <div class="actions">
+      <button id="models-cancel" class="link" type="button">Закрыть</button>
+    </div>
+  </form>
+</dialog>
+
 <script src="/md.js"></script>
 <script src="/suggest.js"></script>
 <script src="/app.js"></script>
