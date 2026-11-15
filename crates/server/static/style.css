@@ -312,6 +312,77 @@ input, textarea, select {
 
 .time { color: var(--muted); font-size: 11px; margin-top: 2px; }
 
+/* Запросы opencode: разрешения и формы с вариантами ответа. */
+.prompts {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  max-height: 50dvh;
+  overflow-y: auto;
+}
+.prompts:empty { display: none; }
+.prompt {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--busy);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg);
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+}
+.prompt.permission { border-left-color: var(--wait); }
+.prompt.sending { opacity: .65; }
+.prompt-title { font-weight: 600; }
+.prompt-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+.prompt-fields { display: grid; gap: 10px; margin-top: 8px; }
+.prompt-field { display: grid; gap: 4px; }
+.prompt-label { font-size: 13px; font-weight: 600; }
+.prompt-label .req { color: var(--wait); }
+.prompt-desc { font-size: 12px; color: var(--muted); }
+.prompt-control { display: grid; gap: 4px; }
+.prompt .choices { display: grid; gap: 4px; }
+.prompt .choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  cursor: pointer;
+}
+.prompt .choice:hover { border-color: var(--accent); }
+.prompt .choice input { width: auto; margin: 3px 0 0; flex: none; }
+.prompt .choice-text { display: grid; gap: 1px; min-width: 0; }
+.prompt .choice-label { overflow-wrap: anywhere; }
+.prompt .choice-desc { font-size: 12px; color: var(--muted); }
+.prompt .prompt-custom { margin-top: -1px; }
+.prompt .prompt-custom input { margin-left: 24px; width: calc(100% - 24px); }
+.prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.prompt button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.prompt-actions .link { margin-left: auto; }
+.prompt-error { color: var(--wait); font-size: 12px; margin-top: 6px; }
+.prompt-error:empty { display: none; }
+.prompt-save { color: var(--muted); font-size: 11px; margin-top: 6px; overflow-wrap: anywhere; }
+.prompt-external { color: var(--accent); font-size: 13px; }
+
 .composer {
   display: flex;
   gap: 8px;
@@ -404,6 +475,10 @@ button .icon { display: none; }
   .composer button { font-size: 22px; font-weight: 600; }
 
   .feed { padding: 12px 12px 16px; gap: 10px; }
+  .prompts { padding: 8px 12px; max-height: 45dvh; gap: 6px; }
+  .prompt { padding: 9px 10px; }
+  .prompt .choice { padding: 7px 9px; min-height: 40px; }
+  .prompt-actions button { min-height: 40px; }
   .item.user .body { padding: 8px 11px; }
   .item details { padding: 6px 10px; }
   .item summary { padding: 4px 0; }

@@ -41,6 +41,8 @@ const COOKIE: &str = "aipanel_session";
 const MAX_TOKENS: usize = 64;
 const MAX_SESSIONS_PER_AGENT: usize = 500;
 const MAX_TEXT: usize = 200_000;
+const MAX_PROMPTS: usize = 50;
+const MAX_ANSWER: usize = 64_000;
 const PING_EVERY: Duration = Duration::from_secs(25);
 const DEAD_AFTER: Duration = Duration::from_secs(90);
 
@@ -392,6 +394,18 @@ fn on_agent_msg(app: &App, agent: &str, msg: AgentMsg) {
                 }
             }
         }
+        AgentMsg::Prompts { session, mut prompts } => {
+            prompts.truncate(MAX_PROMPTS);
+            let text = json!({
+                "t": "prompts", "agent": agent, "session": session, "prompts": prompts,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if matches!(&b.watching, Some((a, s)) if a == agent && *s == session) {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
         AgentMsg::Result { id, ok, error, session } => {
             if let Some((browser, orig)) = inner.pending.remove(&id) {
                 if let Some(b) = inner.browsers.get(&browser) {
@@ -417,6 +431,21 @@ enum BrowserMsg {
     Start { id: String, agent: String, tool: String, cwd: String },
     Handoff { id: String, agent: String, session: String, tool: String },
     CancelQueued { id: String, agent: String, session: String, queue: String },
+    PromptReply {
+        id: String,
+        agent: String,
+        session: String,
+        prompt: String,
+        kind: String,
+        #[serde(default)]
+        decision: String,
+        #[serde(default)]
+        answer: serde_json::Value,
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        cancel: bool,
+    },
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -535,6 +564,41 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 &agent,
                 cmd.clone(),
                 ServerMsg::CancelQueued { id: cmd, session, queue },
+            );
+        }
+        BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
+            if !safe_id(&prompt) {
+                reply(&inner, browser, &id, "некорректный идентификатор запроса");
+                return;
+            }
+            if !matches!(kind.as_str(), "permission" | "form") {
+                reply(&inner, browser, &id, "неизвестный тип запроса");
+                return;
+            }
+            if kind == "permission" && !matches!(decision.as_str(), "once" | "always" | "reject") {
+                reply(&inner, browser, &id, "неизвестный ответ на разрешение");
+                return;
+            }
+            if kind == "form" && !cancel && !answer.is_object() {
+                reply(&inner, browser, &id, "ответ формы должен быть объектом");
+                return;
+            }
+            if serde_json::to_string(&answer).map(|s| s.len()).unwrap_or(0) > MAX_ANSWER {
+                reply(&inner, browser, &id, "слишком большой ответ формы");
+                return;
+            }
+            if message.chars().count() > 4000 {
+                reply(&inner, browser, &id, "слишком длинное сообщение к запросу");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::PromptReply { id: cmd, session, prompt, kind, decision, answer, message, cancel },
             );
         }
     }

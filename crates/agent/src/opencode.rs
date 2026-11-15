@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Item, SessionInfo};
+use aipanel_proto::{AgentMsg, Item, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo};
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
@@ -22,6 +22,10 @@ use crate::{
 
 const TEXT_LIMIT: usize = 20_000;
 const RESULT_LIMIT: usize = 4_000;
+/// Ограничения на запросы выбора из окна opencode: форма приходит из локального
+/// сервиса, но её поля попадают в браузер, поэтому размеры ограничены.
+const PROMPT_FIELDS: usize = 20;
+const PROMPT_OPTIONS: usize = 50;
 /// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
 const LAUNCH_GUARD: Duration = Duration::from_secs(25);
 
@@ -295,6 +299,17 @@ impl OpenCode {
                     .map(|a| a.iter().filter_map(|r| r["sessionID"].as_str().map(str::to_owned)).collect())
             })
             .unwrap_or_default();
+        // Вопрос с вариантами ответа тоже останавливает сессию до ответа пользователя.
+        let asking: HashSet<String> = self
+            .get("/api/form")
+            .await
+            .ok()
+            .and_then(|v| {
+                v["data"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|r| r["sessionID"].as_str().map(str::to_owned)).collect())
+            })
+            .unwrap_or_default();
 
         let windowed = self.windowed_sessions();
         let mut out = Vec::new();
@@ -302,7 +317,7 @@ impl OpenCode {
             let Some(id) = s["id"].as_str() else { continue };
             let cwd = s["location"]["directory"].as_str().unwrap_or_default();
             let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or_else(|| basename(cwd));
-            let status = if waiting.contains(id) {
+            let status = if waiting.contains(id) || asking.contains(id) {
                 "waiting"
             } else if active.contains(id) || self.recently_launched(id) {
                 "busy"
@@ -342,6 +357,7 @@ impl OpenCode {
         let mut feed = Feed::default();
         let mut queued: HashSet<String> = HashSet::new();
         let mut first = true;
+        let mut prompts_sig: Option<u64> = None;
         let (tx, mut events) = mpsc::channel(256);
         let _events = AbortOnDrop(tokio::spawn(watch_events(
             self.cfg.clone(),
@@ -416,6 +432,35 @@ impl OpenCode {
                     if first {
                         // reset уже очищает ленту, отдельные удаления не нужны.
                         drop.clear();
+                    }
+
+                    // Разрешения и формы сессии. Если сервис не ответил, показанные
+                    // запросы не трогаем: временный сбой не должен их скрывать.
+                    let perms_path = format!("/api/session/{id}/permission");
+                    let forms_path = format!("/api/session/{id}/form");
+                    let (perms, forms) = tokio::join!(self.get(&perms_path), self.get(&forms_path));
+                    let answered = perms.is_ok() || forms.is_ok();
+                    let mut prompts = Vec::new();
+                    if let Ok(v) = perms {
+                        for p in v["data"].as_array().into_iter().flatten() {
+                            if let Some(prompt) = permission_prompt(p) {
+                                prompts.push(prompt);
+                            }
+                        }
+                    }
+                    if let Ok(v) = forms {
+                        for f in v["data"].as_array().into_iter().flatten() {
+                            if let Some(prompt) = form_prompt(f) {
+                                prompts.push(prompt);
+                            }
+                        }
+                    }
+                    if answered {
+                        let sig = prompts_hash(&prompts);
+                        if prompts_sig != Some(sig) {
+                            let _ = out.send(AgentMsg::Prompts { session: key.clone(), prompts });
+                            prompts_sig = Some(sig);
+                        }
                     }
 
                     if first || !items.is_empty() || !drop.is_empty() {
@@ -651,6 +696,56 @@ impl OpenCode {
             .map(|_| ())
     }
 
+    /// Отвечает на запрос разрешения или на форму с вариантами.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reply_prompt(
+        &self,
+        id: &str,
+        prompt: &str,
+        kind: &str,
+        decision: &str,
+        answer: &Value,
+        message: &str,
+        cancel: bool,
+    ) -> Result<(), String> {
+        match kind {
+            "permission" => {
+                if !matches!(decision, "once" | "always" | "reject") {
+                    return Err(format!("неизвестный ответ на разрешение: {decision}"));
+                }
+                let mut body = json!({ "decision": decision });
+                if !message.is_empty() {
+                    body["message"] = json!(message);
+                }
+                self.call(
+                    reqwest::Method::POST,
+                    &format!("/api/session/{id}/permission/{prompt}/reply"),
+                    Some(body),
+                )
+                .await
+                .map(|_| ())
+            }
+            "form" => {
+                if cancel {
+                    return self
+                        .call(reqwest::Method::DELETE, &format!("/api/session/{id}/form/{prompt}"), None)
+                        .await
+                        .map(|_| ());
+                }
+                let answer = answer
+                    .as_object()
+                    .ok_or("ответ формы должен быть объектом с полями")?;
+                self.call(
+                    reqwest::Method::POST,
+                    &format!("/api/session/{id}/form/{prompt}/reply"),
+                    Some(json!({ "answer": answer })),
+                )
+                .await
+                .map(|_| ())
+            }
+            _ => Err("неизвестный тип запроса opencode".into()),
+        }
+    }
 
     pub async fn interrupt(&self, id: &str) -> Result<(), String> {
         self.call(reqwest::Method::POST, &format!("/api/session/{id}/interrupt"), None)
@@ -663,6 +758,149 @@ fn text_hash(text: &str) -> u64 {
     let mut h = DefaultHasher::new();
     text.hash(&mut h);
     h.finish()
+}
+
+/// Хэш набора запросов: при изменении списка браузеру уходит новый.
+fn prompts_hash(prompts: &[Prompt]) -> u64 {
+    let mut h = DefaultHasher::new();
+    serde_json::to_string(prompts).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
+fn prompt_option(v: &Value) -> Option<PromptOption> {
+    let value = v["value"].as_str()?;
+    Some(PromptOption {
+        value: value.to_owned(),
+        label: v["label"].as_str().filter(|l| !l.is_empty()).unwrap_or(value).to_owned(),
+        description: v["description"].as_str().unwrap_or_default().to_owned(),
+    })
+}
+
+fn prompt_field(f: &Value) -> Option<PromptField> {
+    let key = f["key"].as_str().filter(|k| !k.is_empty())?;
+    let kind = f["type"].as_str()?;
+    if !matches!(kind, "string" | "number" | "integer" | "boolean" | "multiselect" | "external") {
+        return None;
+    }
+    let options: Vec<PromptOption> = f["options"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(PROMPT_OPTIONS)
+        .filter_map(prompt_option)
+        .collect();
+    let mut when = Vec::new();
+    for w in f["when"].as_array().into_iter().flatten() {
+        let (Some(key), Some(op)) = (w["key"].as_str(), w["op"].as_str()) else {
+            continue;
+        };
+        if !matches!(op, "eq" | "neq") {
+            continue;
+        }
+        if let Some(value) = w.get("value") {
+            when.push(PromptWhen { key: key.to_owned(), op: op.to_owned(), value: value.clone() });
+        }
+    }
+    Some(PromptField {
+        key: key.to_owned(),
+        kind: kind.to_owned(),
+        title: truncate(f["title"].as_str().unwrap_or_default(), 1000),
+        description: truncate(f["description"].as_str().unwrap_or_default(), 2000),
+        required: f["required"].as_bool().unwrap_or(false),
+        hidden: f["hidden"].as_bool().unwrap_or(false),
+        custom: f["custom"].as_bool().unwrap_or(false),
+        options,
+        default: f.get("default").cloned(),
+        min: f["minimum"].as_f64(),
+        max: f["maximum"].as_f64(),
+        min_items: f["minItems"].as_u64(),
+        max_items: f["maxItems"].as_u64(),
+        min_length: f["minLength"].as_u64(),
+        max_length: f["maxLength"].as_u64(),
+        pattern: f["pattern"].as_str().unwrap_or_default().to_owned(),
+        placeholder: truncate(f["placeholder"].as_str().unwrap_or_default(), 300),
+        format: f["format"].as_str().unwrap_or_default().to_owned(),
+        url: f["url"].as_str().unwrap_or_default().to_owned(),
+        when,
+    })
+}
+
+/// Описание разрешения для панели: действие и ресурсы, на которые оно выдаётся.
+fn permission_prompt(p: &Value) -> Option<Prompt> {
+    let id = p["id"].as_str().filter(|i| !i.is_empty())?;
+    let action = p["action"].as_str().unwrap_or_default();
+    let label = match action {
+        "read" => "Прочитать файл".to_owned(),
+        "edit" => "Изменить файл".to_owned(),
+        "list" => "Показать каталог".to_owned(),
+        "bash" | "shell" => "Выполнить команду".to_owned(),
+        "external_directory" => "Открыть каталог вне проекта".to_owned(),
+        "question" => "Задать вопрос".to_owned(),
+        "browser" => "Открыть браузер".to_owned(),
+        "subagent" => "Запустить подагента".to_owned(),
+        "webfetch" | "fetch" => "Загрузить страницу".to_owned(),
+        "websearch" => "Поиск в интернете".to_owned(),
+        "lsp" => "Запрос к языковому серверу".to_owned(),
+        "" => "Требуется разрешение".to_owned(),
+        other => format!("Выполнить «{other}»"),
+    };
+    let resources: Vec<String> = p["resources"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.as_str())
+        .map(|r| truncate(r, 1000))
+        .collect();
+    let text = match resources.len() {
+        0 => label,
+        1 => format!("{label}: {}", resources[0]),
+        _ => format!(
+            "{label}:\n{}",
+            resources.iter().map(|r| format!("• {r}")).collect::<Vec<_>>().join("\n")
+        ),
+    };
+    let text = match p["message"].as_str().filter(|m| !m.trim().is_empty()) {
+        Some(message) => format!("{text}\n{}", truncate(message, 1000)),
+        None => text,
+    };
+    let save: Vec<String> = p["save"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.as_str())
+        .map(|s| truncate(s, 500))
+        .collect();
+    Some(Prompt {
+        id: id.to_owned(),
+        kind: "permission".into(),
+        title: "opencode просит разрешение".into(),
+        text,
+        fields: Vec::new(),
+        save,
+    })
+}
+
+/// Форма opencode: вопрос с вариантами ответа или полями ввода.
+fn form_prompt(f: &Value) -> Option<Prompt> {
+    let id = f["id"].as_str().filter(|i| !i.is_empty())?;
+    let fields: Vec<PromptField> = f["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(PROMPT_FIELDS)
+        .filter_map(prompt_field)
+        .collect();
+    if fields.is_empty() {
+        return None;
+    }
+    Some(Prompt {
+        id: id.to_owned(),
+        kind: "form".into(),
+        title: truncate(f["title"].as_str().filter(|t| !t.is_empty()).unwrap_or("Вопрос opencode"), 1000),
+        text: String::new(),
+        fields,
+        save: Vec::new(),
+    })
 }
 
 /// Элемент очереди из ответа `POST /prompt`: его показываем сразу, не дожидаясь,
@@ -933,4 +1171,63 @@ mod tests {
         assert_eq!(got, [("queue:q2", "queued", "два")]);
     }
 
+    #[test]
+    fn converts_permission_request() {
+        let p = permission_prompt(&json!({
+            "id":"per_1", "sessionID":"s", "action":"read",
+            "resources":["C:\\p\\.env"], "save":["*.env"]
+        }))
+        .unwrap();
+        assert_eq!(p.id, "per_1");
+        assert_eq!(p.kind, "permission");
+        assert_eq!(p.text, "Прочитать файл: C:\\p\\.env");
+        assert_eq!(p.save, ["*.env"]);
+        assert!(p.fields.is_empty());
+        // Несколько ресурсов — списком.
+        let p = permission_prompt(&json!({"id":"per_2","action":"bash","resources":["a","b"]})).unwrap();
+        assert_eq!(p.text, "Выполнить команду:\n• a\n• b");
+        assert!(p.save.is_empty());
+    }
+
+    #[test]
+    fn converts_form_with_options() {
+        let f = form_prompt(&json!({
+            "id":"frm_1", "sessionID":"s", "title":"Выберите вариант",
+            "fields":[
+                {"key":"q0","type":"string","title":"Какой?","required":true,"custom":true,
+                 "default":"A","options":[{"value":"A","label":"Вариант A","description":"первый"},
+                                          {"value":"B","label":"Вариант B"}]},
+                {"key":"q1","type":"multiselect","title":"Несколько","options":[
+                    {"value":"x","label":"X"}],"minItems":1},
+                {"key":"q2","type":"boolean","title":"Согласны?","default":false},
+                {"key":"q3","type":"string","title":"Зависимое",
+                 "when":[{"key":"q0","op":"eq","value":"B"}]},
+                {"key":"q4","type":"unknown","title":"Неизвестное поле"}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(f.kind, "form");
+        assert_eq!(f.title, "Выберите вариант");
+        let keys: Vec<_> = f.fields.iter().map(|x| x.key.as_str()).collect();
+        assert_eq!(keys, ["q0", "q1", "q2", "q3"]);
+        let q0 = &f.fields[0];
+        assert_eq!(q0.kind, "string");
+        assert!(q0.required && q0.custom);
+        assert_eq!(q0.default, Some(json!("A")));
+        assert_eq!(q0.options[0].label, "Вариант A");
+        assert_eq!(q0.options[0].description, "первый");
+        assert_eq!(f.fields[1].min_items, Some(1));
+        assert_eq!(f.fields[2].default, Some(json!(false)));
+        assert_eq!(f.fields[3].when[0].key, "q0");
+        assert_eq!(f.fields[3].when[0].op, "eq");
+    }
+
+    #[test]
+    fn ignores_empty_forms() {
+        let f = form_prompt(&json!({
+            "id":"frm_2", "fields":[{"key":"q0","type":"unknown"}]
+        }));
+        assert!(f.is_none());
+        assert!(form_prompt(&json!({"id":"frm_3","fields":[]})).is_none());
+    }
 }

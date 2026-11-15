@@ -160,6 +160,40 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
+            ServerMsg::PromptReply { id, session, prompt, kind, decision, answer, message, cancel } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result =
+                        me.reply_prompt(&session, &prompt, &kind, &decision, &answer, &message, cancel).await;
+                    me.finish(id, result.map(|_| None));
+                });
+            }
+        }
+    }
+
+    /// Отвечает на запрос opencode: разрешение, форма или её отмена.
+    #[allow(clippy::too_many_arguments)]
+    async fn reply_prompt(
+        &self,
+        session: &str,
+        prompt: &str,
+        kind: &str,
+        decision: &str,
+        answer: &serde_json::Value,
+        message: &str,
+        cancel: bool,
+    ) -> Result<(), String> {
+        if !safe_id(prompt) {
+            return Err("некорректный идентификатор запроса".into());
+        }
+        if message.chars().count() > 4000 {
+            return Err("слишком длинное сообщение к запросу".into());
+        }
+        match split_key(session)? {
+            ("opencode", id) => {
+                self.opencode.reply_prompt(id, prompt, kind, decision, answer, message, cancel).await
+            }
+            _ => Err("запросы выбора есть только у сессий opencode".into()),
         }
     }
 

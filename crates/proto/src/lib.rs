@@ -1,6 +1,7 @@
 //! Протокол между агентом и сервером панели (JSON поверх WebSocket).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Описание одной сессии Claude Code или opencode.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -36,6 +37,90 @@ pub struct Item {
     pub tool: Option<String>,
 }
 
+/// Вариант ответа в запросе opencode.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PromptOption {
+    pub value: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub label: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+}
+
+/// Условие показа поля формы: поле видно, если другое поле равно `value`
+/// (`eq`) или не равно ему (`neq`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PromptWhen {
+    pub key: String,
+    /// `eq` или `neq`.
+    pub op: String,
+    pub value: Value,
+}
+
+/// Поле формы opencode: вопрос с вариантами, текст, число или флажок.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PromptField {
+    pub key: String,
+    /// `string`, `number`, `integer`, `boolean`, `multiselect` или `external`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    #[serde(default)]
+    pub required: bool,
+    /// Поле скрыто, но его значение по умолчанию всё равно входит в ответ.
+    #[serde(default)]
+    pub hidden: bool,
+    /// Разрешено ввести своё значение, кроме готовых вариантов.
+    #[serde(default)]
+    pub custom: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<PromptOption>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_items: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub pattern: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub placeholder: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub format: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub when: Vec<PromptWhen>,
+}
+
+/// Запрос opencode, который ждёт ответа в окне программы: разрешение на действие
+/// или форма с вопросом и вариантами ответа.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Prompt {
+    /// `per_…` для разрешения, `frm_…` для формы.
+    pub id: String,
+    /// `permission` или `form`.
+    pub kind: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<PromptField>,
+    /// Правила, которые сохранит ответ «разрешить всегда».
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub save: Vec<String>,
+}
+
 /// Сообщения от агента серверу.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -57,6 +142,13 @@ pub enum AgentMsg {
         /// сообщение из очереди opencode отправлено и стало обычным сообщением).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         drop: Vec<String>,
+    },
+    /// Запросы opencode, ожидающие ответа в этой сессии. Полный список: клиент
+    /// заменяет им показанные ранее запросы.
+    Prompts {
+        session: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        prompts: Vec<Prompt>,
     },
     Result {
         id: String,
@@ -83,4 +175,21 @@ pub enum ServerMsg {
     Handoff { id: String, session: String, tool: String },
     /// Убрать сообщение `queue` из очереди opencode-сессии `session`.
     CancelQueued { id: String, session: String, queue: String },
+    /// Ответить на запрос opencode `prompt`: разрешение (`decision`), форма
+    /// (`answer`) или отмена формы (`cancel`).
+    PromptReply {
+        id: String,
+        session: String,
+        prompt: String,
+        /// `permission` или `form`.
+        kind: String,
+        #[serde(default)]
+        decision: String,
+        #[serde(default)]
+        answer: Value,
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        cancel: bool,
+    },
 }
