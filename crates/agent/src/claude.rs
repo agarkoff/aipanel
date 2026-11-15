@@ -260,6 +260,7 @@ impl Claude {
                             session: key.clone(),
                             reset: true,
                             items,
+                            drop: Vec::new(),
                         });
                     } else if len > offset {
                         let (items, consumed) = read_items(p, offset, len.min(offset + MAX_CHUNK), false);
@@ -269,6 +270,7 @@ impl Claude {
                                 session: key.clone(),
                                 reset: false,
                                 items,
+                                drop: Vec::new(),
                             });
                         }
                     }
@@ -281,6 +283,7 @@ impl Claude {
                             session: key.clone(),
                             reset: true,
                             items: vec![],
+                            drop: Vec::new(),
                         });
                     }
                 }
@@ -461,6 +464,7 @@ impl Claude {
                 let _ = out.send(AgentMsg::History {
                     session: format!("claude:{sid}"),
                     reset: false,
+                    drop: Vec::new(),
                     items: vec![Item {
                         id: format!("err-{}", now_ms()),
                         ts: now_ms(),

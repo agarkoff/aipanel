@@ -11,7 +11,7 @@ const el = (tag, cls, text) => {
 const STATUS = {
   busy: 'работает',
   idle: 'ждёт ввода',
-  waiting: 'ждёт разрешения',
+  waiting: 'ждёт ответа',
   shell: 'выполняет команду',
   stopped: 'не запущена',
   ready: 'не активна',
@@ -38,6 +38,7 @@ let pendingLaunch = null;
 let handoffId = null;
 let handoffRequest = null;
 let copyIdTimer = null;
+let cancelQueuedId = null;
 // Каталоги, показанные в подсказках для текущего выбранного компьютера.
 let launchDirCache = { agent: '', dirs: [] };
 
@@ -122,9 +123,9 @@ function onMessage(msg) {
   } else if (msg.t === 'history') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyHistory(msg);
-  } else if (msg.t === 'result') {
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
+    else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
     else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
   }
 }
@@ -324,6 +325,23 @@ async function copyToClipboard(text) {
   return ok;
 }
 
+function cancelQueued(item) {
+  const cur = current();
+  if (!cur || !item.id.startsWith('queue:')) return;
+  const id = String(++cmdSeq);
+  if (!send({ t: 'cancel_queued', id, agent: cur.agent.name, session: cur.session.key, queue: item.id.slice(6) })) {
+    setHint('Нет соединения с сервером.', true);
+    return;
+  }
+  cancelQueuedId = id;
+  setHint('Убираем сообщение из очереди…');
+}
+
+function onCancelQueuedResult(msg) {
+  cancelQueuedId = null;
+  setHint(msg.ok ? 'Сообщение убрано из очереди.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
+}
+
 function firstLine(text) {
   const line = text.split('\n', 1)[0];
   return line.length > 140 ? `${line.slice(0, 140)}…` : line;
@@ -383,6 +401,18 @@ function buildItem(item) {
     node.append(body);
   } else if (item.kind === 'error') {
     node.append(el('div', 'body', item.text));
+  } else if (item.kind === 'queued') {
+    const label = el('div', 'queue-label');
+    label.append(el('span', '', 'В очереди — ждёт завершения текущего ответа'));
+    const cancel = el('button', 'queue-cancel', '×');
+    cancel.type = 'button';
+    cancel.title = 'Убрать из очереди';
+    cancel.setAttribute('aria-label', 'Убрать сообщение из очереди');
+    cancel.addEventListener('click', () => cancelQueued(item));
+    label.append(cancel);
+    const body = el('div', 'body md');
+    body.append(renderMarkdown(item.text));
+    node.append(label, body);
   } else if (item.kind === 'diff') {
     node.append(diffDetails(item.text));
   } else {
@@ -412,6 +442,14 @@ function applyHistory(msg) {
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
   } else if (msg.items.length && !nodes.size) {
     feed.replaceChildren();
+  }
+  for (const id of msg.drop || []) {
+    const node = nodes.get(id);
+    if (node) {
+      node.remove();
+      nodes.delete(id);
+    }
+    feedRequests.delete(id);
   }
   for (const item of msg.items) {
     // Запросы из ленты — история для стрелок в поле ввода.

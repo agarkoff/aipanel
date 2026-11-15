@@ -54,15 +54,15 @@ struct Agent {
 /// поэтому от сервера принимаются только безопасные символы.
 fn split_key(key: &str) -> Result<(&str, &str), String> {
     match key.split_once(':') {
-        Some((tool, id))
-            if !id.is_empty()
-                && id.len() <= 128
-                && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') =>
-        {
-            Ok((tool, id))
-        }
+        Some((tool, id)) if safe_id(id) => Ok((tool, id)),
         _ => Err(format!("некорректный ключ сессии: {key}")),
     }
+}
+
+/// Идентификатор попадает в имя файла, аргумент команды и URL,
+/// поэтому от сервера принимаются только безопасные символы.
+fn safe_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 impl Agent {
@@ -91,12 +91,35 @@ impl Agent {
             ServerMsg::Send { id, session, text } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
+                    let mut queued = None;
                     let result = match split_key(&session) {
                         Ok(("claude", sid)) => me.claude.send(sid, &text, &me.out).await,
-                        Ok(("opencode", sid)) => me.opencode.send(sid, &text).await,
+                        Ok(("opencode", sid)) => match me.opencode.send(sid, &text).await {
+                            Ok(item) => {
+                                queued = item;
+                                Ok(())
+                            }
+                            Err(e) => Err(e),
+                        },
                         Ok(_) => Err("неизвестный тип сессии".into()),
                         Err(e) => Err(e),
                     };
+                    // Сообщение, принятое в очередь, показываем сразу: в ленту opencode
+                    // его отдаст только после завершения текущего ответа.
+                    if let Some(item) = queued {
+                        let item_id = item.id.clone();
+                        let _ = me.out.send(AgentMsg::History {
+                            session: session.clone(),
+                            reset: false,
+                            items: vec![item],
+                            drop: Vec::new(),
+                        });
+                        // Только после отправки клиенту: иначе наблюдение могло бы убрать
+                        // сообщение из ленты раньше, чем оно туда попало.
+                        if let Ok(("opencode", sid)) = split_key(&session) {
+                            me.opencode.note_optimistic(sid, &item_id);
+                        }
+                    }
                     me.finish(id, result.map(|_| None));
                 });
             }
@@ -130,6 +153,24 @@ impl Agent {
                     me.finish(id, result);
                 });
             }
+            ServerMsg::CancelQueued { id, session, queue } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let result = me.cancel_queued(&session, &queue).await;
+                    me.finish(id, result.map(|_| None));
+                });
+            }
+        }
+    }
+
+    /// Убирает сообщение из очереди opencode, пока оно не отправлено.
+    async fn cancel_queued(&self, session: &str, queue: &str) -> Result<(), String> {
+        if !safe_id(queue) {
+            return Err("некорректный идентификатор очереди".into());
+        }
+        match split_key(session)? {
+            ("opencode", id) => self.opencode.cancel_queued(id, queue).await,
+            _ => Err("очередь есть только у сессий opencode".into()),
         }
     }
 

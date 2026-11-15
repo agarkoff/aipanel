@@ -284,6 +284,11 @@ fn valid_name(name: &str) -> bool {
     !name.is_empty() && name.len() <= 64 && !name.chars().any(char::is_control)
 }
 
+/// Идентификатор попадает в URL API opencode, поэтому принимаются только безопасные символы.
+fn safe_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 async fn agent_conn(app: Arc<App>, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
 
@@ -375,9 +380,10 @@ fn on_agent_msg(app: &App, agent: &str, msg: AgentMsg) {
             }
             inner.broadcast_agents();
         }
-        AgentMsg::History { session, reset, items } => {
+        AgentMsg::History { session, reset, items, drop } => {
             let text = json!({
-                "t": "history", "agent": agent, "session": session, "reset": reset, "items": items,
+                "t": "history", "agent": agent, "session": session, "reset": reset,
+                "items": items, "drop": drop,
             })
             .to_string();
             for b in inner.browsers.values() {
@@ -410,6 +416,7 @@ enum BrowserMsg {
     Interrupt { id: String, agent: String, session: String },
     Start { id: String, agent: String, tool: String, cwd: String },
     Handoff { id: String, agent: String, session: String, tool: String },
+    CancelQueued { id: String, agent: String, session: String, queue: String },
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -514,6 +521,21 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             }
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Handoff { id: cmd, session, tool });
+        }
+        BrowserMsg::CancelQueued { id, agent, session, queue } => {
+            if !safe_id(&queue) {
+                reply(&inner, browser, &id, "некорректный идентификатор очереди");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::CancelQueued { id: cmd, session, queue },
+            );
         }
     }
 }

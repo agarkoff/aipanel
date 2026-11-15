@@ -12,7 +12,7 @@ use std::{
 
 use aipanel_proto::{AgentMsg, Item, SessionInfo};
 use serde_json::{json, Value};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{
     config::OpenCodeCfg,
@@ -25,6 +25,15 @@ const RESULT_LIMIT: usize = 4_000;
 /// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
 const LAUNCH_GUARD: Duration = Duration::from_secs(25);
 
+/// Отменяет задачу чтения событий, когда наблюдение за сессией прекращается.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Файл в каталоге состояния opencode (`~/.local/state/opencode`).
 fn state_file(name: &str) -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
@@ -34,10 +43,149 @@ fn state_file(name: &str) -> PathBuf {
         .join(name)
 }
 
+fn endpoint(cfg: &OpenCodeCfg) -> Result<Endpoint, String> {
+    if let (Some(url), Some(password)) = (&cfg.url, &cfg.password) {
+        return Ok(Endpoint { url: url.trim_end_matches('/').to_owned(), password: password.clone() });
+    }
+    let path = state_file("service.json");
+    let text = std::fs::read_to_string(&path).map_err(|_| "сервис opencode не запущен".to_owned())?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    match (v["url"].as_str(), v["password"].as_str()) {
+        (Some(url), Some(password)) => Ok(Endpoint {
+            url: cfg.url.as_deref().unwrap_or(url).trim_end_matches('/').to_owned(),
+            password: cfg.password.clone().unwrap_or_else(|| password.to_owned()),
+        }),
+        _ => Err("в service.json opencode нет url или password".into()),
+    }
+}
+
+/// Состояние ленты: хэши доставленного и буферы потоковых частей.
+#[derive(Default)]
+struct Feed {
+    sent: HashMap<String, u64>,
+    reasoning: HashMap<(String, i64), String>,
+    text: HashMap<(String, i64), String>,
+}
+
+impl Feed {
+    fn item_hash(item: &Item) -> u64 {
+        let mut h = DefaultHasher::new();
+        (&item.kind, &item.text, &item.tool).hash(&mut h);
+        h.finish()
+    }
+
+    /// true, если элемент новый или его текст изменился.
+    fn changed(&mut self, item: &Item) -> bool {
+        let hash = Self::item_hash(item);
+        self.sent.insert(item.id.clone(), hash) != Some(hash)
+    }
+
+    /// Элемент из потока событий opencode: накапливает дельту и отдаёт
+    /// обновлённую часть с тем же id, что будет у итогового элемента ленты.
+    fn event(&mut self, ev: &Value) -> Option<Item> {
+        let kind = ev["type"].as_str()?;
+        let (prefix, item_kind, buffers) = if kind.starts_with("session.reasoning.") {
+            ("reasoning", "thinking", &mut self.reasoning)
+        } else if kind.starts_with("session.text.") {
+            ("text", "text", &mut self.text)
+        } else {
+            return None;
+        };
+        let data = &ev["data"];
+        let message = data["assistantMessageID"].as_str().filter(|m| !m.is_empty())?;
+        let ordinal = data["ordinal"].as_i64().unwrap_or(0);
+        let key = (message.to_owned(), ordinal);
+        let text = if kind.ends_with(".ended") {
+            data["text"].as_str().unwrap_or_default().to_owned()
+        } else if kind.ends_with(".delta") {
+            let buf = buffers.entry(key.clone()).or_default();
+            buf.push_str(data["delta"].as_str().unwrap_or_default());
+            buf.clone()
+        } else {
+            return None;
+        };
+        if kind.ends_with(".ended") {
+            buffers.remove(&key);
+        }
+        if text.trim().is_empty() {
+            return None;
+        }
+        let item = Item {
+            id: format!("{message}:{prefix}:{ordinal}"),
+            ts: ev["created"].as_i64().unwrap_or_else(crate::util::now_ms),
+            role: "assistant".into(),
+            kind: item_kind.into(),
+            text: truncate(&text, TEXT_LIMIT),
+            tool: None,
+        };
+        self.changed(&item).then_some(item)
+    }
+}
+
+/// Пересылает части рассуждений и текста этой сессии из потока событий opencode.
+async fn watch_events(
+    cfg: OpenCodeCfg,
+    client: reqwest::Client,
+    session: String,
+    tx: mpsc::Sender<Value>,
+) {
+    loop {
+        if let Ok(ep) = endpoint(&cfg) {
+            let req = client
+                .get(format!("{}/api/event", ep.url))
+                .basic_auth("opencode", Some(ep.password))
+                .header("Accept", "text/event-stream");
+            if let Ok(mut resp) = req.send().await {
+                if resp.status().is_success() {
+                    let mut buf = Vec::new();
+                    while let Some(line) = next_line(&mut resp, &mut buf).await {
+                        let Some(data) = line.strip_prefix("data:") else { continue };
+                        let Ok(v) = serde_json::from_str::<Value>(data.trim()) else { continue };
+                        let kind = v["type"].as_str().unwrap_or_default();
+                        if !(kind.starts_with("session.reasoning.") || kind.starts_with("session.text.")) {
+                            continue;
+                        }
+                        if !(kind.ends_with(".delta") || kind.ends_with(".ended")) {
+                            continue;
+                        }
+                        if v["data"]["sessionID"].as_str() != Some(session.as_str()) {
+                            continue;
+                        }
+                        if tx.send(v).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+/// Читает из потока одну строку SSE. `None` — поток закрылся.
+async fn next_line(resp: &mut reqwest::Response, buf: &mut Vec<u8>) -> Option<String> {
+    loop {
+        if let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line[..line.len() - 1]);
+            return Some(line.trim_end_matches('\r').to_owned());
+        }
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            _ => return None,
+        }
+    }
+}
+
 pub struct OpenCode {
     cfg: OpenCodeCfg,
     http: reqwest::Client,
+    /// Клиент без общего таймаута: поток событий живёт часами.
+    stream: reqwest::Client,
     launched: Mutex<HashMap<String, Instant>>,
+    /// Сообщения, показанные сразу после отправки, но ещё не замеченные наблюдением.
+    /// Когда наблюдение их увидит (или не найдёт в очереди), оно уберёт их из ленты.
+    optimistic: Mutex<HashMap<String, HashSet<String>>>,
 }
 
 struct Endpoint {
@@ -51,7 +199,17 @@ impl OpenCode {
             .timeout(Duration::from_secs(15))
             .build()
             .unwrap_or_default();
-        Self { cfg, http, launched: Mutex::new(HashMap::new()) }
+        let stream = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        Self {
+            cfg,
+            http,
+            stream,
+            launched: Mutex::new(HashMap::new()),
+            optimistic: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Сессии, открытые сейчас в окнах opencode, по отчётам плагина AiPanel
@@ -92,19 +250,7 @@ impl OpenCode {
     }
 
     fn endpoint(&self) -> Result<Endpoint, String> {
-        if let (Some(url), Some(password)) = (&self.cfg.url, &self.cfg.password) {
-            return Ok(Endpoint { url: url.trim_end_matches('/').to_owned(), password: password.clone() });
-        }
-        let path = state_file("service.json");
-        let text = std::fs::read_to_string(&path).map_err(|_| "сервис opencode не запущен".to_owned())?;
-        let v: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-        match (v["url"].as_str(), v["password"].as_str()) {
-            (Some(url), Some(password)) => Ok(Endpoint {
-                url: self.cfg.url.as_deref().unwrap_or(url).trim_end_matches('/').to_owned(),
-                password: self.cfg.password.clone().unwrap_or_else(|| password.to_owned()),
-            }),
-            _ => Err("в service.json opencode нет url или password".into()),
-        }
+        endpoint(&self.cfg)
     }
 
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, String> {
@@ -183,43 +329,121 @@ impl OpenCode {
     }
 
     /// Опрашивает ленту сессии и отправляет только изменившиеся элементы.
+    ///
+    /// Кроме самой ленты читается очередь сессии (`/inbox`): занятый opencode не
+    /// показывает отправленные ему сообщения, пока не закончит текущий ответ, и они
+    /// лежат в очереди. Без этого панель показывала бы только начало переписки.
+    ///
+    /// Параллельно читается поток событий opencode: рассуждения и текст приходят
+    /// туда по мере генерации, а не только после завершения шага. Запросы выбора
+    /// (разрешения и формы) опрашиваются вместе с лентой и приходят в панель, где
+    /// на них можно ответить, не переключаясь в окно opencode.
     pub async fn watch(&self, key: String, id: String, out: UnboundedSender<AgentMsg>) {
-        let mut sent: HashMap<String, u64> = HashMap::new();
+        let mut feed = Feed::default();
+        let mut queued: HashSet<String> = HashSet::new();
         let mut first = true;
+        let (tx, mut events) = mpsc::channel(256);
+        let _events = AbortOnDrop(tokio::spawn(watch_events(
+            self.cfg.clone(),
+            self.stream.clone(),
+            id.clone(),
+            tx,
+        )));
+        let mut tick = tokio::time::interval(Duration::from_millis(1500));
         loop {
-            let limit = if first { 100 } else { 20 };
-            match self.get(&format!("/api/session/{id}/message?limit={limit}&order=desc")).await {
-                Ok(v) => {
+            tokio::select! {
+                _ = tick.tick() => {
+                    let limit = if first { 100 } else { 20 };
                     let mut items = Vec::new();
-                    for m in v["data"].as_array().into_iter().flatten().rev() {
-                        convert(m, &mut items);
+                    let mut drop = Vec::new();
+                    // Хэши уже доставленных сообщений: очередь может ещё содержать
+                    // сообщение, которое уже попало в ленту.
+                    let mut delivered: HashSet<u64> = HashSet::new();
+                    match self.get(&format!("/api/session/{id}/message?limit={limit}&order=desc")).await {
+                        Ok(v) => {
+                            for m in v["data"].as_array().into_iter().flatten().rev() {
+                                if m["type"].as_str() == Some("user") {
+                                    if let Some(text) = m["text"].as_str().filter(|t| !t.trim().is_empty()) {
+                                        delivered.insert(text_hash(text));
+                                    }
+                                }
+                                convert(m, &mut items);
+                            }
+                            items.retain(|it| feed.changed(it));
+                        }
+                        Err(e) => {
+                            if first {
+                                items.push(Item {
+                                    id: "err-load".into(),
+                                    ts: crate::util::now_ms(),
+                                    role: "system".into(),
+                                    kind: "error".into(),
+                                    text: e,
+                                    tool: None,
+                                });
+                            }
+                        }
                     }
-                    items.retain(|it| {
-                        let mut h = DefaultHasher::new();
-                        (&it.kind, &it.text, &it.tool).hash(&mut h);
-                        let h = h.finish();
-                        sent.insert(it.id.clone(), h) != Some(h)
-                    });
-                    if first || !items.is_empty() {
-                        let _ = out.send(AgentMsg::History { session: key.clone(), reset: first, items });
+
+                    // Сообщения, показанные сразу после отправки: наблюдение должно
+                    // знать их id, чтобы убрать из ленты, если opencode успел
+                    // доставить их до первого опроса.
+                    if let Some(extra) = self
+                        .optimistic
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&id)
+                    {
+                        queued.extend(extra);
                     }
-                    first = false;
-                }
-                Err(e) => {
+
+                    let mut current: HashSet<String> = HashSet::new();
+                    if let Ok(v) = self.get(&format!("/api/session/{id}/inbox")).await {
+                        for item in queued_items(&v, &delivered) {
+                            current.insert(item.id.clone());
+                            // При первой отправке клиент очищает ленту, поэтому очередь
+                            // нужно прислать заново, даже если её элементы уже
+                            // показывались сразу после отправки.
+                            if first || !queued.contains(&item.id) {
+                                items.push(item);
+                            }
+                        }
+                    }
+                    for old in queued.difference(&current) {
+                        drop.push(old.clone());
+                    }
+                    queued = current;
                     if first {
-                        let items = vec![Item {
-                            id: "err-load".into(),
-                            ts: crate::util::now_ms(),
-                            role: "system".into(),
-                            kind: "error".into(),
-                            text: e,
-                            tool: None,
-                        }];
-                        let _ = out.send(AgentMsg::History { session: key.clone(), reset: true, items });
+                        // reset уже очищает ленту, отдельные удаления не нужны.
+                        drop.clear();
+                    }
+
+                    if first || !items.is_empty() || !drop.is_empty() {
+                        let _ = out.send(AgentMsg::History {
+                            session: key.clone(),
+                            reset: first,
+                            items,
+                            drop,
+                        });
+                        first = false;
+                    }
+                }
+                event = events.recv() => {
+                    let Some(event) = event else { break };
+                    // До первой ленты браузер ещё не получил reset: пропускаем.
+                    if first {
+                        continue;
+                    }
+                    if let Some(item) = feed.event(&event) {
+                        let _ = out.send(AgentMsg::History {
+                            session: key.clone(),
+                            reset: false,
+                            items: vec![item],
+                            drop: Vec::new(),
+                        });
                     }
                 }
             }
-            tokio::time::sleep(Duration::from_millis(1500)).await;
         }
     }
 
@@ -383,7 +607,9 @@ impl OpenCode {
         }
     }
 
-    pub async fn send(&self, id: &str, text: &str) -> Result<(), String> {
+    /// Отправляет сообщение. Возвращает элемент очереди, если opencode принял
+    /// сообщение, но ещё не отдал его в ленту (сессия занята).
+    pub async fn send(&self, id: &str, text: &str) -> Result<Option<Item>, String> {
         let active = self
             .get("/api/session/active")
             .await
@@ -394,18 +620,89 @@ impl OpenCode {
             self.apply_model(id).await;
         }
         if self.should_open_window(id, active).await {
-            return self.open_window(id, text).await;
+            self.open_window(id, text).await?;
+            return Ok(None);
         }
-        self.call(reqwest::Method::POST, &format!("/api/session/{id}/prompt"), Some(json!({ "text": text })))
+        let v = self
+            .call(
+                reqwest::Method::POST,
+                &format!("/api/session/{id}/prompt"),
+                Some(json!({ "text": text })),
+            )
+            .await?;
+        Ok(queued_from_prompt(&v, text))
+    }
+
+    /// Запоминает сообщение, уже показанное клиенту: наблюдение уберёт его из ленты,
+    /// когда opencode доставит сообщение или если его больше нет в очереди.
+    pub fn note_optimistic(&self, id: &str, item: &str) {
+        self.optimistic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id.to_owned())
+            .or_default()
+            .insert(item.to_owned());
+    }
+
+    /// Убирает сообщение из очереди, пока opencode его не отправил.
+    pub async fn cancel_queued(&self, id: &str, queue: &str) -> Result<(), String> {
+        self.call(reqwest::Method::DELETE, &format!("/api/session/{id}/inbox/{queue}"), None)
             .await
             .map(|_| ())
     }
+
 
     pub async fn interrupt(&self, id: &str) -> Result<(), String> {
         self.call(reqwest::Method::POST, &format!("/api/session/{id}/interrupt"), None)
             .await
             .map(|_| ())
     }
+}
+
+fn text_hash(text: &str) -> u64 {
+    let mut h = DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
+
+/// Элемент очереди из ответа `POST /prompt`: его показываем сразу, не дожидаясь,
+/// пока opencode отдаст сообщение в ленту.
+fn queued_from_prompt(v: &Value, text: &str) -> Option<Item> {
+    let d = &v["data"];
+    let id = d["id"].as_str()?;
+    Some(Item {
+        id: format!("queue:{id}"),
+        ts: d["time"]["created"].as_i64().unwrap_or_else(crate::util::now_ms),
+        role: "user".into(),
+        kind: "queued".into(),
+        text: truncate(d["payload"]["text"].as_str().unwrap_or(text), TEXT_LIMIT),
+        tool: None,
+    })
+}
+
+/// Сообщения из очереди сессии, которых ещё нет в ленте.
+fn queued_items(v: &Value, delivered: &HashSet<u64>) -> Vec<Item> {
+    let mut out = Vec::new();
+    for q in v["data"].as_array().into_iter().flatten() {
+        let (Some(qid), Some(text)) = (q["id"].as_str(), q["payload"]["text"].as_str()) else {
+            continue;
+        };
+        if q["type"].as_str() != Some("user")
+            || text.trim().is_empty()
+            || delivered.contains(&text_hash(text))
+        {
+            continue;
+        }
+        out.push(Item {
+            id: format!("queue:{qid}"),
+            ts: q["time"]["created"].as_i64().unwrap_or(0),
+            role: "user".into(),
+            kind: "queued".into(),
+            text: truncate(text, TEXT_LIMIT),
+            tool: None,
+        });
+    }
+    out
 }
 
 /// Дифф по входу инструмента, когда готового патча нет (например, write).
@@ -439,22 +736,33 @@ fn convert(m: &Value, out: &mut Vec<Item>) {
     match m["type"].as_str() {
         Some("user") => push("0".into(), "user", "text", truncate(m["text"].as_str().unwrap_or_default(), TEXT_LIMIT), None),
         Some("assistant") => {
+            // id частей совпадает с id потоковых событий opencode (`text:0`,
+            // `reasoning:0`), поэтому пришедший по потоку текст заменяется
+            // итоговым элементом, а не дублируется.
+            let mut texts = 0usize;
+            let mut thinks = 0usize;
             for (i, c) in m["content"].as_array().into_iter().flatten().enumerate() {
                 match c["type"].as_str() {
-                    Some("text") => push(
-                        i.to_string(),
-                        "assistant",
-                        "text",
-                        truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
-                        None,
-                    ),
-                    Some("reasoning") => push(
-                        i.to_string(),
-                        "assistant",
-                        "thinking",
-                        truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
-                        None,
-                    ),
+                    Some("text") => {
+                        push(
+                            format!("text:{texts}"),
+                            "assistant",
+                            "text",
+                            truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
+                            None,
+                        );
+                        texts += 1;
+                    }
+                    Some("reasoning") => {
+                        push(
+                            format!("reasoning:{thinks}"),
+                            "assistant",
+                            "thinking",
+                            truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
+                            None,
+                        );
+                        thinks += 1;
+                    }
                     Some("tool") => {
                         let name = c["name"].as_str();
                         let state = &c["state"];
@@ -514,6 +822,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn converts_messages() {
+        let mut items = Vec::new();
+        convert(&json!({"id":"m1","type":"user","time":{"created":5},"text":"hi"}), &mut items);
+        convert(
+            &json!({"id":"m2","type":"assistant","time":{"created":6},"content":[
+                {"type":"reasoning","text":"hm"},
+                {"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"ls"},"content":[{"type":"text","text":"a\nb"}]}},
+                {"type":"text","text":"done"}
+            ]}),
+            &mut items,
+        );
+        convert(&json!({"id":"m3","type":"idle","time":{"created":7},"outcome":"succeeded"}), &mut items);
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(
+            got,
+            [
+                ("m1:0", "text", "hi"),
+                ("m2:reasoning:0", "thinking", "hm"),
+                ("m2:1", "tool_use", "ls"),
+                ("m2:1:r", "tool_result", "a\nb"),
+                ("m2:text:0", "text", "done"),
+            ]
+        );
+    }
+
+    #[test]
     fn converts_edits_to_diffs() {
         let mut items = Vec::new();
         convert(
@@ -540,28 +874,63 @@ mod tests {
     }
 
     #[test]
-    fn converts_messages() {
-        let mut items = Vec::new();
-        convert(&json!({"id":"m1","type":"user","time":{"created":5},"text":"hi"}), &mut items);
-        convert(
-            &json!({"id":"m2","type":"assistant","time":{"created":6},"content":[
-                {"type":"reasoning","text":"hm"},
-                {"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"ls"},"content":[{"type":"text","text":"a\nb"}]}},
-                {"type":"text","text":"done"}
-            ]}),
-            &mut items,
-        );
-        convert(&json!({"id":"m3","type":"idle","time":{"created":7},"outcome":"succeeded"}), &mut items);
-        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str())).collect();
-        assert_eq!(
-            got,
-            [
-                ("m1:0", "text", "hi"),
-                ("m2:0", "thinking", "hm"),
-                ("m2:1", "tool_use", "ls"),
-                ("m2:1:r", "tool_result", "a\nb"),
-                ("m2:2", "text", "done"),
-            ]
-        );
+    fn streams_reasoning_and_text() {
+        let mut feed = Feed::default();
+        let ev = |ty: &str, delta: &str| {
+            json!({"type": ty, "created": 10, "data": {
+                "sessionID": "s", "assistantMessageID": "m", "ordinal": 0, "delta": delta
+            }})
+        };
+        let a = feed.event(&ev("session.reasoning.delta", "раз ")).unwrap();
+        assert_eq!(a.id, "m:reasoning:0");
+        assert_eq!(a.kind, "thinking");
+        assert_eq!(a.text, "раз ");
+        let b = feed.event(&ev("session.reasoning.delta", "два")).unwrap();
+        assert_eq!(b.text, "раз два");
+        // Пустая дельта не меняет текст — повторно не отправляется.
+        assert!(feed.event(&ev("session.reasoning.delta", "")).is_none());
+
+        let end = json!({"type":"session.reasoning.ended","created":12,"data":{
+            "sessionID":"s","assistantMessageID":"m","ordinal":0,"text":"итог"
+        }});
+        let c = feed.event(&end).unwrap();
+        assert_eq!(c.text, "итог");
+        assert!(!feed.reasoning.contains_key(&("m".to_owned(), 0)));
+
+        // Текст — отдельный вид, ordinal считается внутри своего вида.
+        let t = feed.event(&ev("session.text.delta", "ответ")).unwrap();
+        assert_eq!(t.id, "m:text:0");
+        assert_eq!(t.kind, "text");
+        assert_eq!(t.text, "ответ");
     }
+
+    #[test]
+    fn reads_queue_from_prompt_response() {
+        let v = json!({"data":{
+            "id":"msg_1","type":"user","delivery":"steer","time":{"created":5},
+            "payload":{"text":"привет"}
+        }});
+        let item = queued_from_prompt(&v, "запасной").unwrap();
+        assert_eq!(item.id, "queue:msg_1");
+        assert_eq!(item.kind, "queued");
+        assert_eq!(item.text, "привет");
+        assert_eq!(item.ts, 5);
+        assert!(queued_from_prompt(&json!({}), "x").is_none());
+    }
+
+    #[test]
+    fn converts_queue() {
+        let inbox = json!({"data":[
+            {"id":"q1","type":"user","time":{"created":5},"payload":{"text":"раз"}},
+            {"id":"q2","type":"user","time":{"created":6},"payload":{"text":"два"}},
+            {"id":"q3","type":"assistant","time":{"created":7},"payload":{}},
+            {"id":"q4","type":"user","time":{"created":8},"payload":{"text":"  "}},
+        ]});
+        let mut delivered = HashSet::new();
+        delivered.insert(text_hash("раз"));
+        let items = queued_items(&inbox, &delivered);
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(got, [("queue:q2", "queued", "два")]);
+    }
+
 }

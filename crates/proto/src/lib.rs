@@ -53,6 +53,10 @@ pub enum AgentMsg {
         /// `true` — клиент должен очистить ленту перед добавлением.
         reset: bool,
         items: Vec<Item>,
+        /// Идентификаторы элементов, которые нужно убрать из ленты (например,
+        /// сообщение из очереди opencode отправлено и стало обычным сообщением).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        drop: Vec<String>,
     },
     Result {
         id: String,
@@ -77,4 +81,6 @@ pub enum ServerMsg {
     Start { id: String, tool: String, cwd: String },
     /// Продолжить сессию `session` в другом инструменте `tool`.
     Handoff { id: String, session: String, tool: String },
+    /// Убрать сообщение `queue` из очереди opencode-сессии `session`.
+    CancelQueued { id: String, session: String, queue: String },
 }
