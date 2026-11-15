@@ -81,6 +81,14 @@ input, textarea, select {
 .sidebar header .link { margin-left: auto; }
 .conn { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
 .conn.on { background: var(--idle); }
+.user {
+  color: var(--muted);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .filter { margin: 0 14px 8px; width: auto; }
 .new-session {
   display: inline-flex;

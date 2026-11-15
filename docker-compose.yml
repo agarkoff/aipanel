@@ -4,8 +4,10 @@ services:
     image: aipanel-server
     restart: unless-stopped
     environment:
-      PANEL_PASSWORD: ${PANEL_PASSWORD:?set PANEL_PASSWORD in .env}
-      AGENT_TOKEN: ${AGENT_TOKEN:?set AGENT_TOKEN in .env}
+      PANEL_USERS: ${PANEL_USERS:-}
+      # Переходный режим: пока PANEL_USERS не задан, работают старые переменные.
+      PANEL_PASSWORD: ${PANEL_PASSWORD:-}
+      AGENT_TOKEN: ${AGENT_TOKEN:-}
     ports:
       # По умолчанию порт открыт только на самом хосте: снаружи панель должна быть за HTTPS-прокси.
       - "${PANEL_LISTEN:-127.0.0.1:8080}:8080"

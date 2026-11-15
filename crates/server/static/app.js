@@ -79,8 +79,16 @@ let histDraft = ''; // что было в поле до начала просм�
 
 async function boot() {
   const res = await fetch('/api/me');
-  if (res.status === 204) start();
-  else $('login').hidden = false;
+  if (!res.ok) {
+    $('login').hidden = false;
+    return;
+  }
+  const me = await res.json().catch(() => ({}));
+  if (me.user) {
+    $('user').textContent = me.user;
+    $('user').hidden = false;
+  }
+  start();
 }
 
 $('login').addEventListener('submit', async (e) => {
@@ -94,7 +102,7 @@ $('login').addEventListener('submit', async (e) => {
   if (res.ok) {
     $('password').value = '';
     $('login').hidden = true;
-    start();
+    boot();
   } else {
     $('login-error').textContent = (await res.text()) || 'Ошибка входа';
   }

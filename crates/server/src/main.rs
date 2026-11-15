@@ -56,17 +56,30 @@ struct AgentEntry {
 
 struct BrowserEntry {
     tx: mpsc::Sender<String>,
+    /// Пользователь, вошедший в этом браузере.
+    owner: String,
     /// (агент, сессия), ленту которой сейчас смотрит браузер.
     watching: Option<(String, String)>,
 }
 
+/// Команда браузера, ожидающая ответа агента.
+struct Pending {
+    browser: u64,
+    /// id команды в браузере.
+    id: String,
+    owner: String,
+    agent: String,
+}
+
 #[derive(Default)]
 struct Inner {
-    agents: BTreeMap<String, AgentEntry>,
+    /// Ключ — (пользователь, имя агента): одинаковые имена у разных пользователей не пересекаются.
+    agents: BTreeMap<(String, String), AgentEntry>,
     browsers: HashMap<u64, BrowserEntry>,
-    /// id команды на сервере -> (браузер, исходный id команды).
-    pending: HashMap<String, (u64, String)>,
-    tokens: VecDeque<String>,
+    /// id команды на сервере -> ожидающая её команда браузера.
+    pending: HashMap<String, Pending>,
+    /// Выданные cookie-токены: (токен, пользователь).
+    tokens: VecDeque<(String, String)>,
     next_id: u64,
     fail_window: Option<Instant>,
     fail_count: u32,
@@ -78,11 +91,12 @@ impl Inner {
         self.next_id
     }
 
-    fn agents_json(&self) -> String {
+    fn agents_json(&self, owner: &str) -> String {
         let agents: Vec<_> = self
             .agents
             .iter()
-            .map(|(name, a)| {
+            .filter(|((o, _), _)| o == owner)
+            .map(|((_, name), a)| {
                 json!({
                     "name": name,
                     "online": a.tx.is_some(),
@@ -96,40 +110,66 @@ impl Inner {
     }
 
     fn broadcast_agents(&self) {
-        let msg = self.agents_json();
+        // Список агентов у каждого пользователя свой, поэтому JSON собирается на владельца.
+        let mut sent: HashMap<&str, String> = HashMap::new();
         for b in self.browsers.values() {
+            let msg = sent
+                .entry(b.owner.as_str())
+                .or_insert_with(|| self.agents_json(&b.owner));
             let _ = b.tx.try_send(msg.clone());
         }
     }
 
-    fn watchers(&self, agent: &str, session: &str) -> usize {
+    fn watchers(&self, owner: &str, agent: &str, session: &str) -> usize {
         self.browsers
             .values()
-            .filter(|b| matches!(&b.watching, Some((a, s)) if a == agent && s == session))
+            .filter(|b| {
+                b.owner == owner && matches!(&b.watching, Some((a, s)) if a == agent && s == session)
+            })
             .count()
     }
 
-    fn to_agent(&self, agent: &str, msg: ServerMsg) -> bool {
-        match self.agents.get(agent).and_then(|a| a.tx.as_ref()) {
+    /// Браузеру можно работать только с агентами своего пользователя.
+    fn browser_owns(&self, browser: u64, agent: &str) -> bool {
+        self.browsers
+            .get(&browser)
+            .is_some_and(|b| self.agents.contains_key(&(b.owner.clone(), agent.to_owned())))
+    }
+
+    fn to_agent(&self, owner: &str, agent: &str, msg: ServerMsg) -> bool {
+        match self
+            .agents
+            .get(&(owner.to_owned(), agent.to_owned()))
+            .and_then(|a| a.tx.as_ref())
+        {
             Some(tx) => tx.try_send(msg).is_ok(),
             None => false,
         }
     }
 
     fn unwatch(&mut self, browser: u64) {
-        let prev = self.browsers.get_mut(&browser).and_then(|b| b.watching.take());
-        if let Some((agent, session)) = prev {
-            if self.watchers(&agent, &session) == 0 {
-                self.to_agent(&agent, ServerMsg::Unwatch { session });
-            }
+        let Some(b) = self.browsers.get_mut(&browser) else {
+            return;
+        };
+        let owner = b.owner.clone();
+        let Some((agent, session)) = b.watching.take() else {
+            return;
+        };
+        if self.watchers(&owner, &agent, &session) == 0 {
+            self.to_agent(&owner, &agent, ServerMsg::Unwatch { session });
         }
     }
 }
 
+struct User {
+    password: String,
+    /// Токен, с которым подключаются агенты этого пользователя.
+    token: String,
+}
+
 struct App {
     inner: Mutex<Inner>,
-    password: String,
-    agent_token: String,
+    users: BTreeMap<String, User>,
 }
 
 impl App {
@@ -137,11 +177,28 @@ impl App {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn authed(&self, headers: &HeaderMap) -> bool {
-        match cookie(headers, COOKIE) {
-            Some(tok) => self.lock().tokens.iter().any(|t| ct_eq(t.as_bytes(), tok.as_bytes())),
-            None => false,
+    /// Пользователь по cookie браузера.
+    fn authed(&self, headers: &HeaderMap) -> Option<String> {
+        let tok = cookie(headers, COOKIE)?;
+        let inner = self.lock();
+        let mut found = None;
+        for (token, user) in &inner.tokens {
+            if ct_eq(token.as_bytes(), tok.as_bytes()) {
+                found = Some(user.clone());
+            }
         }
+        found
+    }
+
+    /// Пользователь по токену агента.
+    fn user_for_token(&self, token: &str) -> Option<String> {
+        let mut found = None;
+        for (name, user) in &self.users {
+            if ct_eq(user.token.as_bytes(), token.as_bytes()) {
+                found = Some(name.clone());
+            }
+        }
+        found
     }
 }
 
@@ -224,15 +281,23 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json
             return (StatusCode::TOO_MANY_REQUESTS, "слишком много попыток, подождите минуту").into_response();
         }
     }
-    if !ct_eq(body.password.as_bytes(), app.password.as_bytes()) {
+    // Вход по одному полю: пользователь определяется по паролю. Перебираем всех,
+    // чтобы время ответа не зависело от порядка пользователей в конфиге.
+    let mut user = None;
+    for (name, u) in &app.users {
+        if ct_eq(body.password.as_bytes(), u.password.as_bytes()) {
+            user = Some(name.clone());
+        }
+    }
+    let Some(user) = user else {
         app.lock().fail_count += 1;
         tokio::time::sleep(Duration::from_millis(700)).await;
         return (StatusCode::UNAUTHORIZED, "неверный пароль").into_response();
-    }
+    };
     let token = random_token();
     {
         let mut inner = app.lock();
-        inner.tokens.push_back(token.clone());
+        inner.tokens.push_back((token.clone(), user));
         while inner.tokens.len() > MAX_TOKENS {
             inner.tokens.pop_front();
         }
@@ -251,7 +316,7 @@ async fn login(State(app): State<Arc<App>>, headers: HeaderMap, Json(body): Json
 
 async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     if let Some(tok) = cookie(&headers, COOKIE) {
-        app.lock().tokens.retain(|t| t != tok);
+        app.lock().tokens.retain(|(t, _)| t != tok);
     }
     (
         StatusCode::NO_CONTENT,
@@ -260,26 +325,25 @@ async fn logout(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
         .into_response()
 }
 
-async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> StatusCode {
-    if app.authed(&headers) {
-        StatusCode::NO_CONTENT
-    } else {
-        StatusCode::UNAUTHORIZED
+async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
+    match app.authed(&headers) {
+        Some(user) => Json(json!({ "user": user })).into_response(),
+        None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }
 
 // ---------------------------------------------------------------- агент
 
 async fn agent_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    let ok = header_str(&headers, "authorization")
+    let owner = header_str(&headers, "authorization")
         .and_then(|v| v.strip_prefix("Bearer "))
-        .is_some_and(|t| ct_eq(t.as_bytes(), app.agent_token.as_bytes()));
-    if !ok {
+        .and_then(|t| app.user_for_token(t));
+    let Some(owner) = owner else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     ws.max_message_size(8 << 20)
         .max_frame_size(8 << 20)
-        .on_upgrade(move |socket| agent_conn(app, socket))
+        .on_upgrade(move |socket| agent_conn(app, owner, socket))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -291,7 +355,7 @@ fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-async fn agent_conn(app: Arc<App>, socket: WebSocket) {
+async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
 
     let hello = tokio::time::timeout(Duration::from_secs(15), stream.next()).await;
@@ -304,6 +368,7 @@ async fn agent_conn(app: Arc<App>, socket: WebSocket) {
     };
 
     let (tx, mut rx) = mpsc::channel::<ServerMsg>(256);
+    let key = (owner.clone(), name.clone());
     let conn = {
         let mut inner = app.lock();
         let conn = inner.id();
@@ -311,6 +376,7 @@ async fn agent_conn(app: Arc<App>, socket: WebSocket) {
         let mut watched: Vec<String> = inner
             .browsers
             .values()
+            .filter(|b| b.owner == owner)
             .filter_map(|b| b.watching.as_ref())
             .filter(|(a, _)| *a == name)
             .map(|(_, s)| s.clone())
@@ -320,15 +386,15 @@ async fn agent_conn(app: Arc<App>, socket: WebSocket) {
         for session in watched {
             let _ = tx.try_send(ServerMsg::Watch { session });
         }
-        let sessions = inner.agents.remove(&name).map(|a| a.sessions).unwrap_or_default();
+        let sessions = inner.agents.remove(&key).map(|a| a.sessions).unwrap_or_default();
         inner.agents.insert(
-            name.clone(),
+            key.clone(),
             AgentEntry { conn, tx: Some(tx), os, version, sessions },
         );
         inner.broadcast_agents();
         conn
     };
-    eprintln!("agent connected: {name}");
+    eprintln!("agent connected: {name} ({owner})");
 
     let mut ping = tokio::time::interval(PING_EVERY);
     let mut last_rx = Instant::now();
@@ -338,7 +404,7 @@ async fn agent_conn(app: Arc<App>, socket: WebSocket) {
                 Some(Ok(Message::Text(t))) => {
                     last_rx = Instant::now();
                     if let Ok(msg) = serde_json::from_str::<AgentMsg>(t.as_str()) {
-                        on_agent_msg(&app, &name, msg);
+                        on_agent_msg(&app, &owner, &name, msg);
                     }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -362,22 +428,22 @@ async fn agent_conn(app: Arc<App>, socket: WebSocket) {
     }
 
     let mut inner = app.lock();
-    if let Some(a) = inner.agents.get_mut(&name) {
+    if let Some(a) = inner.agents.get_mut(&key) {
         if a.conn == conn {
             a.tx = None;
             inner.broadcast_agents();
-            eprintln!("agent disconnected: {name}");
+            eprintln!("agent disconnected: {name} ({owner})");
         }
     }
 }
 
-fn on_agent_msg(app: &App, agent: &str, msg: AgentMsg) {
+fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
     let mut inner = app.lock();
     match msg {
         AgentMsg::Hello { .. } => {}
         AgentMsg::Sessions { mut sessions } => {
             sessions.truncate(MAX_SESSIONS_PER_AGENT);
-            if let Some(a) = inner.agents.get_mut(agent) {
+            if let Some(a) = inner.agents.get_mut(&(owner.to_owned(), agent.to_owned())) {
                 a.sessions = sessions;
             }
             inner.broadcast_agents();
@@ -389,7 +455,9 @@ fn on_agent_msg(app: &App, agent: &str, msg: AgentMsg) {
             })
             .to_string();
             for b in inner.browsers.values() {
-                if matches!(&b.watching, Some((a, s)) if a == agent && *s == session) {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
                     let _ = b.tx.try_send(text.clone());
                 }
             }
@@ -401,18 +469,27 @@ fn on_agent_msg(app: &App, agent: &str, msg: AgentMsg) {
             })
             .to_string();
             for b in inner.browsers.values() {
-                if matches!(&b.watching, Some((a, s)) if a == agent && *s == session) {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
                     let _ = b.tx.try_send(text.clone());
                 }
             }
         }
         AgentMsg::Result { id, ok, error, session } => {
-            if let Some((browser, orig)) = inner.pending.remove(&id) {
-                if let Some(b) = inner.browsers.get(&browser) {
-                    let _ = b.tx.try_send(
-                        json!({ "t": "result", "id": orig, "ok": ok, "error": error, "session": session })
-                            .to_string(),
-                    );
+            // Отвечать на команду может только тот агент, которому она отправлена.
+            let allowed = inner
+                .pending
+                .get(&id)
+                .is_some_and(|p| p.owner == owner && p.agent == agent);
+            if allowed {
+                if let Some(p) = inner.pending.remove(&id) {
+                    if let Some(b) = inner.browsers.get(&p.browser) {
+                        let _ = b.tx.try_send(
+                            json!({ "t": "result", "id": p.id, "ok": ok, "error": error, "session": session })
+                                .to_string(),
+                        );
+                    }
                 }
             }
         }
@@ -449,24 +526,24 @@ enum BrowserMsg {
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
-    if !app.authed(&headers) {
+    let Some(owner) = app.authed(&headers) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
+    };
     if !origin_ok(&headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
     ws.max_message_size(1 << 20)
-        .on_upgrade(move |socket| browser_conn(app, socket))
+        .on_upgrade(move |socket| browser_conn(app, owner, socket))
 }
 
-async fn browser_conn(app: Arc<App>, socket: WebSocket) {
+async fn browser_conn(app: Arc<App>, owner: String, socket: WebSocket) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::channel::<String>(512);
     let id = {
         let mut inner = app.lock();
         let id = inner.id();
-        let _ = tx.try_send(inner.agents_json());
-        inner.browsers.insert(id, BrowserEntry { tx, watching: None });
+        let _ = tx.try_send(inner.agents_json(&owner));
+        inner.browsers.insert(id, BrowserEntry { tx, owner, watching: None });
         id
     };
 
@@ -503,19 +580,25 @@ async fn browser_conn(app: Arc<App>, socket: WebSocket) {
     let mut inner = app.lock();
     inner.unwatch(id);
     inner.browsers.remove(&id);
-    inner.pending.retain(|_, (b, _)| *b != id);
+    inner.pending.retain(|_, p| p.browser != id);
 }
 
 fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
     let mut inner = app.lock();
     match msg {
         BrowserMsg::Watch { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
             inner.unwatch(browser);
             if let Some(b) = inner.browsers.get_mut(&browser) {
                 b.watching = Some((agent.clone(), session.clone()));
             }
             // Отправляем всегда: агент в ответ пришлёт свежую ленту целиком.
-            inner.to_agent(&agent, ServerMsg::Watch { session });
+            inner.to_agent(&owner, &agent, ServerMsg::Watch { session });
         }
         BrowserMsg::Unwatch => inner.unwatch(browser),
         BrowserMsg::Send { id, agent, session, text } => {
@@ -605,8 +688,16 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
 }
 
 fn command(inner: &mut Inner, browser: u64, orig_id: String, agent: &str, cmd: String, msg: ServerMsg) {
-    if inner.to_agent(agent, msg) {
-        inner.pending.insert(cmd, (browser, orig_id));
+    if !inner.browser_owns(browser, agent) {
+        reply(inner, browser, &orig_id, "нет доступа к этому агенту");
+        return;
+    }
+    let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+        reply(inner, browser, &orig_id, "соединение с браузером потеряно");
+        return;
+    };
+    if inner.to_agent(&owner, agent, msg) {
+        inner.pending.insert(cmd, Pending { browser, id: orig_id, owner, agent: agent.to_owned() });
     } else {
         reply(inner, browser, &orig_id, "агент не в сети");
     }
@@ -620,14 +711,97 @@ fn reply(inner: &Inner, browser: u64, id: &str, error: &str) {
 
 // ---------------------------------------------------------------- запуск
 
-fn required_env(name: &str) -> String {
-    match std::env::var(name) {
-        Ok(v) if v.trim().len() >= 8 => v.trim().to_owned(),
-        _ => {
-            eprintln!("{name} is not set or shorter than 8 characters; refusing to start");
+#[derive(Deserialize)]
+struct UserConfig {
+    password: String,
+    token: String,
+}
+
+/// Имя пользователя в переходном режиме, пока не задан `PANEL_USERS`.
+const LEGACY_USER: &str = "owner";
+
+/// Разбирает `PANEL_USERS`: JSON-объект «имя -> пароль и токен агента».
+fn parse_users(raw: &str) -> Result<BTreeMap<String, User>, String> {
+    if raw.trim().is_empty() {
+        return Err(
+            "PANEL_USERS is not set; expecting JSON like \
+             {\"alice\":{\"password\":\"...\",\"token\":\"...\"}}"
+                .into(),
+        );
+    }
+    let parsed: BTreeMap<String, UserConfig> =
+        serde_json::from_str(raw).map_err(|e| format!("PANEL_USERS is not valid JSON: {e}"))?;
+    if parsed.is_empty() {
+        return Err("PANEL_USERS has no users".into());
+    }
+    let mut users: BTreeMap<String, User> = BTreeMap::new();
+    let mut tokens: HashMap<String, String> = HashMap::new();
+    for (name, cfg) in parsed {
+        if !valid_name(&name) {
+            return Err(format!("PANEL_USERS: invalid user name {name:?}"));
+        }
+        let password = cfg.password.trim().to_owned();
+        let token = cfg.token.trim().to_owned();
+        if password.len() < 8 {
+            return Err(format!("PANEL_USERS: password of {name} is shorter than 8 characters"));
+        }
+        if token.len() < 8 {
+            return Err(format!("PANEL_USERS: token of {name} is shorter than 8 characters"));
+        }
+        // Вход идёт по одному паролю, поэтому по нему должен находиться ровно один пользователь.
+        if let Some((other, _)) = users.iter().find(|(_, u)| u.password == password) {
+            return Err(format!("PANEL_USERS: {name} and {other} have the same password"));
+        }
+        if let Some(other) = tokens.insert(token.clone(), name.clone()) {
+            return Err(format!("PANEL_USERS: {name} and {other} have the same agent token"));
+        }
+        users.insert(name, User { password, token });
+    }
+    Ok(users)
+}
+
+fn load_users() -> BTreeMap<String, User> {
+    let raw = std::env::var("PANEL_USERS").ok();
+    let password = std::env::var("PANEL_PASSWORD").ok();
+    let token = std::env::var("AGENT_TOKEN").ok();
+    match users_from_env(raw.as_deref(), password.as_deref(), token.as_deref()) {
+        Ok((users, legacy)) => {
+            if legacy {
+                eprintln!(
+                    "PANEL_USERS is not set; legacy PANEL_PASSWORD and AGENT_TOKEN are used as user {LEGACY_USER:?}"
+                );
+            }
+            users
+        }
+        Err(e) => {
+            eprintln!("{e}; refusing to start");
             std::process::exit(2);
         }
     }
+}
+
+/// Список пользователей из окружения. Пока `PANEL_USERS` не задан, поддерживается
+/// старая схема с одним паролем и одним токеном — чтобы обновление сервера не
+/// останавливало панель до правки конфигурации на хостинге.
+fn users_from_env(
+    panel_users: Option<&str>,
+    password: Option<&str>,
+    token: Option<&str>,
+) -> Result<(BTreeMap<String, User>, bool), String> {
+    if let Some(raw) = panel_users.filter(|v| !v.trim().is_empty()) {
+        return parse_users(raw).map(|users| (users, false));
+    }
+    let password = password.unwrap_or("").trim();
+    let token = token.unwrap_or("").trim();
+    if password.len() >= 8 && token.len() >= 8 {
+        let mut users: BTreeMap<String, User> = BTreeMap::new();
+        users.insert(
+            LEGACY_USER.to_owned(),
+            User { password: password.to_owned(), token: token.to_owned() },
+        );
+        return Ok((users, true));
+    }
+    parse_users(panel_users.unwrap_or_default()).map(|users| (users, false))
 }
 
 async fn shutdown_signal() {
@@ -669,8 +843,7 @@ async fn main() {
     }
     let app = Arc::new(App {
         inner: Mutex::new(Inner::default()),
-        password: required_env("PANEL_PASSWORD"),
-        agent_token: required_env("AGENT_TOKEN"),
+        users: load_users(),
     });
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
 
@@ -710,5 +883,148 @@ async fn main() {
             }
         }
         _ = shutdown_signal() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_users() {
+        let raw = r#"{
+            "alice": {"password": "alice-pass", "token": "alice-token"},
+            "bob": {"password": "bob-pass", "token": "bob-token"}
+        }"#;
+        let users = parse_users(raw).unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users["alice"].password, "alice-pass");
+        assert_eq!(users["bob"].token, "bob-token");
+    }
+
+    #[test]
+    fn rejects_invalid_config() {
+        assert!(parse_users("").is_err());
+        assert!(parse_users("[]").is_err());
+        assert!(parse_users("{}").is_err());
+        assert!(parse_users(r#"{"": {"password": "long-enough", "token": "0123456789"}}"#).is_err());
+        assert!(parse_users(r#"{"a": {"password": "short", "token": "0123456789"}}"#).is_err());
+        assert!(parse_users(r#"{"a": {"password": "long-enough", "token": "short"}}"#).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_password_or_token() {
+        let same_password = r#"{
+            "alice": {"password": "same-pass", "token": "alice-token"},
+            "bob": {"password": "same-pass", "token": "bob-token"}
+        }"#;
+        assert!(parse_users(same_password).is_err());
+
+        let same_token = r#"{
+            "alice": {"password": "alice-pass", "token": "same-token"},
+            "bob": {"password": "bob-pass", "token": "same-token"}
+        }"#;
+        assert!(parse_users(same_token).is_err());
+    }
+
+    #[test]
+    fn panel_users_wins_over_legacy_credentials() {
+        let panel = r#"{"alice":{"password":"alice-pass","token":"alice-token"}}"#;
+        let (users, legacy) =
+            users_from_env(Some(panel), Some("legacy-pass"), Some("legacy-token")).unwrap();
+        assert!(!legacy);
+        assert!(users.contains_key("alice"));
+        assert!(!users.contains_key(LEGACY_USER));
+    }
+
+    #[test]
+    fn falls_back_to_legacy_credentials() {
+        let (users, legacy) =
+            users_from_env(None, Some("legacy-pass"), Some("legacy-token")).unwrap();
+        assert!(legacy);
+        assert_eq!(users[LEGACY_USER].password, "legacy-pass");
+        assert_eq!(users[LEGACY_USER].token, "legacy-token");
+    }
+
+    fn entry() -> AgentEntry {
+        AgentEntry {
+            conn: 1,
+            tx: None,
+            os: "linux".into(),
+            version: "0.1".into(),
+            sessions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn agents_json_is_scoped_to_owner() {
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), entry());
+        inner.agents.insert(("bob".into(), "pc".into()), entry());
+
+        let json: serde_json::Value = serde_json::from_str(&inner.agents_json("alice")).unwrap();
+        let agents = json["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["name"], "pc");
+    }
+
+    #[test]
+    fn browser_owns_only_its_agents() {
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "alice-pc".into()), entry());
+        inner.agents.insert(("bob".into(), "bob-pc".into()), entry());
+        let (tx, _rx) = mpsc::channel::<String>(1);
+        inner.browsers.insert(
+            1,
+            BrowserEntry { tx, owner: "alice".into(), watching: None },
+        );
+
+        assert!(inner.browser_owns(1, "alice-pc"));
+        assert!(!inner.browser_owns(1, "bob-pc"));
+        assert!(!inner.browser_owns(2, "alice-pc"));
+        // Одинаковое имя агента у разных пользователей не считается чужим.
+        inner.agents.insert(("bob".into(), "alice-pc".into()), entry());
+        assert!(inner.browser_owns(1, "alice-pc"));
+    }
+
+    #[test]
+    fn agent_cannot_answer_foreign_command() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(
+            1,
+            BrowserEntry { tx, owner: "alice".into(), watching: None },
+        );
+        inner.pending.insert(
+            "srv:1".into(),
+            Pending {
+                browser: 1,
+                id: "x".into(),
+                owner: "alice".into(),
+                agent: "pc".into(),
+            },
+        );
+        let app = App {
+            inner: Mutex::new(inner),
+            users: BTreeMap::new(),
+        };
+
+        on_agent_msg(
+            &app,
+            "bob",
+            "pc",
+            AgentMsg::Result { id: "srv:1".into(), ok: true, error: None, session: None },
+        );
+        assert!(rx.try_recv().is_err(), "чужой агент получил ответ браузеру");
+        assert_eq!(app.lock().pending.len(), 1, "ответ чужого агента снял ожидание");
+
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Result { id: "srv:1".into(), ok: true, error: None, session: None },
+        );
+        assert!(rx.try_recv().unwrap().contains("\"id\":\"x\""));
+        assert!(app.lock().pending.is_empty());
     }
 }

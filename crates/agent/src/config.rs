@@ -7,7 +7,7 @@ use serde::Deserialize;
 pub struct Config {
     /// Адрес панели, например `wss://panel.example.com/agent`.
     pub server: String,
-    /// Общий секрет агента (AGENT_TOKEN на сервере).
+    /// Токен пользователя из PANEL_USERS на сервере; по нему сервер определяет владельца агента.
     pub token: String,
     /// Имя машины в панели. По умолчанию — имя хоста.
     pub name: String,
