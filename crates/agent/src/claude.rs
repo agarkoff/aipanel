@@ -361,7 +361,7 @@ impl Claude {
 
     /// Завершает сессию, открытую в терминале или выполняемую фоновым процессом,
     /// и ждёт, пока процесс завершится.
-    async fn close(&self, sid: &str) -> Result<(), String> {
+    pub(crate) async fn close(&self, sid: &str) -> Result<(), String> {
         let pid = self.lock().known.get(sid).and_then(|k| k.pid);
         if let Some(pid) = pid {
             crate::platform::kill_pid(pid);

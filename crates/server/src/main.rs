@@ -708,6 +708,8 @@ enum BrowserMsg {
         #[serde(default)]
         close: bool,
     },
+    /// Закрыть окно консоли сессии, ничего не удаляя.
+    Close { id: String, agent: String, session: String },
     /// Попросить у агента команды сессии для списка, который открывается по `/`.
     Commands { agent: String, session: String },
     /// Попросить у агента модели для окна «Новая сессия».
@@ -914,6 +916,10 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
         BrowserMsg::Delete { id, agent, session, close } => {
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Delete { id: cmd, session, close });
+        }
+        BrowserMsg::Close { id, agent, session } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Close { id: cmd, session });
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
             if !safe_id(&prompt) {

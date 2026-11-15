@@ -373,6 +373,9 @@ pub enum ServerMsg {
         #[serde(default)]
         close: bool,
     },
+    /// Закрыть сессию `session`: завершить её окно консоли или фоновый процесс,
+    /// ничего не удаляя. Переписка остаётся в списке и продолжается по `--resume`.
+    Close { id: String, session: String },
     /// Ответить на запрос opencode `prompt`: разрешение (`decision`), форма
     /// (`answer`) или отмена формы (`cancel`).
     PromptReply {

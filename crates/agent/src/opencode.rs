@@ -809,7 +809,7 @@ impl OpenCode {
 
     /// Закрывает окна opencode с сессией `id` и прерывает её ход, затем ждёт,
     /// пока окна завершатся и сессия перестанет выполняться.
-    async fn close(&self, id: &str) -> Result<(), String> {
+    pub(crate) async fn close(&self, id: &str) -> Result<(), String> {
         let pids = window_pids(id);
         for &pid in &pids {
             crate::platform::kill_pid(pid);

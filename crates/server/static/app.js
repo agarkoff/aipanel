@@ -69,6 +69,8 @@ let cancelQueuedId = null;
 // пока агент не ответит, чтобы ошибку было видно.
 let deleteId = null;
 let deleteRequest = null;
+// Закрытие консоли сессии без подтверждения: id команд, ожидающих ответа.
+const closeIds = new Set();
 // Прерывание хода: id команды, чтобы показать результат именно для неё.
 let interruptId = null;
 // Запросы opencode, ожидающие ответа: разрешения и формы с вариантами.
@@ -229,6 +231,7 @@ function onMessage(msg) {
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
     else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
     else if (deleteId && msg.id === deleteId) onDeleteResult(msg);
+    else if (closeIds.has(msg.id)) onCloseResult(msg);
     else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
     else if (modelSet && msg.id === modelSet.id) onModelResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
@@ -282,8 +285,8 @@ function renderSessions() {
       );
       btn.addEventListener('click', () => select(a.name, s.key));
 
-      const swap = el('span', 'swipe-delete', 'Удалить');
-      swap.setAttribute('aria-hidden', 'true');
+      const action = el('span', 'swipe-action close', 'Закрыть');
+      action.setAttribute('aria-hidden', 'true');
 
       // На компьютере сессия удаляется крестиком, на телефоне — смахиванием влево.
       const del = el('button', 'session-delete', '×');
@@ -295,8 +298,11 @@ function renderSessions() {
         askDelete(a.name, s);
       });
 
-      row.append(swap, btn, del);
-      attachSwipe(row, btn, () => askDelete(a.name, s));
+      row.append(action, btn, del);
+      attachSwipe(row, btn, action, {
+        onClose: () => askClose(a.name, s),
+        onDelete: () => askDelete(a.name, s),
+      });
       box.append(row);
     }
   }
@@ -304,11 +310,14 @@ function renderSessions() {
 
 $('filter').addEventListener('input', renderSessions);
 
-// Смахивание влево по строке сессии — жест телефона. Строка едет за пальцем,
-// а если отпустить дальше порога, открывается подтверждение удаления.
-function attachSwipe(row, btn, onDelete) {
-  const LIMIT = 96;
-  const THRESHOLD = 72;
+// Смахивание влево по строке сессии — жест телефона. Строка едет за пальцем
+// и показывает, что будет при отпускании: до порога — синяя «Закрыть»
+// (консоль сессии закрывается сразу, без подтверждения), дальше — красная
+// «Удалить» с окном подтверждения.
+function attachSwipe(row, btn, action, actions) {
+  const CLOSE_AT = 88;
+  const DELETE_AT = 168;
+  const LIMIT = DELETE_AT + 16;
   let startX = 0;
   let startY = 0;
   let dx = 0;
@@ -316,6 +325,12 @@ function attachSwipe(row, btn, onDelete) {
   let tracking = false;
   let horizontal = false;
   let swiped = false;
+  const showAction = (dist) => {
+    const del = dist >= DELETE_AT;
+    action.textContent = del ? 'Удалить' : 'Закрыть';
+    action.className = del ? 'swipe-action delete' : 'swipe-action close';
+  };
+  showAction(0);
   row.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' || e.button !== 0) return;
     startX = e.clientX;
@@ -325,6 +340,7 @@ function attachSwipe(row, btn, onDelete) {
     tracking = true;
     horizontal = false;
     swiped = false;
+    showAction(0);
     row.classList.add('dragging');
   });
   row.addEventListener('pointermove', (e) => {
@@ -342,7 +358,9 @@ function attachSwipe(row, btn, onDelete) {
       horizontal = true;
       row.setPointerCapture(e.pointerId);
     }
-    btn.style.transform = `translateX(${Math.max(-LIMIT, Math.min(0, dx))}px)`;
+    const shift = Math.max(-LIMIT, Math.min(0, dx));
+    btn.style.transform = `translateX(${shift}px)`;
+    showAction(-shift);
     e.preventDefault();
   });
   const end = () => {
@@ -350,17 +368,21 @@ function attachSwipe(row, btn, onDelete) {
     tracking = false;
     row.classList.remove('dragging');
     btn.style.transform = '';
-    if (horizontal && Math.abs(dx) > 8) {
+    showAction(0);
+    const dist = Math.min(LIMIT, Math.max(0, -dx));
+    if (horizontal && dist > 8) {
       swiped = true;
       // Клик после свайпа не должен открыть сессию.
       setTimeout(() => {
         swiped = false;
       }, 400);
     }
-    if (horizontal && dx <= -THRESHOLD) {
+    if (horizontal && dist >= DELETE_AT) {
       // Открываем окно после возможного click: иначе касание, завершившее
       // свайп, попало бы в затемнение и сразу закрыло подтверждение.
-      setTimeout(onDelete, 0);
+      setTimeout(actions.onDelete, 0);
+    } else if (horizontal && dist >= CLOSE_AT) {
+      actions.onClose();
     }
     horizontal = false;
   };
@@ -370,6 +392,7 @@ function attachSwipe(row, btn, onDelete) {
     horizontal = false;
     row.classList.remove('dragging');
     btn.style.transform = '';
+    showAction(0);
   });
   row.addEventListener(
     'click',
@@ -380,6 +403,25 @@ function attachSwipe(row, btn, onDelete) {
     },
     true,
   );
+}
+
+// ------------------------------------------------------------ закрытие консоли
+
+// Закрывает окно консоли сессии на компьютере (или её фоновый процесс),
+// не удаляя переписку. Подтверждения нет: жест уже показал, что произойдёт.
+function askClose(agent, session) {
+  const id = String(++cmdSeq);
+  if (!send({ t: 'close', id, agent, session: session.key })) {
+    setHint('Нет соединения с сервером.', true);
+    return;
+  }
+  closeIds.add(id);
+  setHint(`Закрываем консоль «${session.title || session.key}»…`);
+}
+
+function onCloseResult(msg) {
+  closeIds.delete(msg.id);
+  setHint(msg.ok ? 'Консоль закрыта.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
 }
 
 // ------------------------------------------------------------ удаление сессии

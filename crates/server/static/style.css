@@ -138,7 +138,7 @@ input, textarea, select {
 .session-row {
   position: relative;
   overflow: hidden;
-  background: var(--wait);
+  background: var(--accent);
   touch-action: pan-y;
 }
 .session {
@@ -160,18 +160,19 @@ input, textarea, select {
 .session-row .session { touch-action: pan-y; }
 .session:hover { background: var(--bg); }
 .session.active { background: var(--user); }
-.swipe-delete {
+.swipe-action {
   position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 96px;
+  inset: 0;
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-end;
+  padding: 0 14px;
   color: #fff;
   font-size: 13px;
+  font-weight: 600;
+  background: var(--accent);
 }
+.swipe-action.delete { background: var(--wait); }
 .session-delete {
   display: none;
   position: absolute;
