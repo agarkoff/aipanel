@@ -701,8 +701,11 @@ function applyHistory(msg) {
     }
     nodes.set(item.id, node);
   }
-  if (msg.reset || stick) feed.scrollTop = feed.scrollHeight;
+  // Закреп показываем до прокрутки в конец: полоса закрепа отнимает у ленты
+  // высоту, и прокрутка, сделанная раньше, оставила бы низ последнего сообщения
+  // скрытым — без единого следующего обновления, которое это исправило бы.
   syncPin();
+  if (msg.reset || stick) feed.scrollTop = feed.scrollHeight;
   updateToEnd();
 }
 
