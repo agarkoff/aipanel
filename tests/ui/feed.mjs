@@ -1020,6 +1020,33 @@ try {
     toolItem,
   );
 
+  // Вопрос Claude с вариантами: в ленте текст вопросов, а не JSON аргументов;
+  // обрезанный JSON показывается как обычный вызов.
+  const askItem = await evaluate(`(() => {
+    const input = { questions: [
+      { question: 'Где хранить корни?', header: 'Доверие', multiSelect: false,
+        options: [{ label: 'В репо', description: 'прозрачно' }, { label: 'Из PFX' }] },
+      { question: 'Какие тесты?', header: 'Тесты', multiSelect: true, options: [{ label: 'Юнит' }] },
+    ] };
+    const node = buildItem({ id: 'ask', ts: 0, role: 'assistant', kind: 'tool_use', tool: 'AskUserQuestion',
+      text: JSON.stringify(input) }, null);
+    const cut = buildItem({ id: 'ask2', ts: 0, role: 'assistant', kind: 'tool_use', tool: 'AskUserQuestion',
+      text: '{"questions":[{"question":"Обре' }, null);
+    return {
+      label: node.querySelector('summary').textContent,
+      body: node.querySelector('.body').textContent,
+      cut: cut.querySelector('summary').textContent,
+    };
+  })()`);
+  check('вопрос Claude: строка ленты', askItem.label === 'Вопрос: Где хранить корни? (и ещё 1)', askItem);
+  check(
+    'вопрос Claude: варианты текстом',
+    askItem.body.includes('Доверие: Где хранить корни?') && askItem.body.includes('  • В репо — прозрачно')
+      && askItem.body.includes('(можно выбрать несколько)') && !askItem.body.includes('"questions"'),
+    askItem,
+  );
+  check('вопрос Claude: обрезанный JSON — обычный вызов', askItem.cut.startsWith('AskUserQuestion: {'), askItem);
+
   // Подсветка: результат Read Claude Code (вызов и результат — разные id),
   // результат bash opencode (`id:r`), дифф правки и блок кода в ответе.
   const hl = await evaluate(`(async () => {

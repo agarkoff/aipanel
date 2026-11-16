@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, SessionInfo, TurnUsage};
+use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, TurnUsage};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -89,6 +89,9 @@ struct Known {
     pid: Option<u32>,
     cwd: String,
     path: Option<PathBuf>,
+    /// Статус из реестра открытых сессий (`waiting` — окно ждёт выбора);
+    /// у закрытых пусто.
+    status: String,
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +123,8 @@ struct St {
     /// ранних сообщений. Ноль — показан весь транскрипт.
     heads: HashMap<String, u64>,
     listed_at: Option<Instant>,
+    /// Вопросы `AskUserQuestion`, показанные панели формой: по ним вводится ответ.
+    asks: HashMap<String, crate::ask::Ask>,
     headless: HashMap<String, oneshot::Sender<()>>,
     launched: HashMap<String, Instant>,
 }
@@ -286,14 +291,14 @@ impl Claude {
                     tool: "claude".into(),
                     title: meta.title.unwrap_or_else(|| name.to_owned()),
                     cwd: cwd.clone(),
-                    status,
+                    status: status.clone(),
                     live: true,
                     updated_at: updated,
                     delivery: if cfg!(windows) { "console" } else { "none" }.into(),
                     model: meta.model.unwrap_or_default(),
                     turn,
                 });
-                known.insert(sid.to_owned(), Known { pid: Some(pid), cwd, path: transcript });
+                known.insert(sid.to_owned(), Known { pid: Some(pid), cwd, path: transcript, status });
             }
         }
 
@@ -347,7 +352,7 @@ impl Claude {
                 model: meta.model.unwrap_or_default(),
                 turn,
             });
-            known.insert(sid, Known { pid: None, cwd, path: Some(path) });
+            known.insert(sid, Known { pid: None, cwd, path: Some(path), status: String::new() });
         }
 
         st.tails.retain(|p, _| used.contains(p));
@@ -447,6 +452,10 @@ impl Claude {
         let mut offset = 0u64;
         let mut first = true;
         let mut told_empty = false;
+        // Вопрос с вариантами, который ждёт ответа, и показанные панели формы:
+        // форма уходит, только когда список меняется.
+        let mut ask = crate::ask::Tracker::default();
+        let mut shown: Vec<Prompt> = Vec::new();
         loop {
             if path.is_none() {
                 path = self.find_path(&sid);
@@ -460,6 +469,8 @@ impl Claude {
                         // С конца показанной части пойдёт догрузка ранних сообщений.
                         self.lock().heads.insert(sid.clone(), begin);
                         offset = start + consumed;
+                        ask = crate::ask::Tracker::default();
+                        scan_ask(p, start, offset, start > 0, &mut ask);
                         first = false;
                         let _ = out.send(AgentMsg::History {
                             session: key.clone(),
@@ -472,6 +483,7 @@ impl Claude {
                     } else if len > offset {
                         let (items, consumed, _) =
                             read_items(p, offset, len.min(offset + MAX_CHUNK), false, usize::MAX);
+                        scan_ask(p, offset, offset + consumed, false, &mut ask);
                         offset += consumed;
                         if !items.is_empty() {
                             let _ = out.send(AgentMsg::History {
@@ -497,6 +509,11 @@ impl Claude {
                         });
                     }
                 }
+            }
+            let prompts = self.ask_prompts(&sid, ask.pending.as_ref());
+            if prompts != shown {
+                shown = prompts;
+                let _ = out.send(AgentMsg::Prompts { session: key.clone(), prompts: shown.clone() });
             }
             tokio::time::sleep(Duration::from_millis(700)).await;
         }
@@ -667,6 +684,41 @@ impl Claude {
                 Err(e)
             }
         }
+    }
+
+    /// Вопрос для панели: только пока окно сессии открыто и ждёт выбора. Вызов
+    /// без результата в транскрипте закрытой сессии ответа уже не получит.
+    fn ask_prompts(&self, sid: &str, pending: Option<&crate::ask::Ask>) -> Vec<Prompt> {
+        let mut st = self.lock();
+        let waiting = st.known.get(sid).is_some_and(|k| k.pid.is_some() && k.status == "waiting");
+        match pending.filter(|_| waiting && cfg!(windows)) {
+            Some(ask) => {
+                st.asks.insert(sid.to_owned(), ask.clone());
+                vec![crate::ask::prompt(ask)]
+            }
+            None => {
+                st.asks.remove(sid);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Ответ на вопрос `prompt` из панели: ввод в меню окна нажатиями клавиш.
+    /// `cancel` — закрыть меню (Esc), Claude получит отказ отвечать.
+    pub async fn reply_prompt(&self, sid: &str, prompt: &str, answer: &Value, cancel: bool) -> Result<(), String> {
+        let (ask, pid) = {
+            let st = self.lock();
+            let ask = st.asks.get(sid).filter(|a| a.id == prompt).cloned();
+            let pid = st.known.get(sid).filter(|k| k.status == "waiting").and_then(|k| k.pid);
+            (ask, pid)
+        };
+        let (Some(ask), Some(pid)) = (ask, pid) else {
+            return Err("вопрос уже закрыт".into());
+        };
+        let keys = if cancel { vec![crate::platform::Key::Esc] } else { crate::ask::keys(&ask, answer)? };
+        // Повторный ответ на тот же вопрос ушёл бы в следующее меню или в поле ввода.
+        self.lock().asks.remove(sid);
+        crate::platform::console_keys(pid, &keys).await
     }
 
     pub async fn interrupt(&self, sid: &str) -> Result<(), String> {
@@ -1227,6 +1279,22 @@ fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: us
     (lines.into_iter().flat_map(|(_, items)| items).collect(), consumed, begin)
 }
 
+/// Прогоняет завершённые строки `[start, end)` через слежение за вопросом
+/// (см. [`crate::ask::Tracker`]). Кусок тот же, что только что ушёл в ленту:
+/// новые строки короткие, а большой первый кусок читается один раз.
+fn scan_ask(path: &Path, start: u64, end: u64, skip_first: bool, ask: &mut crate::ask::Tracker) {
+    let buf = read_range(path, start, end);
+    let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else { return };
+    for (i, line) in buf[..last_nl].split(|b| *b == b'\n').enumerate() {
+        if i == 0 && skip_first {
+            continue;
+        }
+        if let Ok(line) = std::str::from_utf8(line) {
+            ask.line(line);
+        }
+    }
+}
+
 /// Дифф из результата правки: Claude Code кладёт в `toolUseResult` готовый
 /// `structuredPatch`, а для нового файла — его содержимое.
 fn push_diff(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item>) {
@@ -1321,7 +1389,14 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
                         i,
                         "assistant",
                         "tool_use",
-                        tool_text(b["name"].as_str(), &b["input"]),
+                        match b["name"].as_str() {
+                            // Панель разбирает вопросы из JSON: обрезка по пределу
+                            // аргументов (4000) сломала бы его на длинных вопросах.
+                            Some("AskUserQuestion") => {
+                                truncate(&serde_json::to_string(&b["input"]).unwrap_or_default(), TEXT_LIMIT)
+                            }
+                            name => tool_text(name, &b["input"]),
+                        },
                         b["name"].as_str().map(str::to_owned),
                     ),
                     Some("tool_result") => {

@@ -1,6 +1,7 @@
 //! Локальный агент AiPanel: сам подключается к серверу панели (исходящий WebSocket),
 //! сообщает о сессиях Claude Code и opencode и выполняет команды из панели.
 
+mod ask;
 mod claude;
 mod config;
 mod handoff;
@@ -304,7 +305,9 @@ impl Agent {
             ("opencode", id) => {
                 self.opencode.reply_prompt(id, prompt, kind, decision, answer, message, cancel).await
             }
-            _ => Err("запросы выбора есть только у сессий opencode".into()),
+            // У Claude Code из панели отвечают только на вопросы с вариантами.
+            ("claude", id) if kind == "form" => self.claude.reply_prompt(id, prompt, answer, cancel).await,
+            _ => Err("на этот запрос из панели не ответить".into()),
         }
     }
 
@@ -575,11 +578,17 @@ fn main() {
     // Внутренний режим: ввод в консоль другого процесса (см. platform.rs).
     if args.first().map(String::as_str) == Some("inject") {
         let Some(pid) = args.get(1).and_then(|p| p.parse::<u32>().ok()) else {
-            eprintln!("usage: aipanel-agent inject <pid> [--esc]");
+            eprintln!("usage: aipanel-agent inject <pid> [--esc | --keys]");
             std::process::exit(2);
         };
-        let esc = args.iter().any(|a| a == "--esc");
-        if let Err(e) = platform::inject_main(pid, esc) {
+        let mode = if args.iter().any(|a| a == "--esc") {
+            platform::InjectMode::Esc
+        } else if args.iter().any(|a| a == "--keys") {
+            platform::InjectMode::Keys
+        } else {
+            platform::InjectMode::Text
+        };
+        if let Err(e) = platform::inject_main(pid, mode) {
             eprintln!("{e}");
             std::process::exit(1);
         }

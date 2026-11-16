@@ -1032,6 +1032,29 @@ function trackCall(item, isNew) {
   }
 }
 
+// Аргументы `AskUserQuestion` (JSON) — строка ленты и текст вопросов с вариантами.
+// Не разобрались (обрезанный JSON, другой формат) — null, строка покажется как обычный вызов.
+function askText(text) {
+  let questions;
+  try {
+    questions = JSON.parse(text).questions;
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(questions) || !questions.length) return null;
+  const first = questions[0] || {};
+  const more = questions.length > 1 ? ` (и ещё ${questions.length - 1})` : '';
+  const blocks = questions.map((q) => {
+    const lines = [q.header ? `${q.header}: ${q.question || ''}` : String(q.question || '')];
+    if (q.multiSelect) lines.push('(можно выбрать несколько)');
+    for (const o of Array.isArray(q.options) ? q.options : []) {
+      lines.push(`  • ${o.label || ''}${o.description ? ` — ${o.description}` : ''}`);
+    }
+    return lines.join('\n');
+  });
+  return { label: `Вопрос: ${firstLine(String(first.question || first.header || ''))}${more}`, text: blocks.join('\n\n') };
+}
+
 function buildItem(item, call) {
   const node = el('div', `item ${item.role} ${item.kind}`);
   node.dataset.id = item.id;
@@ -1057,15 +1080,18 @@ function buildItem(item, call) {
     node.append(diffDetails(item.text));
   } else {
     const details = el('details');
+    // Вопрос Claude с вариантами: в ленте — текстом, а не JSON аргументов.
+    const ask = item.kind === 'tool_use' && item.tool === 'AskUserQuestion' ? askText(item.text) : null;
     const label =
       item.kind === 'thinking' ? 'Размышление'
+      : ask ? ask.label
       : item.kind === 'tool_use' ? `${item.tool || 'инструмент'}: ${firstLine(item.text)}`
       : `Результат: ${firstLine(item.text)}`;
-    const body = el('div', 'body', item.text);
+    const body = el('div', 'body', ask ? ask.text : item.text);
     details.append(el('summary', '', label), body);
     // Размышления раскрыты по умолчанию; вызовы инструментов и результаты свёрнуты.
     if (item.kind === 'thinking') details.open = true;
-    if (item.kind === 'tool_use') {
+    if (item.kind === 'tool_use' && !ask) {
       highlightOnOpen(details, body, () => Highlight.toolInput(item.text, item.tool));
     } else if (item.kind === 'tool_result') {
       highlightOnOpen(details, body, () => Highlight.toolResult(item.text, call && call.tool, call && call.text));
@@ -1869,7 +1895,8 @@ function onPromptResult(msg) {
         setPromptBusy(promptId, false);
       }, 8000);
     }
-    setHint('Ответ отправлен в opencode.');
+    const cur = current();
+    setHint(cur && cur.session.tool === 'claude' ? 'Ответ введён в окно Claude Code.' : 'Ответ отправлен в opencode.');
     return;
   }
   if (promptId) {
