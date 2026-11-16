@@ -827,7 +827,10 @@ input, textarea, select {
 .models .models-empty { padding: 6px 2px; color: var(--muted); font-size: 13px; }
 
 /* Снимок экрана: полноэкранный просмотр поверх панели. Тёмный фон всегда,
-   независимо от темы: так видно край экрана со светлыми окнами. */
+   независимо от темы: так видно край экрана со светлыми окнами.
+   display задан только для открытого окна: у закрытого <dialog> браузер прячет
+   его своим `display: none`, но стиль автора сильнее, и без [open] тёмный
+   экран оставался бы поверх всей панели. */
 .shot {
   position: fixed;
   inset: 0;
@@ -840,10 +843,10 @@ input, textarea, select {
   border: 0;
   background: #0b0c0f;
   color: #e8e8e6;
-  display: flex;
   flex-direction: column;
   overflow: hidden;
 }
+.shot[open] { display: flex; }
 .shot::backdrop { background: rgba(0, 0, 0, .85); }
 .shot-head {
   display: flex;

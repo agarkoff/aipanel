@@ -1431,6 +1431,21 @@ try {
   // отдаёт два экрана — панель показывает первый, остальные листаются.
   const shotPng =
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  // Закрытый просмотр не должен занимать экран: у полноэкранного <dialog> стиль
+  // автора перебивает браузерное `display: none`, и тёмный экран оставался бы
+  // поверх панели. Проверяем до открытия — панель должна быть видна.
+  const shotClosed = await evaluate(`(() => {
+    const dialog = document.getElementById('shot');
+    const hit = document.elementFromPoint(Math.round(innerWidth / 2), Math.round(innerHeight / 2));
+    return {
+      open: dialog.open,
+      display: getComputedStyle(dialog).display,
+      covers: dialog.contains(hit),
+      center: hit ? (hit.id || hit.className || hit.tagName) : '',
+    };
+  })()`);
+  check('значок: закрытый снимок не закрывает панель',
+    !shotClosed.open && shotClosed.display === 'none' && !shotClosed.covers, shotClosed);
   const shotFlow = await evaluate(`(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     window.__screens = [];
