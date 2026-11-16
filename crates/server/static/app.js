@@ -2006,7 +2006,8 @@ const cwdSuggest = Suggest.attach($('launch-cwd'), {
 // Модель для новой сессии: у opencode — его список (провайдер/модель), у
 // Claude Code — алиасы, которые принимает `--model`. Значение можно выбрать
 // только из списка: подсказки открываются по клику, ищут по подстроке, а
-// недавние модели показываются первыми. Пустое поле — модель по умолчанию.
+// недавние модели показываются первыми. Модель всегда явная: пустого пункта
+// «по умолчанию» нет, без выбора запуск не уходит.
 const launchModelSuggest = Suggest.attach($('launch-model'), {
   items: launchModelItems,
   // Клик по пустому полю тоже открывает весь список — иначе модель пришлось бы
@@ -2015,14 +2016,14 @@ const launchModelSuggest = Suggest.attach($('launch-model'), {
   openAllWhenExact: true,
   // Моделей у opencode много: список прокручивается, а не обрезается.
   limit: 0,
-  // «По умолчанию» — всегда сверху, дальше недавние, затем остальные.
-  rank: (item) => (!item.value ? -1 : item.recent ? 0 : 1),
+  // Недавние — сверху, остальные — в порядке списка агента.
+  rank: (item) => (item.recent ? 0 : 1),
   emptyText: (q) =>
     q
       ? 'Ничего не найдено.'
       : launchModelsRequest
         ? 'Загружаем модели…'
-        : 'Список моделей не пришёл: можно запустить без модели.',
+        : 'Список моделей не пришёл: без него запуск не уходит.',
   emptyOnQueryless: true,
 });
 
@@ -2063,30 +2064,22 @@ function launchModelItems() {
   const tool = $('launch-tool').value;
   const list = launchModelCache.get(launchModelKey()) || [];
   const recents = modelRecents(tool);
-  const items = [
-    {
-      value: '',
-      label: tool === 'claude' ? 'По умолчанию' : 'Как в окне (по умолчанию)',
-      hint: '',
-    },
-  ];
-  for (const m of list) {
+  return list.map((m) => {
     const value = launchModelValue(tool, m);
-    items.push({
+    return {
       value,
       label: m.name || m.id,
       hint: tool === 'claude' ? `claude --model ${m.id}` : value,
       recent: recents.includes(value),
-    });
-  }
-  return items;
+    };
+  });
 }
 
 // Есть ли значение в списке агента: null — ни в списке, ни в прошлом выборе.
 function launchModelKnown(value) {
   const tool = $('launch-tool').value;
   const v = value.trim().toLowerCase();
-  if (!v) return true;
+  if (!v) return false;
   const list = launchModelCache.get(launchModelKey());
   if (!list) {
     // Список ещё в пути: прошлый выбор пришёл из списка, а свежий набор — нет.
@@ -2121,7 +2114,9 @@ function syncLaunchModel() {
   const tool = $('launch-tool').value;
   $('launch-model').value = launchModelChoice[tool] || '';
   $('launch-model').placeholder =
-    tool === 'claude' ? 'По умолчанию — или выберите из списка' : 'Как в окне — или выберите из списка';
+    tool === 'claude'
+      ? 'Выберите модель из списка (например, sonnet)'
+      : 'Выберите модель из списка (провайдер/модель)';
   launchModelSuggest.close();
   requestLaunchModels();
 }
@@ -2202,22 +2197,26 @@ $('launch-form').addEventListener('submit', (e) => {
     $('launch-cwd').focus();
     return;
   }
-  // Модель — только из списка агента. Пустое поле допустимо: это умолчание окна.
-  if (model) {
-    const known = launchModelKnown(model);
-    if (known !== true) {
-      launchHint(
-        known === null
-          ? 'Список моделей ещё не пришёл. Подождите немного или оставьте поле пустым.'
-          : 'Такой модели нет в списке. Выберите пункт из подсказок.',
-        true,
-      );
-      if (known === null) requestLaunchModels();
-      launchModelSuggest.open();
-      $('launch-model').focus();
-      $('launch-model').select();
-      return;
-    }
+  // Модель всегда явная и только из списка агента: без выбора запуск не уходит.
+  if (!model) {
+    launchHint('Выберите модель из списка.', true);
+    launchModelSuggest.open();
+    $('launch-model').focus();
+    return;
+  }
+  const known = launchModelKnown(model);
+  if (known !== true) {
+    launchHint(
+      known === null
+        ? 'Список моделей ещё не пришёл. Подождите немного.'
+        : 'Такой модели нет в списке. Выберите пункт из подсказок.',
+      true,
+    );
+    if (known === null) requestLaunchModels();
+    launchModelSuggest.open();
+    $('launch-model').focus();
+    $('launch-model').select();
+    return;
   }
   const a = agents.find((x) => x.name === agent);
   const keys = new Set(a ? a.sessions.map((s) => s.key) : []);

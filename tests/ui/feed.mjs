@@ -687,19 +687,28 @@ try {
     model: document.getElementById('launch-model').value,
   })`);
   check('окно запуска открылось с инструментом сессии', launchInit.tool === 'opencode', launchInit);
-  check('модель по умолчанию пустая', launchInit.model === '', launchInit);
+  check('поле модели пустое до выбора', launchInit.model === '', launchInit);
 
   // Клик по пустому полю открывает весь список — набирать имя не обязательно.
   await evaluate(`document.getElementById('launch-model').click()`);
   const launchAll = await waitFor(`(() => {
     const l = document.querySelector('#launch-model ~ .sg-list');
-    return l && !l.hidden && l.querySelectorAll('.sg-item').length === 4;
+    return l && !l.hidden && l.querySelectorAll('.sg-item').length === 3;
   })()`);
   const launchOrder = await evaluate(
     `[...document.querySelectorAll('#launch-model ~ .sg-list .sg-item b')].map((n) => n.textContent)`,
   );
   check('список моделей открывается без набора', launchAll, launchOrder);
-  check('недавняя модель выше остальных', launchOrder[1] === 'GPT 6', launchOrder);
+  check('недавняя модель выше остальных', launchOrder[0] === 'GPT 6', launchOrder);
+
+  // Пункта «по умолчанию» больше нет: без выбранной модели запуск не уходит.
+  await evaluate(`document.getElementById('launch-form').requestSubmit()`);
+  await sleep(100);
+  const noModel = await evaluate(`({
+    starts: window.__starts.length,
+    hint: document.getElementById('launch-hint').textContent,
+  })`);
+  check('без выбранной модели запуск не уходит', noModel.starts === 0 && noModel.hint.includes('Выберите модель'), noModel);
 
   // Список моделей opencode приходит от агента и открывается при вводе.
   await evaluate(`(() => {
