@@ -4,6 +4,13 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+# Статика встроена в бинарник (`include_str!` в crates/server/src/main.rs), а
+# каталог target/ переживает сборки через кэш. Docker сохраняет mtime файлов из
+# контекста, поэтому после правки статики готовый артефакт сервера оказывается
+# новее исходников, и cargo его не пересобирает: образ собирается, а панель
+# остаётся со старым интерфейсом. Отметка времени на исходниках сервера
+# заставляет его собираться при каждой сборке образа.
+RUN find crates/server/src -name '*.rs' -exec touch {} +
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
     cargo build --release --locked -p aipanel-server \

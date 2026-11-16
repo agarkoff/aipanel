@@ -1160,7 +1160,15 @@ function buildItem(item, call) {
       : ask ? ask.label
       : item.kind === 'tool_use' ? `${item.tool || 'инструмент'}: ${firstLine(item.text)}`
       : `Результат: ${firstLine(item.text)}`;
-    const body = el('div', 'body', ask ? ask.text : item.text);
+    // Размышление — текст модели в Markdown: блоки кода в нём подсвечиваются
+    // так же, как в ответе.
+    let body;
+    if (item.kind === 'thinking') {
+      body = el('div', 'body md');
+      body.append(renderMarkdown(item.text, mdOptions()));
+    } else {
+      body = el('div', 'body', ask ? ask.text : item.text);
+    }
     details.append(el('summary', '', label), body);
     // Размышления раскрыты по умолчанию; вызовы инструментов и результаты свёрнуты.
     if (item.kind === 'thinking') details.open = true;

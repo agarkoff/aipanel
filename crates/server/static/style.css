@@ -458,6 +458,8 @@ input, textarea, select {
   overflow: auto;
   margin-top: 4px;
 }
+/* Размышление — обычный текст в Markdown, моноширинный только код. */
+.item.thinking details .body.md { font-family: inherit; font-size: 13px; line-height: 1.45; }
 /* Дифф правки файла: раскрыт сразу, удалённые строки красные, добавленные зелёные. */
 .item.diff details { padding: 0; overflow: hidden; }
 .item.diff summary { display: flex; align-items: baseline; gap: 8px; padding: 5px 10px; }
