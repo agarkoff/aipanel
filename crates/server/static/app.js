@@ -930,22 +930,30 @@ async function copyToClipboard(text) {
 
 // Кнопка «скопировать текст» в строке под сообщением (рядом со временем).
 // Иконка та же, что у идентификатора сессии; копируется исходный текст сообщения.
+// После удачного копирования значок на пару секунд сменяется галочкой — как в
+// Claude Code; никакого текста внизу панели не появляется.
 const copyTextTimers = new WeakMap();
 function copyTextButton(text) {
   const btn = el('button', 'copy-text');
   btn.type = 'button';
   btn.title = 'Скопировать текст сообщения';
   btn.setAttribute('aria-label', 'Скопировать текст сообщения');
-  btn.append(icon([
+  const copyIcon = icon([
     'M7 5.5h5A1.5 1.5 0 0 1 13.5 7v5a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 12V7A1.5 1.5 0 0 1 7 5.5Z',
     'M10.5 3.5V3A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5',
-  ]));
+  ]);
+  const checkIcon = icon(['M3.5 8.5 6.5 11.5 12.5 5']);
+  btn.append(copyIcon);
   btn.addEventListener('click', async () => {
     const ok = await copyToClipboard(text);
-    btn.classList.toggle('copied', ok);
+    if (!ok) return;
+    btn.replaceChildren(checkIcon);
+    btn.classList.add('copied');
     clearTimeout(copyTextTimers.get(btn));
-    if (ok) copyTextTimers.set(btn, setTimeout(() => btn.classList.remove('copied'), 1500));
-    setHint(ok ? 'Текст сообщения скопирован.' : 'Не удалось скопировать текст.', !ok);
+    copyTextTimers.set(btn, setTimeout(() => {
+      btn.replaceChildren(copyIcon);
+      btn.classList.remove('copied');
+    }, 2000));
   });
   return btn;
 }

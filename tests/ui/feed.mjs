@@ -414,6 +414,33 @@ try {
   check('копирование — справа от времени, по правому краю', copy.rightGap === 0 && copy.leftGap === 0 && copy.sameRow, copy);
   check('у кнопки копирования есть подпись и иконка', copy.label === 'Скопировать текст сообщения' && copy.iconPaths === 2, copy);
 
+  // Копирование подтверждается только галочкой на месте значка на пару секунд:
+  // текст внизу панели появляться не должен.
+  const copied = await evaluate(`(async () => {
+    const btn = document.querySelector('#feed .item.text .foot .copy-text');
+    const hint = document.getElementById('hint');
+    const before = hint.textContent;
+    const real = copyToClipboard;
+    copyToClipboard = async () => true;
+    btn.click();
+    await new Promise((r) => setTimeout(r, 60));
+    const during = {
+      paths: btn.querySelectorAll('svg path').length,
+      copied: btn.classList.contains('copied'),
+      hint: hint.textContent,
+    };
+    await new Promise((r) => setTimeout(r, 2100));
+    const after = {
+      paths: btn.querySelectorAll('svg path').length,
+      copied: btn.classList.contains('copied'),
+    };
+    copyToClipboard = real;
+    return { before, during, after };
+  })()`);
+  check('после копирования значок сменяется галочкой', copied.during.paths === 1 && copied.during.copied, copied);
+  check('галочка возвращается к значку копирования', copied.after.paths === 2 && !copied.after.copied, copied);
+  check('при копировании текст внизу панели не появляется', copied.during.hint === copied.before, copied);
+
   // Нажатия на закреп: переход к сообщению и переключение на предыдущее своё.
   const pinState = async () => evaluate(`(() => {
     const feed = document.getElementById('feed');
