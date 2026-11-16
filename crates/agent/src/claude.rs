@@ -1530,16 +1530,24 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
 /// Сообщение из очереди, вставленное Claude Code в текущий ход. Отдельной строки
 /// `type: user` у него в транскрипте нет — только вложение `queued_command`
 /// с текстом в `prompt`. Показываем его как своё сообщение в ленте.
+///
+/// Так же приходит уведомление о фоновой задаче, если она кончилась посреди
+/// хода (`origin.kind` = `task-notification`): это не сообщение человека,
+/// а плашка `notice`, как и у уведомления отдельной строкой.
 fn parse_queued(line: &str, out: &mut Vec<Item>) {
     let Ok(v) = serde_json::from_str::<Value>(line) else { return };
     if v["type"].as_str() != Some("attachment") {
         return;
     }
     let a = &v["attachment"];
-    // Уведомления фоновых задач приходят так же, но это не сообщение человека.
-    if a["type"].as_str() != Some("queued_command") || a["origin"]["kind"].as_str() != Some("human") {
+    if a["type"].as_str() != Some("queued_command") {
         return;
     }
+    let notice = match a["origin"]["kind"].as_str() {
+        Some("human") => false,
+        Some("task-notification") => true,
+        _ => return,
+    };
     if v["isSidechain"].as_bool() == Some(true) || v["isMeta"].as_bool() == Some(true) {
         return;
     }
@@ -1556,8 +1564,8 @@ fn parse_queued(line: &str, out: &mut Vec<Item>) {
     out.push(Item {
         id: format!("{id}:queued"),
         ts,
-        role: "user".into(),
-        kind: "text".into(),
+        role: if notice { "system" } else { "user" }.into(),
+        kind: if notice { "notice" } else { "text" }.into(),
         text: truncate(text, TEXT_LIMIT),
         tool: None,
     });
@@ -1717,12 +1725,21 @@ mod tests {
     #[test]
     fn skips_service_queued_commands() {
         let mut items = Vec::new();
-        // Уведомление фоновой задачи — не сообщение пользователя.
+        // Уведомление фоновой задачи посреди хода — не сообщение пользователя,
+        // а служебная плашка.
         parse_line(
-            r#"{"type":"attachment","uuid":"a2","attachment":{"type":"queued_command","prompt":"<task-notification>","origin":{"kind":"task-notification"},"timestamp":"2026-11-15T10:47:21.483Z"}}"#,
+            r#"{"type":"attachment","uuid":"a2","attachment":{"type":"queued_command","prompt":"<task-notification><status>failed</status></task-notification>","origin":{"kind":"task-notification"},"timestamp":"2026-11-15T10:47:21.483Z"}}"#,
             &mut items,
         );
-        // Пустой текст и служебная ветка тоже не попадают в ленту.
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.role.as_str(), i.kind.as_str())).collect();
+        assert_eq!(got, [("a2:queued", "system", "notice")]);
+        items.clear();
+        // Вложение без известного источника, пустой текст и служебная ветка
+        // в ленту не попадают.
+        parse_line(
+            r#"{"type":"attachment","uuid":"a5","attachment":{"type":"queued_command","prompt":"что-то","origin":{"kind":"other"}}}"#,
+            &mut items,
+        );
         parse_line(
             r#"{"type":"attachment","uuid":"a3","attachment":{"type":"queued_command","prompt":"  ","origin":{"kind":"human"}}}"#,
             &mut items,
