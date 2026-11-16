@@ -561,6 +561,10 @@ input, textarea, select {
   background: var(--tool);
 }
 .md .img-preview > span { color: var(--muted); font-size: .9em; }
+/* Картинки из вызова или результата инструмента — под его строкой. */
+.tool-images { margin: 4px 0 0 10px; font-size: 13px; }
+.tool-images .tool-image { overflow-wrap: anywhere; }
+.tool-images .img-preview { margin: 4px 0 6px; }
 .md .table-wrap { overflow-x: auto; margin: 0 0 .6em; }
 .md table { border-collapse: collapse; font-size: .95em; }
 .md th, .md td { border: 1px solid var(--line); padding: 5px 10px; text-align: left; vertical-align: top; }

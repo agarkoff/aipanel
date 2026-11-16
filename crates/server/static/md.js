@@ -12,6 +12,12 @@ const renderMarkdown = (() => {
 
   // Символы имени файла или каталога в пути: латиница, цифры, кириллица, `.-_+@`.
   const PATH_CH = '\\w\\u0400-\\u04FF.@+\\-';
+  const URL_SRC = '(https?:\\/\\/[^\\s<>"\'`]*[^\\s<>"\'`.,;:!?)\\]])';
+  const PATH_SRC =
+    `(?<![${PATH_CH}/\\\\:~])((?:[A-Za-z]:[\\\\/]|~[\\\\/]|\\.{1,2}[\\\\/]|\\/)?(?:[${PATH_CH}]+[\\\\/])*` +
+    `[${PATH_CH}]+\\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico))(?![\\w\\u0400-\\u04FF/\\\\])`;
+  // Адреса и пути картинок в выводе инструмента: 1 — адрес, 2 — путь.
+  const FIND_IMAGES = new RegExp(`${URL_SRC}|${PATH_SRC}`, 'gi');
 
   const INLINE = new RegExp(
     [
@@ -23,11 +29,9 @@ const renderMarkdown = (() => {
       '\\*([^\\s*](?:[^*]*?[^\\s*])?)\\*', // 7: курсив
       '(?<![A-Za-zА-Яа-яЁё0-9_])_([^\\s_](?:[^_]*?[^\\s_])?)_(?![A-Za-zА-Яа-яЁё0-9_])', // 8: курсив
       '\\[([^\\]\\n]+)\\]\\(([^)\\s]+)\\)', // 9, 10: ссылка
-      '(https?:\\/\\/[^\\s<>"\'`]*[^\\s<>"\'`.,;:!?)\\]])', // 11: адрес
+      URL_SRC, // 11: адрес
       '!\\[([^\\]\\n]*)\\]\\(([^)\\s]+)\\)', // 12, 13: картинка
-      // 14: путь к файлу картинки на машине агента (`C:\x\shot.png`, `./a.png`, `/tmp/b.jpg`)
-      `(?<![${PATH_CH}/\\\\:~])((?:[A-Za-z]:[\\\\/]|~[\\\\/]|\\.{1,2}[\\\\/]|\\/)?(?:[${PATH_CH}]+[\\\\/])*` +
-        `[${PATH_CH}]+\\.(?:png|jpe?g|gif|webp|avif|bmp|svg|ico))(?![\\w\\u0400-\\u04FF/\\\\])`,
+      PATH_SRC, // 14: путь к картинке на машине агента (`C:\x\shot.png`, `./a.png`, `/tmp/b.jpg`)
     ].join('|'),
     'gi',
   );
@@ -351,6 +355,62 @@ const renderMarkdown = (() => {
   };
   // Сообщение при обновлении строится заново: так раскрытые картинки переносятся
   // из старого узла в новый.
+  // Строки, в которых искать картинки: у вызова инструмента текст — обычно JSON
+  // аргументов (`{"file_path": "D:\\x\\shot.png"}`), и путь в нём экранирован.
+  function toolStrings(text) {
+    const t = text.trim();
+    if (/^[[{]/.test(t)) {
+      try {
+        const out = [];
+        const walk = (v) => {
+          if (typeof v === 'string') out.push(v);
+          else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+        };
+        walk(JSON.parse(t));
+        return out;
+      } catch {}
+    }
+    return [text];
+  }
+
+  const MAX_TOOL_IMAGES = 8;
+
+  // Картинки, на которые ссылается вызов инструмента или его результат: ссылки-
+  // переключатели под строкой инструмента, чтобы смотреть их, не раскрывая вывод.
+  // null — картинок в тексте нет.
+  render.imageLinks = (text, opts = {}) => {
+    if (!text || !/\.(png|jpe?g|gif|webp|avif|bmp|svg|ico)\b/i.test(text)) return null;
+    localImage = typeof opts.localImage === 'function' ? opts.localImage : null;
+    try {
+      const found = new Map(); // путь или адрес -> 'url' | 'path'
+      for (const s of toolStrings(text)) {
+        const whole = s.trim();
+        if (isLocalPath(whole)) {
+          found.set(whole, 'path');
+          continue;
+        }
+        for (const m of s.matchAll(FIND_IMAGES)) {
+          if (m[1] !== undefined && isImageUrl(m[1])) found.set(m[1], 'url');
+          else if (m[2] !== undefined && localImage) found.set(m[2], 'path');
+          if (found.size >= MAX_TOOL_IMAGES) break;
+        }
+        if (found.size >= MAX_TOOL_IMAGES) break;
+      }
+      if (!found.size) return null;
+      const box = node('div');
+      box.className = 'tool-images md';
+      for (const [what, kind] of found) {
+        const row = node('div');
+        row.className = 'tool-image';
+        row.append(kind === 'url' ? link(what, what) : localLink(what, what));
+        box.append(row);
+      }
+      return box;
+    } finally {
+      localImage = null;
+    }
+  };
+
   render.keepOpenImages = (from, to) => {
     const was = [...from.querySelectorAll('a.img-link')];
     const now = [...to.querySelectorAll('a.img-link')];

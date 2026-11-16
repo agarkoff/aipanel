@@ -1071,6 +1071,12 @@ function buildItem(item, call) {
       highlightOnOpen(details, body, () => Highlight.toolResult(item.text, call && call.tool, call && call.text));
     }
     node.append(details);
+    // Картинки из аргументов и вывода инструмента — под его строкой, их видно
+    // и в свёрнутом виде.
+    if (item.kind === 'tool_use' || item.kind === 'tool_result') {
+      const images = renderMarkdown.imageLinks(item.text, mdOptions());
+      if (images) node.append(images);
+    }
   }
   if (item.ts && (item.kind === 'text' || item.kind === 'error')) {
     node.append(el('div', 'time', new Date(item.ts).toLocaleString()));

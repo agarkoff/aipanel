@@ -981,6 +981,45 @@ try {
     imageRequests,
   );
 
+  // Картинки из вызова и вывода инструмента: путь в JSON аргументов (там он
+  // экранирован) и в тексте вывода видны ссылками под строкой инструмента.
+  const tool = await evaluate(`(() => {
+    const opts = { localImage: (p) => '/api/image?' + new URLSearchParams({ agent: 'ui-test', session: 's1', path: p }) };
+    const paths = (box) => box ? [...box.querySelectorAll('a.img-link')].map((a) =>
+      a.href.includes('/api/image') ? new URL(a.href).searchParams.get('path') : a.href) : null;
+    const input = renderMarkdown.imageLinks(JSON.stringify({ file_path: 'C:\\\\My Pictures\\\\shot.png', limit: 5 }), opts);
+    const output = renderMarkdown.imageLinks(
+      'Saved screenshot to D:\\\\tmp\\\\a.png\\nsee https://example.com/b.jpg and D:\\\\tmp\\\\a.png again', opts);
+    const none = renderMarkdown.imageLinks('{"command":"ls -la"}', opts);
+    return { input: paths(input), output: paths(output), none: none === null };
+  })()`);
+  check('путь из аргументов инструмента стал ссылкой', JSON.stringify(tool.input) === JSON.stringify(['C:\\My Pictures\\shot.png']), tool);
+  check(
+    'пути и адреса из вывода инструмента без повторов',
+    JSON.stringify(tool.output) === JSON.stringify(['D:\\tmp\\a.png', 'https://example.com/b.jpg']),
+    tool,
+  );
+  check('без картинок под инструментом ничего не добавляется', tool.none, tool);
+
+  const toolItem = await evaluate(`(() => {
+    const node = buildItem({ id: 'img-tool', ts: 0, role: 'assistant', kind: 'tool_use', tool: 'Read',
+      text: JSON.stringify({ file_path: 'D:\\\\tmp\\\\shot.png' }) }, null);
+    document.getElementById('feed').append(node);
+    const link = node.querySelector('.tool-images a.img-link');
+    const r = {
+      collapsed: !node.querySelector('details').open,
+      visible: !!link && link.getBoundingClientRect().height > 0,
+      session: link ? new URL(link.href).searchParams.get('session') : '',
+    };
+    node.remove();
+    return r;
+  })()`);
+  check(
+    'картинка инструмента видна под свёрнутым вызовом',
+    toolItem.collapsed && toolItem.visible && toolItem.session === session.key,
+    toolItem,
+  );
+
   // Подсветка: результат Read Claude Code (вызов и результат — разные id),
   // результат bash opencode (`id:r`), дифф правки и блок кода в ответе.
   const hl = await evaluate(`(async () => {
