@@ -164,6 +164,9 @@ impl Claude {
             .await
             .ok()?;
         if !resp.status().is_success() {
+            // 429 — частый ответ этого эндпоинта; 401 — токен истёк, а Claude
+            // Code давно не запускали и не обновил его.
+            crate::util::log(&format!("лимиты Claude: HTTP {}", resp.status().as_u16()));
             return None;
         }
         let v: Value = resp.json().await.ok()?;

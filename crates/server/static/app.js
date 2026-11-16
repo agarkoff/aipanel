@@ -1029,6 +1029,9 @@ function resetText(ms) {
 // Остаток лимитов подписки на машине агента. Показываем только тот инструмент,
 // в котором идёт эта сессия: лимит второго в ленте не нужен.
 // Проценты — сколько ещё доступно, а не сколько израсходовано.
+// Лимиты старше этого считаются не свежими: агент опрашивает раз в 3 минуты.
+const LIMITS_STALE_MS = 10 * 60 * 1000;
+
 function renderLimits(agent, session) {
   const box = $('sm-limits');
   box.replaceChildren();
@@ -1059,8 +1062,15 @@ function renderLimits(agent, session) {
     // На телефоне подсказка по наведению недоступна, поэтому ближайший сброс
     // к тому же показан текстом.
     const nearest = meters.filter((m) => m.resets_at).sort((a, b) => a.resets_at - b.resets_at)[0];
-    if (nearest) row.append(el('span', 'sm-limit-reset', `сброс ${resetText(nearest.resets_at)}`));
-    row.title = `${limit.title || limit.tool}: ${details.join(' · ')}`;
+    const notes = [];
+    if (nearest) notes.push(`сброс ${resetText(nearest.resets_at)}`);
+    // Агент держит последний удачный ответ, если источник перестал отвечать
+    // (Anthropic отвечает 429 на частые запросы): тогда пишем, когда лимиты
+    // проверялись, чтобы старые проценты не выглядели свежими.
+    const stale = limit.updated_at && Date.now() - limit.updated_at > LIMITS_STALE_MS;
+    if (stale) notes.push(`данные на ${resetText(limit.updated_at)}`);
+    if (notes.length) row.append(el('span', 'sm-limit-reset', notes.join(' · ')));
+    row.title = `${limit.title || limit.tool}: ${details.join(' · ')}${stale ? ` (проверено ${resetText(limit.updated_at)})` : ''}`;
     box.append(row);
   }
 }

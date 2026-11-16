@@ -484,32 +484,93 @@ async fn scanner(agent: Arc<Agent>) {
     }
 }
 
+/// Обычный интервал опроса лимитов.
+const LIMITS_EVERY: Duration = Duration::from_secs(180);
+/// Предел отступа после неудачных опросов.
+const LIMITS_BACKOFF_MAX: Duration = Duration::from_secs(30 * 60);
+/// Сколько держать последний удачный ответ, если источник перестал отвечать.
+const LIMITS_KEEP_MS: i64 = 3 * 60 * 60 * 1000;
+
+/// Один источник лимитов (Claude или OpenCode Go): последний удачный ответ и
+/// когда спрашивать снова.
+struct LimitSource {
+    last: Option<Limits>,
+    next: Instant,
+    backoff: Duration,
+}
+
+impl LimitSource {
+    fn new() -> Self {
+        Self { last: None, next: Instant::now(), backoff: LIMITS_EVERY }
+    }
+
+    fn due(&self) -> bool {
+        Instant::now() >= self.next
+    }
+
+    /// Учитывает результат опроса. Эндпоинт лимитов Anthropic часто отвечает
+    /// 429, если спрашивать его подряд, поэтому после отказа интервал растёт
+    /// вдвое (до получаса), а после успеха возвращается к обычному.
+    fn record(&mut self, got: Option<Limits>) {
+        match got {
+            Some(l) => {
+                self.last = Some(l);
+                self.backoff = LIMITS_EVERY;
+            }
+            None => self.backoff = (self.backoff * 2).min(LIMITS_BACKOFF_MAX),
+        }
+        self.next = Instant::now() + self.backoff;
+    }
+
+    /// Что показать сейчас: последний удачный ответ, пока он не слишком стар.
+    fn current(&self, now: i64) -> Option<Limits> {
+        let l = self.last.as_ref().filter(|l| now - l.updated_at < LIMITS_KEEP_MS)?;
+        Some(refresh_expired(l.clone(), now))
+    }
+}
+
+/// Окно, чей сброс уже прошёл, снова полное: старый процент для него неверен,
+/// а свежего ответа может не быть (источник не отвечает).
+fn refresh_expired(mut l: Limits, now: i64) -> Limits {
+    for m in &mut l.meters {
+        if m.resets_at != 0 && m.resets_at <= now {
+            m.left = 100;
+            m.resets_at = 0;
+        }
+    }
+    l
+}
+
 /// Раз в несколько минут проверяет остаток лимитов подписок на этой машине
 /// и отправляет серверу, если он изменился.
+///
+/// Неудачный опрос не стирает известные лимиты: в панели остаётся последний
+/// удачный ответ с его временем (`updated_at`), и панель показывает, что он
+/// не свежий. Раньше отказ одного источника (например, 429 от Anthropic)
+/// убирал его строку из списка, и панель писала «нет данных».
 async fn limits_watcher(agent: Arc<Agent>) {
+    let mut claude = LimitSource::new();
+    let mut opencode = LimitSource::new();
     let mut last: Vec<Limits> = Vec::new();
     loop {
         if agent.online.load(Ordering::Relaxed) {
-            let mut list = Vec::new();
-            if agent.cfg.claude.enabled {
-                if let Some(limits) = agent.claude.limits().await {
-                    list.push(limits);
-                }
+            if agent.cfg.claude.enabled && claude.due() {
+                claude.record(agent.claude.limits().await);
             }
-            if agent.cfg.opencode.enabled {
-                if let Some(limits) = agent.opencode.limits().await {
-                    list.push(limits);
-                }
+            if agent.cfg.opencode.enabled && opencode.due() {
+                opencode.record(agent.opencode.limits().await);
             }
-            // Неудачный опрос не стирает известные лимиты: пустой список уходит,
-            // только когда сервер сам попросил свежие данные после подключения.
+            let now = util::now_ms();
+            let list: Vec<Limits> = [claude.current(now), opencode.current(now)].into_iter().flatten().collect();
+            // После подключения сервер ничего не знает о лимитах: отправляем
+            // список, даже если он не изменился.
             if agent.force_limits.swap(false, Ordering::Relaxed) || list != last {
                 let _ = agent.out.send(AgentMsg::Limits { limits: list.clone() });
                 last = list;
             }
         }
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(180)) => {}
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {}
             _ = agent.limits_now.notified() => {}
         }
     }
@@ -765,4 +826,50 @@ fn main() {
         .build()
         .expect("tokio runtime");
     runtime.block_on(run(cfg));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aipanel_proto::Meter;
+
+    fn limits(updated_at: i64, resets_at: i64) -> Limits {
+        Limits {
+            tool: "claude".into(),
+            title: "Claude Code".into(),
+            meters: vec![Meter { label: "5 ч".into(), left: 0, resets_at }],
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn failed_poll_keeps_last_limits_and_backs_off() {
+        let mut s = LimitSource::new();
+        s.record(Some(limits(1_000, 0)));
+        s.record(None);
+        assert_eq!(s.backoff, LIMITS_EVERY * 2);
+        s.record(None);
+        s.record(None);
+        s.record(None);
+        assert_eq!(s.backoff, LIMITS_BACKOFF_MAX);
+        assert_eq!(s.current(2_000).map(|l| l.meters[0].left), Some(0));
+        s.record(Some(limits(3_000, 0)));
+        assert_eq!(s.backoff, LIMITS_EVERY);
+    }
+
+    #[test]
+    fn stale_limits_are_dropped() {
+        let mut s = LimitSource::new();
+        s.record(Some(limits(0, 0)));
+        assert!(s.current(LIMITS_KEEP_MS - 1).is_some());
+        assert!(s.current(LIMITS_KEEP_MS).is_none());
+    }
+
+    #[test]
+    fn passed_reset_shows_full_window() {
+        let l = refresh_expired(limits(0, 5_000), 5_000);
+        assert_eq!((l.meters[0].left, l.meters[0].resets_at), (100, 0));
+        let l = refresh_expired(limits(0, 5_000), 4_999);
+        assert_eq!((l.meters[0].left, l.meters[0].resets_at), (0, 5_000));
+    }
 }
