@@ -512,6 +512,13 @@ try {
       title: document.getElementById('favorites').title,
       count: document.getElementById('favorites-count').textContent,
       countShown: !document.getElementById('favorites-count').hidden,
+      countCorner: (() => {
+        // Счётчик стоит в углу самой звезды, а не кнопки.
+        const badge = document.getElementById('favorites-count').getBoundingClientRect();
+        const star = document.querySelector('#favorites svg').getBoundingClientRect();
+        return Math.abs(badge.left + badge.width / 2 - star.right) <= 9 &&
+          Math.abs(badge.top + badge.height / 2 - star.top) <= 9;
+      })(),
     };
   })()`);
   check('звезда у своего сообщения ставит его в избранное', ownStar.on === true && ownStar.item === ownStar.id && ownStar.lit, ownStar);
@@ -519,6 +526,7 @@ try {
   check('в избранном звезда залита жёлтым', ownStar.pressed === 'true' && ownStar.fill !== 'none', ownStar);
   check('в шапке показано, сколько в избранном', ownStar.title.includes('1'), ownStar);
   check('у звезды в шапке счётчик избранного', ownStar.countShown && ownStar.count === '1', ownStar);
+  check('счётчик прижат к углу звезды', ownStar.countCorner, ownStar);
 
   // Ответ агента тоже можно добавить.
   const agentStar = await evaluate(`(async () => {
