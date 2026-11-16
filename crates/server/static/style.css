@@ -86,6 +86,11 @@ input, textarea, select {
 .login h1 { margin: 0 0 4px; font-size: 22px; display: flex; align-items: center; gap: 10px; }
 .login h1 .logo { width: 30px; height: 30px; border-radius: 8px; }
 .logo { display: block; border-radius: 5px; flex: none; }
+/* Значок панели в шапке — кнопка: нажатие снимает экран машины агента.
+   Поля и отрицательные отступы расширяют область нажатия, не двигая шапку. */
+.logo-btn { display: flex; padding: 4px; margin: -4px; border: 0; background: none; border-radius: 8px; flex: none; }
+.logo-btn:hover .logo { filter: brightness(1.08); }
+.logo-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .error { color: var(--wait); margin: 0; min-height: 1.4em; }
 
 .app { display: grid; grid-template-columns: 340px 1fr; height: 100dvh; }
@@ -753,6 +758,82 @@ input, textarea, select {
 .models .model-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .models .model:disabled { opacity: .6; cursor: default; }
 .models .models-empty { padding: 6px 2px; color: var(--muted); font-size: 13px; }
+
+/* Снимок экрана: полноэкранный просмотр поверх панели. Тёмный фон всегда,
+   независимо от темы: так видно край экрана со светлыми окнами. */
+.shot {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100dvh;
+  max-width: 100vw;
+  max-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: #0b0c0f;
+  color: #e8e8e6;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.shot::backdrop { background: rgba(0, 0, 0, .85); }
+.shot-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(8px + env(safe-area-inset-top)) 12px 8px;
+}
+.shot-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: #b9bac0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shot-dots { display: flex; align-items: center; gap: 6px; flex: none; }
+.shot-dot { width: 9px; height: 9px; padding: 0; border: 0; border-radius: 50%; background: #4a4c53; cursor: pointer; }
+.shot-dot.active { background: #e8e8e6; }
+.shot-btn { padding: 5px 10px; border: 1px solid #3a3d44; border-radius: 6px; background: #24262b; color: #e8e8e6; font-size: 13px; flex: none; }
+.shot-x { padding: 0 9px 2px; font-size: 19px; line-height: 1.3; }
+.shot-stage { position: relative; flex: 1; min-height: 0; overflow: hidden; touch-action: none; }
+.shot-strip { display: flex; height: 100%; transition: transform .22s ease; will-change: transform; }
+.shot-strip.dragging { transition: none; }
+.shot-page { flex: 0 0 100%; display: flex; align-items: center; justify-content: center; padding: 0 8px; }
+.shot-page img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, .6);
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.shot-wait { color: #8f9199; font-size: 14px; }
+.shot-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 42px;
+  height: 74px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(36, 38, 43, .82);
+  color: #e8e8e6;
+  font-size: 26px;
+  line-height: 1;
+}
+.shot-nav.prev { left: 10px; }
+.shot-nav.next { right: 10px; }
+.shot-hint { margin: 0; padding: 8px 14px calc(8px + env(safe-area-inset-bottom)); color: #ff9d92; font-size: 13px; text-align: center; }
+.shot-hint:empty { display: none; }
+@media (max-width: 760px) {
+  .shot-label { font-size: 12px; }
+  .shot-nav { width: 34px; height: 56px; }
+}
 
 /* На тач-экране экранная клавиатура меняет высоту окна просмотра, и окно,
    центрированное по вертикали, переезжает как раз между касанием и click:

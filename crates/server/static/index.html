@@ -25,7 +25,9 @@
 <div id="app" class="app" hidden>
   <aside id="sidebar" class="sidebar">
     <header>
-      <img class="logo" src="/icon.svg" alt="" width="20" height="20">
+      <button id="shots" class="logo-btn" type="button" title="Снимок экрана" aria-label="Снимок экрана">
+        <img class="logo" src="/icon.svg" alt="" width="20" height="20">
+      </button>
       <strong>AiPanel</strong>
       <span id="conn" class="conn" title="Соединение с сервером"></span>
       <button id="new-session" class="new-session" type="button" title="Новая сессия" aria-label="Новая сессия">+</button>
@@ -176,6 +178,32 @@
       <button id="models-cancel" class="link" type="button">Закрыть</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="shot-agent" class="launch confirm" aria-labelledby="shot-agent-title">
+  <form id="shot-agent-form">
+    <h2 id="shot-agent-title">Чей экран снять</h2>
+    <p class="confirm-text">Открыта не сессия, а список, а компьютеров в сети несколько.</p>
+    <div id="shot-agent-list" class="models-list" role="listbox" aria-label="Компьютеры"></div>
+    <div class="actions">
+      <button id="shot-agent-cancel" class="link" type="button">Отмена</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="shot" class="shot" aria-label="Снимок экрана">
+  <div class="shot-head">
+    <span id="shot-label" class="shot-label"></span>
+    <span id="shot-dots" class="shot-dots"></span>
+    <button id="shot-refresh" class="shot-btn" type="button" title="Снять экран заново">Обновить</button>
+    <button id="shot-close" class="shot-btn shot-x" type="button" aria-label="Закрыть снимок" title="Закрыть">×</button>
+  </div>
+  <div id="shot-stage" class="shot-stage">
+    <div id="shot-strip" class="shot-strip"></div>
+    <button id="shot-prev" class="shot-nav prev" type="button" aria-label="Предыдущий экран" title="Предыдущий экран" hidden>‹</button>
+    <button id="shot-next" class="shot-nav next" type="button" aria-label="Следующий экран" title="Следующий экран" hidden>›</button>
+  </div>
+  <p id="shot-hint" class="shot-hint"></p>
 </dialog>
 
 <script src="/hl.js"></script>

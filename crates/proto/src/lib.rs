@@ -288,11 +288,45 @@ pub enum AgentMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Один экран машины агента на запрос `ServerMsg::Screens`. Снимков приходит
+    /// столько, сколько экранов: каждый отдельным сообщением, чтобы не упереться
+    /// в предел размера сообщения WebSocket.
+    Screen {
+        id: String,
+        /// Номер экрана: 0 — первый.
+        index: u32,
+        /// Сколько всего экранов на машине.
+        count: u32,
+        /// Подпись для панели: `Экран 1 · основной`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        label: String,
+        /// Размер картинки в пикселях — после возможного уменьшения.
+        width: u32,
+        height: u32,
+        /// PNG в base64.
+        data: String,
+    },
+    /// Экраны сняты: `Screen` этой серии больше не будет. `error` — если снять
+    /// не удалось вовсе (нет экрана, платформа не поддерживается).
+    Screens {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 /// Наибольший размер картинки, которую агент отдаёт по `ReadImage`. В base64 она
 /// вырастает на треть и должна поместиться в сообщение WebSocket (8 МБ).
 pub const MAX_IMAGE_BYTES: u64 = 5 << 20;
+
+/// Наибольший размер PNG одного экрана в `AgentMsg::Screen`. В base64 картинка
+/// вырастает на треть, и сообщение WebSocket (8 МБ) должно остаться целым:
+/// агент уменьшает снимок, пока PNG не влезет в этот предел.
+pub const MAX_SCREEN_BYTES: usize = 4 << 20;
+
+/// Сколько экранов панель принимает за один снимок: защита от агента,
+/// который пришлёт бесконечную серию.
+pub const MAX_SCREENS: u32 = 16;
 
 /// Типы картинок, которые агент отдаёт и сервер пропускает в браузер.
 pub const IMAGE_MIMES: &[&str] = &[
@@ -458,4 +492,7 @@ pub enum ServerMsg {
         provider: String,
         model: String,
     },
+    /// Снять экраны машины агента (все мониторы). Ответ — `AgentMsg::Screen` на
+    /// каждый экран, затем `AgentMsg::Screens`.
+    Screens { id: String },
 }

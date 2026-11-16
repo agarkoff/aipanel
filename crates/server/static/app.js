@@ -303,7 +303,12 @@ function onMessage(msg) {
     else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
     else if (modelSet && msg.id === modelSet.id) onModelResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
+    else if (shot && msg.id === shot.id) shotError(msg.error || 'агент не ответил');
     else setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
+  } else if (msg.t === 'screen') {
+    onScreen(msg);
+  } else if (msg.t === 'screens') {
+    onScreens(msg);
   }
 }
 
@@ -2846,5 +2851,291 @@ function onInterruptResult(msg) {
   }
   setHint('Ход остановлен. Если запрос был отложен, opencode продолжит его выполнять.');
 }
+
+// ------------------------------------------------------------ снимок экрана
+
+// Значок панели в шапке снимает экран машины агента и открывает снимок поверх
+// панели. Снимает агент, а не браузер: браузер не перечисляет мониторы и не
+// отдаёт их без разрешения на каждый запрос. Экранов может быть несколько —
+// между ними листают стрелками, свайпом или точками.
+
+// Компьютер прошлого снимка: когда открытой сессии нет, а агентов несколько,
+// панель спрашивает, чей экран, и запоминает выбор.
+const SHOT_AGENT_KEY = 'aipanel.shot-agent';
+// Старая версия агента команду не знает и молчит вовсе, поэтому ждём не вечно.
+const SHOT_TIMEOUT = 25000;
+// Сколько экранов принимаем: столько же, сколько пропускает сервер.
+const SHOT_MAX = 16;
+
+let shot = null; // { agent, id, total, index, pages, nodes, timer, done, error }
+
+function openShots() {
+  const online = agents.filter((a) => a.online);
+  if (!online.length) {
+    setHint('Снимок экрана: агент не в сети.', true);
+    return;
+  }
+  // Сначала компьютер открытой сессии: снимок обычно нужен там, где идёт работа.
+  const cur = selected && online.find((a) => a.name === selected.agent);
+  if (cur) {
+    startShots(cur.name);
+    return;
+  }
+  if (online.length === 1) {
+    startShots(online[0].name);
+    return;
+  }
+  askShotAgent(online);
+}
+
+function askShotAgent(online) {
+  const list = $('shot-agent-list');
+  const last = localStorage.getItem(SHOT_AGENT_KEY) || '';
+  list.replaceChildren();
+  // Прошлый выбор — первым: чаще всего снимают ту же машину.
+  const sorted = [...online].sort((a, b) => (b.name === last) - (a.name === last));
+  for (const a of sorted) {
+    const btn = el('button', 'model', a.name);
+    btn.type = 'button';
+    if (a.name === last) btn.classList.add('current');
+    btn.addEventListener('click', () => {
+      $('shot-agent').close();
+      startShots(a.name);
+    });
+    list.append(btn);
+  }
+  $('shot-agent').showModal();
+}
+
+function startShots(agent) {
+  closeShots();
+  shot = {
+    agent,
+    id: String(++cmdSeq),
+    total: 0,
+    index: 0,
+    pages: [],
+    nodes: [],
+    timer: null,
+    done: false,
+    error: '',
+  };
+  localStorage.setItem(SHOT_AGENT_KEY, agent);
+  renderShot();
+  if (!$('shot').open) $('shot').showModal();
+  if (!send({ t: 'screens', id: shot.id, agent })) {
+    shotError('нет соединения с сервером');
+    return;
+  }
+  shot.timer = setTimeout(() => {
+    if (shot && !shot.done) {
+      shotError('агент не ответил: возможно, его нужно обновить до версии со снимком экрана');
+    }
+  }, SHOT_TIMEOUT);
+}
+
+function closeShots() {
+  if (shot) clearTimeout(shot.timer);
+  shot = null;
+  if ($('shot').open) $('shot').close();
+  $('shot-strip').replaceChildren();
+  $('shot-dots').replaceChildren();
+  $('shot-label').textContent = '';
+  $('shot-hint').textContent = '';
+}
+
+// Один экран пришёл: ставим его на свою страницу, остальные могут ещё ехать.
+function onScreen(msg) {
+  if (!shot || msg.id !== shot.id) return;
+  const total = Math.max(1, Math.min(SHOT_MAX, Number(msg.count) || 1));
+  const index = Math.max(0, Math.min(total - 1, Number(msg.index) || 0));
+  const data = String(msg.data || '');
+  if (!data) return;
+  shot.total = total;
+  shot.pages[index] = {
+    label: String(msg.label || `Экран ${index + 1}`),
+    width: Number(msg.width) || 0,
+    height: Number(msg.height) || 0,
+    url: `data:image/png;base64,${data}`,
+  };
+  if (shot.index >= total) shot.index = total - 1;
+  renderShot();
+}
+
+// Серия снимков закончилась: либо всё снято, либо агент сообщил об ошибке.
+function onScreens(msg) {
+  if (!shot || msg.id !== shot.id) return;
+  shot.done = true;
+  clearTimeout(shot.timer);
+  shot.timer = null;
+  if (msg.error) shot.error = String(msg.error);
+  else if (!shot.pages.some(Boolean)) shot.error = 'агент не прислал ни одного экрана';
+  renderShot();
+}
+
+function shotError(text) {
+  if (!shot) return;
+  shot.done = true;
+  shot.error = text;
+  clearTimeout(shot.timer);
+  shot.timer = null;
+  renderShot();
+}
+
+function gotoShot(i) {
+  if (!shot) return;
+  const count = Math.max(1, shot.total);
+  shot.index = Math.max(0, Math.min(count - 1, i));
+  renderShot();
+}
+
+function renderShot() {
+  if (!shot) return;
+  const strip = $('shot-strip');
+  const count = Math.max(1, shot.total);
+  // Страницы создаются, когда известно число экранов: до первого ответа она одна
+  // и показывает, что идёт съёмка.
+  if (shot.nodes.length !== count) {
+    strip.replaceChildren();
+    shot.nodes = [];
+    for (let i = 0; i < count; i++) {
+      const page = el('div', 'shot-page');
+      const slot = el('span', 'shot-wait', 'Снимаю экран…');
+      page.append(slot);
+      strip.append(page);
+      shot.nodes.push({ page, slot, url: '' });
+    }
+  }
+  for (let i = 0; i < shot.pages.length; i++) {
+    const data = shot.pages[i];
+    const node = shot.nodes[i];
+    if (!data || !node || node.url === data.url) continue;
+    const img = document.createElement('img');
+    img.src = data.url;
+    img.alt = data.label;
+    img.draggable = false;
+    node.slot.replaceWith(img);
+    node.slot = img;
+    node.url = data.url;
+  }
+  strip.classList.remove('dragging');
+  strip.style.transform = `translateX(${-shot.index * 100}%)`;
+
+  const many = count > 1;
+  $('shot-prev').hidden = !many || shot.index <= 0;
+  $('shot-next').hidden = !many || shot.index >= count - 1;
+
+  const dots = $('shot-dots');
+  if (dots.children.length !== (many ? count : 0)) {
+    dots.replaceChildren();
+    for (let i = 0; i < count; i++) {
+      const dot = el('button', 'shot-dot');
+      dot.type = 'button';
+      dot.setAttribute('aria-label', `Экран ${i + 1}`);
+      dot.addEventListener('click', () => gotoShot(i));
+      dots.append(dot);
+    }
+  }
+  [...dots.children].forEach((dot, i) => dot.classList.toggle('active', i === shot.index));
+
+  const page = shot.pages[shot.index];
+  if (page) $('shot-label').textContent = `${page.label} · ${page.width}×${page.height}`;
+  else $('shot-label').textContent = many ? `Экран ${shot.index + 1} из ${count}` : 'Снимаю экран…';
+  $('shot-hint').textContent = shot.error;
+}
+
+// Свайп влево-вправо листает экраны; короткий жест виден сразу, отпускание
+// доводит до соседней страницы. Клик мимо картинки закрывает просмотр.
+function attachShotSwipe(stage) {
+  let startX = 0;
+  let startY = 0;
+  let dx = 0;
+  let tracking = false;
+  let horizontal = false;
+  let swiped = false;
+  stage.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    startX = e.clientX;
+    startY = e.clientY;
+    dx = 0;
+    tracking = true;
+    horizontal = false;
+    swiped = false;
+  });
+  stage.addEventListener('pointermove', (e) => {
+    if (!tracking) return;
+    dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (!horizontal) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      // Вертикальное движение оставляем браузеру: это не листание.
+      if (Math.abs(dx) <= Math.abs(dy)) {
+        tracking = false;
+        return;
+      }
+      horizontal = true;
+      stage.setPointerCapture(e.pointerId);
+      $('shot-strip').classList.add('dragging');
+    }
+    e.preventDefault();
+    if (shot) $('shot-strip').style.transform = `translateX(calc(${-shot.index * 100}% + ${dx}px))`;
+  });
+  const end = () => {
+    if (!tracking) return;
+    tracking = false;
+    if (horizontal && shot) {
+      const count = Math.max(1, shot.total);
+      if (dx <= -40 && shot.index < count - 1) shot.index += 1;
+      else if (dx >= 40 && shot.index > 0) shot.index -= 1;
+      // Клик, которым закончился свайп, не должен закрыть просмотр.
+      swiped = true;
+      setTimeout(() => {
+        swiped = false;
+      }, 400);
+    }
+    horizontal = false;
+    renderShot();
+  };
+  stage.addEventListener('pointerup', end);
+  stage.addEventListener('pointercancel', () => {
+    tracking = false;
+    horizontal = false;
+    renderShot();
+  });
+  stage.addEventListener('click', (e) => {
+    if (swiped || !shot) return;
+    if (e.target.closest('img, button')) return;
+    closeShots();
+  });
+}
+
+$('shots').addEventListener('click', openShots);
+$('shot-close').addEventListener('click', closeShots);
+$('shot-refresh').addEventListener('click', () => {
+  if (shot) startShots(shot.agent);
+});
+$('shot-prev').addEventListener('click', () => gotoShot((shot ? shot.index : 0) - 1));
+$('shot-next').addEventListener('click', () => gotoShot((shot ? shot.index : 0) + 1));
+// Esc в полноэкранном диалоге закрывает его сам; здесь важно только снять
+// ожидание ответа и очистить недогруженные картинки.
+$('shot').addEventListener('cancel', (e) => {
+  e.preventDefault();
+  closeShots();
+});
+$('shot').addEventListener('keydown', (e) => {
+  if (!shot) return;
+  if (e.key === 'ArrowLeft') {
+    e.preventDefault();
+    gotoShot(shot.index - 1);
+  } else if (e.key === 'ArrowRight') {
+    e.preventDefault();
+    gotoShot(shot.index + 1);
+  }
+});
+$('shot-agent-cancel').addEventListener('click', () => $('shot-agent').close());
+$('shot-agent').addEventListener('click', (e) => {
+  if (e.target === $('shot-agent')) $('shot-agent').close();
+});
+attachShotSwipe($('shot-stage'));
 
 boot();

@@ -9,6 +9,7 @@ mod image;
 mod install;
 mod opencode;
 mod platform;
+mod screen;
 mod status;
 mod util;
 
@@ -278,6 +279,32 @@ impl Agent {
                         }
                     };
                     let _ = out.send(msg);
+                });
+            }
+            ServerMsg::Screens { id } => {
+                // Съёмка и сжатие занимают заметное время: держим их вне цикла
+                // сообщений, иначе панель не получит ленту, пока идёт снимок.
+                let out = self.out.clone();
+                tokio::task::spawn_blocking(move || match screen::capture() {
+                    Ok(shots) => {
+                        for shot in shots {
+                            let msg = AgentMsg::Screen {
+                                id: id.clone(),
+                                index: shot.index,
+                                count: shot.count,
+                                label: shot.label,
+                                width: shot.width,
+                                height: shot.height,
+                                data: aipanel_proto::b64::encode(&shot.png),
+                            };
+                            let _ = out.send(msg);
+                        }
+                        let _ = out.send(AgentMsg::Screens { id, error: None });
+                    }
+                    Err(e) => {
+                        util::log(&format!("screenshot failed: {e}"));
+                        let _ = out.send(AgentMsg::Screens { id, error: Some(e) });
+                    }
                 });
             }
         }
@@ -567,6 +594,10 @@ fn arg_value(args: &[String], flag: &str) -> Option<String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // Снимок экрана одинаков на всех режимах: координаты и размеры мониторов
+    // нужны настоящие, а не уменьшенные масштабом Windows.
+    screen::enable_dpi_awareness();
 
     // Второй экземпляр агента (например, для удалённой панели) живёт в своём
     // каталоге состояния: так его лог, pid-файл и статус не пересекаются с

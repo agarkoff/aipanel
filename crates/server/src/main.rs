@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo, IMAGE_MIMES, MAX_IMAGE_BYTES};
+use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo, IMAGE_MIMES, MAX_IMAGE_BYTES, MAX_SCREEN_BYTES, MAX_SCREENS};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -669,6 +669,50 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
             };
             let _ = wait.tx.send(result);
         }
+        AgentMsg::Screen { id, index, count, label, width, height, data } => {
+            // Снимок идёт тому браузеру, который его попросил, и только от того
+            // агента, которому команда была отправлена.
+            let Some(p) = inner.pending.get(&id) else {
+                return;
+            };
+            if p.owner != owner || p.agent != agent {
+                return;
+            }
+            // Кривой ответ агента не пересылаем: панель по нему строит страницы.
+            if count == 0 || count > MAX_SCREENS || index >= count || width == 0 || height == 0 {
+                return;
+            }
+            // В base64 картинка вырастает на треть; больше сообщения WebSocket
+            // агент всё равно отправить не смог бы.
+            if data.len() > MAX_SCREEN_BYTES * 4 / 3 + 8 {
+                return;
+            }
+            let (browser, orig_id, label) = (p.browser, p.id.clone(), truncate(label, 64));
+            if let Some(b) = inner.browsers.get(&browser) {
+                let _ = b.tx.try_send(
+                    json!({
+                        "t": "screen", "id": orig_id, "index": index, "count": count,
+                        "label": label, "width": width, "height": height, "data": data,
+                    })
+                    .to_string(),
+                );
+            }
+        }
+        AgentMsg::Screens { id, error } => {
+            let allowed = inner
+                .pending
+                .get(&id)
+                .is_some_and(|p| p.owner == owner && p.agent == agent);
+            if !allowed {
+                return;
+            }
+            if let Some(p) = inner.pending.remove(&id) {
+                if let Some(b) = inner.browsers.get(&p.browser) {
+                    let text = json!({ "t": "screens", "id": p.id, "error": error }).to_string();
+                    let _ = b.tx.try_send(text);
+                }
+            }
+        }
     }
 }
 
@@ -804,6 +848,9 @@ enum BrowserMsg {
         #[serde(default)]
         cancel: bool,
     },
+    /// Снять экраны машины агента: в ответ придут `screen` на каждый экран и
+    /// `screens` в конце.
+    Screens { id: String, agent: String },
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -1010,6 +1057,10 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Close { id: cmd, session });
         }
+        BrowserMsg::Screens { id, agent } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Screens { id: cmd });
+        }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
             if !safe_id(&prompt) {
                 reply(&inner, browser, &id, "некорректный идентификатор запроса");
@@ -1067,6 +1118,16 @@ fn command(inner: &mut Inner, browser: u64, orig_id: String, agent: &str, cmd: S
 fn reply(inner: &Inner, browser: u64, id: &str, error: &str) {
     if let Some(b) = inner.browsers.get(&browser) {
         let _ = b.tx.try_send(json!({ "t": "result", "id": id, "ok": false, "error": error }).to_string());
+    }
+}
+
+/// Строка от агента не должна занимать сообщение целиком: подпись экрана
+/// обрезается по числу символов, а не байтов, чтобы не разрезать UTF-8.
+fn truncate(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        text
+    } else {
+        text.chars().take(max).collect()
     }
 }
 

@@ -110,6 +110,9 @@ const stub = `
   const models = ${JSON.stringify(models)};
   const claudeModels = ${JSON.stringify(claudeModels)};
   window.__sent = [];
+  window.__screens = [];
+  window.__screenShots = [];
+  window.__screensError = '';
   window.__older = [];
   window.__olderPages = [];
   window.__setModels = [];
@@ -161,6 +164,12 @@ const stub = `
       } else if (msg.t === 'set_model') {
         window.__setModels.push(msg);
         setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: true }), 0);
+      } else if (msg.t === 'screens') {
+        window.__screens.push(msg);
+        const shots = window.__screenShots || [];
+        shots.forEach((shot, i) =>
+          setTimeout(() => this.emit({ t: 'screen', id: msg.id, index: i, count: shots.length, ...shot }), 0));
+        setTimeout(() => this.emit({ t: 'screens', id: msg.id, error: window.__screensError || null }), 0);
       }
     }
     close() { this.readyState = 3; }
@@ -1262,6 +1271,116 @@ try {
   check('строка хода: секунды, минуты и часы', elapsed.join('|') === '5с|2м 05с|1ч 02м|17ч 01м', elapsed);
   check('строка хода: нет данных агента — строки нет', turnLine.noData === null, turnLine);
   check('строка хода: сессия не работает — строки нет', turnLine.idle === null, turnLine);
+
+  // Значок панели в шапке: снимок экрана машины агента поверх панели. Агент
+  // отдаёт два экрана — панель показывает первый, остальные листаются.
+  const shotPng =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  const shotFlow = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    window.__screens = [];
+    window.__screenShots = [
+      { label: 'Экран 1 · основной', width: 3840, height: 2160, data: '${shotPng}' },
+      { label: 'Экран 2', width: 2560, height: 1440, data: '${shotPng}' },
+    ];
+    document.getElementById('shots').click();
+    await wait(60);
+    const dialog = document.getElementById('shot');
+    const rect = dialog.getBoundingClientRect();
+    const label = () => document.getElementById('shot-label').textContent;
+    const dots = () => [...document.querySelectorAll('#shot-dots .shot-dot')];
+    const first = {
+      open: dialog.open,
+      agent: window.__screens.map((m) => m.agent).join(),
+      pages: document.querySelectorAll('#shot-strip .shot-page').length,
+      imgs: document.querySelectorAll('#shot-strip img').length,
+      label: label(),
+      dots: dots().length,
+      prev: document.getElementById('shot-prev').hidden,
+      next: document.getElementById('shot-next').hidden,
+      full: Math.round(rect.width) === innerWidth && Math.round(rect.height) === innerHeight,
+    };
+    document.getElementById('shot-next').click();
+    const second = {
+      label: label(),
+      prev: document.getElementById('shot-prev').hidden,
+      next: document.getElementById('shot-next').hidden,
+      active: dots().findIndex((d) => d.classList.contains('active')),
+      shift: document.getElementById('shot-strip').style.transform,
+    };
+    // Стрелка влево с клавиатуры возвращает на первый экран.
+    dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+    const back = label();
+    return { first, second, back };
+  })()`);
+  check('значок: снимок открывается поверх панели на весь экран', shotFlow.first.open && shotFlow.first.full, shotFlow.first);
+  check('значок: снимает компьютер открытой сессии', shotFlow.first.agent === 'ui-test', shotFlow.first);
+  check('значок: страниц, картинок и точек столько же, сколько экранов',
+    shotFlow.first.pages === 2 && shotFlow.first.imgs === 2 && shotFlow.first.dots === 2, shotFlow.first);
+  check('значок: подпись экрана с размером', shotFlow.first.label === 'Экран 1 · основной · 3840×2160', shotFlow.first);
+  check('значок: на первом экране «назад» скрыто', shotFlow.first.prev && !shotFlow.first.next, shotFlow.first);
+  check('значок: «вперёд» листает и ведёт точку',
+    shotFlow.second.label === 'Экран 2 · 2560×1440' && !shotFlow.second.prev && shotFlow.second.next &&
+      shotFlow.second.active === 1 && shotFlow.second.shift === 'translateX(-100%)', shotFlow.second);
+  check('значок: стрелка влево с клавиатуры возвращает назад', shotFlow.back === shotFlow.first.label, shotFlow);
+
+  // Свайп влево по снимку — следующий экран.
+  const stageBox = await evaluate(`(() => {
+    const r = document.getElementById('shot-stage').getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  })()`);
+  const swipeY = Math.round(stageBox.y + stageBox.h / 2);
+  const swipeFrom = Math.round(stageBox.x + stageBox.w * 0.8);
+  const swipeTo = Math.round(stageBox.x + stageBox.w * 0.2);
+  await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: swipeFrom, y: swipeY, button: 'left', clickCount: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: swipeTo, y: swipeY, button: 'left', buttons: 1 });
+  await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: swipeTo, y: swipeY, button: 'left', clickCount: 1 });
+  await sleep(80);
+  const swipeLabel = await evaluate(`document.getElementById('shot-label').textContent`);
+  check('значок: свайп влево листает экраны', swipeLabel === 'Экран 2 · 2560×1440', swipeLabel);
+
+  // Ошибку агента видно в просмотре, Esc закрывает и очищает страницы.
+  const shotError = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    window.__screenShots = [];
+    window.__screensError = 'снимок экрана есть только на Windows';
+    document.getElementById('shot-refresh').click();
+    await wait(60);
+    const hint = document.getElementById('shot-hint').textContent;
+    const dialog = document.getElementById('shot');
+    dialog.dispatchEvent(new Event('cancel', { cancelable: true }));
+    return { hint, open: dialog.open, pages: document.querySelectorAll('#shot-strip .shot-page').length };
+  })()`);
+  check('значок: ошибка агента видна в просмотре', shotError.hint.includes('только на Windows'), shotError);
+  check('значок: Esc закрывает и очищает просмотр', !shotError.open && shotError.pages === 0, shotError);
+
+  // Без открытой сессии и при двух компьютерах панель спрашивает, чей экран.
+  const shotPicker = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    closeView();
+    window.__screensError = '';
+    window.__screenShots = [{ label: 'Экран 1', width: 1920, height: 1080, data: '${shotPng}' }];
+    window.__sock.emit({ t: 'agents', agents: [
+      { name: 'ui-test', online: true, os: 'test', version: 'test', sessions: [window.__session] },
+      { name: 'laptop', online: true, os: 'test', version: 'test', sessions: [] },
+    ]});
+    window.__screens = [];
+    document.getElementById('shots').click();
+    await wait(20);
+    const picker = document.getElementById('shot-agent');
+    const names = [...picker.querySelectorAll('button.model')].map((b) => b.textContent);
+    const open = picker.open;
+    picker.querySelector('button.model').click();
+    await wait(60);
+    const asked = window.__screens.map((m) => m.agent).join();
+    const shotOpen = document.getElementById('shot').open;
+    document.getElementById('shot').dispatchEvent(new Event('cancel', { cancelable: true }));
+    window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test', sessions: [window.__session] }] });
+    return { open, names, asked, shotOpen };
+  })()`);
+  check('значок: без сессии и двух компьютерах — выбор компьютера',
+    shotPicker.open && shotPicker.names.includes('ui-test') && shotPicker.names.includes('laptop'), shotPicker);
+  check('значок: выбранный компьютер снимает экран', shotPicker.asked === 'ui-test' && shotPicker.shotOpen, shotPicker);
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
