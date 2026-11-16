@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "aipanel-agent"
-version = "10.0.0"
+version = "10.1.0"
 dependencies = [
  "aipanel-proto",
  "futures-util",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-proto"
-version = "10.0.0"
+version = "10.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -35,7 +35,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-server"
-version = "10.0.0"
+version = "10.1.0"
 dependencies = [
  "aipanel-proto",
  "axum",

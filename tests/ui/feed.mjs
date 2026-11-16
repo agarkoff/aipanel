@@ -1538,6 +1538,81 @@ try {
   const swipeLabel = await evaluate(`document.getElementById('shot-label').textContent`);
   check('значок: свайп влево листает экраны', swipeLabel === 'Экран 2 · 2560×1440', swipeLabel);
 
+  // Щипок двумя пальцами приближает снимок, приближённый кадр двигается одним
+  // пальцем, а соседний экран снова показывается целиком. Картинка нужна
+  // настоящего размера: у пиксельной нечего приближать и некуда двигать.
+  const zoomBox = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const canvas = document.createElement('canvas');
+    canvas.width = 1200;
+    canvas.height = 800;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#2f4a6d';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const data = canvas.toDataURL('image/png').split(',')[1];
+    window.__screenShots = [
+      { label: 'Экран 1', width: 1200, height: 800, data },
+      { label: 'Экран 2', width: 800, height: 600, data },
+    ];
+    document.getElementById('shot-refresh').click();
+    await wait(120);
+    const r = document.getElementById('shot-stage').getBoundingClientRect();
+    return { x: r.left, y: r.top, w: r.width, h: r.height };
+  })()`);
+  await waitFor(`(() => {
+    const img = document.querySelector('#shot-strip .shot-page img');
+    return !!img && img.complete && img.naturalWidth > 0;
+  })()`);
+  const zoomAt = {
+    x: Math.round(zoomBox.x + zoomBox.w / 2),
+    y: Math.round(zoomBox.y + zoomBox.h / 2),
+  };
+  const touch = (type, points) => send('Input.dispatchTouchEvent', { type, touchPoints: points });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+  // Два пальца расходятся вдвое: 80 пикселей между ними → 160.
+  await touch('touchStart', [
+    { x: zoomAt.x - 40, y: zoomAt.y, id: 1 },
+    { x: zoomAt.x + 40, y: zoomAt.y, id: 2 },
+  ]);
+  await touch('touchMove', [
+    { x: zoomAt.x - 80, y: zoomAt.y, id: 1 },
+    { x: zoomAt.x + 80, y: zoomAt.y, id: 2 },
+  ]);
+  await sleep(80);
+  const pinch = await evaluate(`(() => {
+    const img = document.querySelector('#shot-strip .shot-page img');
+    return { transform: img.style.transform, label: document.getElementById('shot-label').textContent };
+  })()`);
+  await touch('touchEnd', []);
+  await sleep(80);
+  check('значок: щипок приближает снимок и пишет масштаб в подписи',
+    /scale\(2\)$/.test(pinch.transform) && pinch.label === 'Экран 1 · 1200×800 · 200%', pinch);
+
+  // Приближённый кадр палец двигает, а не листает.
+  await touch('touchStart', [{ x: zoomAt.x, y: zoomAt.y, id: 3 }]);
+  await touch('touchMove', [{ x: zoomAt.x + 60, y: zoomAt.y + 20, id: 3 }]);
+  await sleep(80);
+  const panned = await evaluate(`(() => ({
+    transform: document.querySelector('#shot-strip .shot-page img').style.transform,
+    label: document.getElementById('shot-label').textContent,
+  }))()`);
+  await touch('touchEnd', []);
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  await sleep(80);
+  check('значок: приближённый снимок двигается пальцем и не листает',
+    /^translate\(60px, /.test(panned.transform) && panned.label === 'Экран 1 · 1200×800 · 200%', panned);
+
+  // Соседний экран показывается целиком: приближение относится к прежнему кадру.
+  const afterZoom = await evaluate(`(() => {
+    document.getElementById('shot-next').click();
+    return {
+      label: document.getElementById('shot-label').textContent,
+      transforms: [...document.querySelectorAll('#shot-strip .shot-page img')].map((i) => i.style.transform),
+    };
+  })()`);
+  check('значок: после листания снимок снова целый',
+    afterZoom.label === 'Экран 2 · 800×600' && afterZoom.transforms.every((t) => !t), afterZoom);
+
   // Ошибку агента видно в просмотре, Esc закрывает и очищает страницы.
   const shotError = await evaluate(`(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
