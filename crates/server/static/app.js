@@ -928,6 +928,28 @@ async function copyToClipboard(text) {
   return ok;
 }
 
+// Кнопка «скопировать текст» в строке под сообщением (рядом со временем).
+// Иконка та же, что у идентификатора сессии; копируется исходный текст сообщения.
+const copyTextTimers = new WeakMap();
+function copyTextButton(text) {
+  const btn = el('button', 'copy-text');
+  btn.type = 'button';
+  btn.title = 'Скопировать текст сообщения';
+  btn.setAttribute('aria-label', 'Скопировать текст сообщения');
+  btn.append(icon([
+    'M7 5.5h5A1.5 1.5 0 0 1 13.5 7v5a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 12V7A1.5 1.5 0 0 1 7 5.5Z',
+    'M10.5 3.5V3A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v5A1.5 1.5 0 0 0 4 9.5h.5',
+  ]));
+  btn.addEventListener('click', async () => {
+    const ok = await copyToClipboard(text);
+    btn.classList.toggle('copied', ok);
+    clearTimeout(copyTextTimers.get(btn));
+    if (ok) copyTextTimers.set(btn, setTimeout(() => btn.classList.remove('copied'), 1500));
+    setHint(ok ? 'Текст сообщения скопирован.' : 'Не удалось скопировать текст.', !ok);
+  });
+  return btn;
+}
+
 function cancelQueued(item) {
   const cur = current();
   if (!cur || !item.id.startsWith('queue:')) return;
@@ -1186,7 +1208,11 @@ function buildItem(item, call) {
     }
   }
   if (item.ts && (item.kind === 'text' || item.kind === 'error')) {
-    node.append(el('div', 'time', new Date(item.ts).toLocaleString()));
+    // Строка под сообщением: время слева, кнопка копирования текста — справа.
+    const foot = el('div', 'foot');
+    foot.append(el('div', 'time', new Date(item.ts).toLocaleString()));
+    if (item.text) foot.append(copyTextButton(item.text));
+    node.append(foot);
   }
   return node;
 }

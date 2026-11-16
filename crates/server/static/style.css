@@ -582,7 +582,26 @@ input, textarea, select {
 .md th.right, .md td.right { text-align: right; }
 .md input[type=checkbox] { width: auto; margin: 0 2px 0 0; vertical-align: middle; }
 
-.time { color: var(--muted); font-size: 11px; margin-top: 2px; }
+/* Строка под сообщением: время слева, копирование текста — по правому краю. */
+.foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.time { color: var(--muted); font-size: 11px; }
+.copy-text {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.copy-text:hover { color: var(--text); }
+.copy-text.copied { color: var(--idle); }
 
 /* Запросы opencode: разрешения и формы с вариантами ответа. */
 .prompts {

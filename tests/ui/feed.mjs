@@ -389,6 +389,31 @@ try {
   })()`);
   check('свои сообщения видны в ленте', mine.count === 3 && mine.min > 0, mine);
 
+  // Копирование текста: у каждого сообщения со временем — кнопка справа от него,
+  // прижатая к правому краю (время, наоборот, у левого).
+  const copy = await evaluate(`(() => {
+    const items = [...document.querySelectorAll('#feed .item.text')];
+    const first = items[0];
+    const btn = first.querySelector('.foot .copy-text');
+    const time = first.querySelector('.foot .time');
+    const itemBox = first.getBoundingClientRect();
+    const btnBox = btn.getBoundingClientRect();
+    const timeBox = time.getBoundingClientRect();
+    return {
+      items: items.length,
+      withButton: items.filter((n) => n.querySelector('.foot .copy-text')).length,
+      withTime: items.filter((n) => n.querySelector('.foot .time')).length,
+      label: btn.getAttribute('aria-label'),
+      iconPaths: btn.querySelectorAll('svg path').length,
+      rightGap: Math.round(itemBox.right - btnBox.right),
+      leftGap: Math.round(timeBox.left - itemBox.left),
+      sameRow: Math.abs((timeBox.top + timeBox.bottom) / 2 - (btnBox.top + btnBox.bottom) / 2) < 3,
+    };
+  })()`);
+  check('у каждого сообщения есть копирование текста', copy.items > 0 && copy.withButton === copy.items && copy.withTime === copy.items, copy);
+  check('копирование — справа от времени, по правому краю', copy.rightGap === 0 && copy.leftGap === 0 && copy.sameRow, copy);
+  check('у кнопки копирования есть подпись и иконка', copy.label === 'Скопировать текст сообщения' && copy.iconPaths === 2, copy);
+
   // Нажатия на закреп: переход к сообщению и переключение на предыдущее своё.
   const pinState = async () => evaluate(`(() => {
     const feed = document.getElementById('feed');
