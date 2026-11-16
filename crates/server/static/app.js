@@ -604,8 +604,10 @@ function startRename(place, agent, session, row) {
   renaming = { agent: agent.name, session: session.key, place, old, input };
   // В шапке поле встаёт на место заголовка, в списке — поверх всей строки: на
   // телефоне так удобнее печатать, и не приходится угадывать место под палец.
-  if (place === 'header') $('title').replaceChildren(input);
-  else if (row.isConnected) row.append(input);
+  if (place === 'header') {
+    $('title').replaceChildren(input);
+    $('rename').hidden = true;
+  } else if (row.isConnected) row.append(input);
   else {
     renaming = null;
     return;
@@ -649,6 +651,18 @@ function onRenameResult(msg) {
 
 $('title').addEventListener('click', () => {
   if (renaming) return;
+  const cur = current();
+  if (cur) startRename('header', cur.agent, cur.session);
+});
+// Карандаш рядом с заголовком делает правку имени заметной — в том числе на
+// телефоне, где наведение и подсказки недоступны.
+$('rename').addEventListener('click', () => {
+  const cur = current();
+  if (cur) startRename('header', cur.agent, cur.session);
+});
+// Та же правка из панели под стрелкой: на телефоне это главный путь.
+$('sm-rename').addEventListener('click', () => {
+  setSessionMenu(false);
   const cur = current();
   if (cur) startRename('header', cur.agent, cur.session);
 });
@@ -933,6 +947,8 @@ function renderHeader() {
     titleEl.classList.remove('editable');
     titleEl.removeAttribute('title');
     titleEl.tabIndex = -1;
+    $('rename').hidden = true;
+    $('sm-rename').hidden = true;
     $('subtitle').textContent = '';
     $('session-id').hidden = true;
     $('copy-id').hidden = true;
@@ -954,6 +970,12 @@ function renderHeader() {
     titleEl.title = 'Переименовать сессию';
     titleEl.tabIndex = 0;
   }
+  // Карандаш и пункт панели ведут к одному и тому же полю. У агента не в сети
+  // правка не отправится, поэтому кнопки неактивны.
+  $('rename').hidden = Boolean(editing);
+  $('rename').disabled = !agent.online;
+  $('sm-rename').hidden = false;
+  $('sm-rename').disabled = !agent.online;
   $('subtitle').textContent = `${agent.name} · ${session.tool} · ${session.cwd}`;
   $('session-id').hidden = false;
   $('session-id').textContent = sessionId(session.key);

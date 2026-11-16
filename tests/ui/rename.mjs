@@ -299,6 +299,12 @@ try {
   if (!(await waitFor(`document.getElementById('title').textContent === 'Старое имя'`))) {
     throw new Error('сессия не открылась');
   }
+  const pencil = await evaluate(`(() => {
+    const b = document.getElementById('rename');
+    return { hidden: b.hidden, disabled: b.disabled };
+  })()`);
+  check('рядом с заголовком есть карандаш правки', !pencil.hidden && !pencil.disabled, pencil);
+
   await click('#title');
   let field = await renameInput('.rename-header');
   check('заголовок в шапке открывает поле', field !== null);
@@ -320,6 +326,24 @@ try {
   }
   check('после ответа агента шапка показывает новое имя', true);
   check('поле в шапке закрылось', (await evaluate(`document.querySelector('.rename-header') === null`)) === true);
+
+  // Карандаш рядом с заголовком и пункт в панели под стрелкой открывают то же поле.
+  await click('#rename');
+  field = await renameInput('.rename-header');
+  check('карандаш в шапке открывает поле', field !== null);
+  await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+  await click('#more');
+  const item = await evaluate(`(() => {
+    const b = document.getElementById('sm-rename');
+    return { open: !document.getElementById('session-menu').hidden, hidden: b.hidden, label: b.textContent.trim() };
+  })()`);
+  check('в панели под стрелкой есть переименование', item.open && !item.hidden && item.label === 'Переименовать сессию', item);
+  await click('#sm-rename');
+  field = await renameInput('.rename-header');
+  check('пункт «Переименовать сессию» открывает поле', field !== null);
+  check('панель под стрелкой закрылась', (await evaluate(`document.getElementById('session-menu').hidden`)) === true);
+  await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 
   // --- список: имя открытой сессии правится нажатием (слева панель видна, пока
   // сессия открыта). Нажатие на имя другой строки по-прежнему открывает её.
@@ -388,11 +412,25 @@ try {
   // --- телефон: поле не выходит за экран и не даёт Safari приблизить страницу
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
   await sleep(100);
+  const pencilMobile = await evaluate(`(() => {
+    const b = document.getElementById('rename');
+    const box = b.getBoundingClientRect();
+    return { hidden: b.hidden, width: box.width, height: box.height };
+  })()`);
+  check('карандаш правки на телефоне под палец (32px)', !pencilMobile.hidden && pencilMobile.width >= 32 && pencilMobile.height >= 32, pencilMobile);
   await click('#title');
   let mobile = await renameInput('.rename-header');
   check('на телефоне заголовок тоже правится', mobile !== null);
   check('поле в шапке не шире экрана', mobile && mobile.left >= 0 && mobile.right <= mobile.viewport, mobile);
   check('поле на телефоне не приближает страницу (16px)', mobile && mobile.font === '16px', mobile);
+  await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+  // На телефоне наведение недоступно, поэтому равнозначный путь — панель под стрелкой.
+  await click('#more');
+  await click('#sm-rename');
+  mobile = await renameInput('.rename-header');
+  check('на телефоне переименование есть в панели под стрелкой', mobile !== null, mobile);
+  check('поле из панели на телефоне тоже 16px', mobile && mobile.font === '16px', mobile);
   await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 
   await click('#back');
