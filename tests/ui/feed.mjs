@@ -1045,6 +1045,30 @@ try {
   check('ожидание выбора — уведомление браузера', notices.waiting.length === 1 && notices.waiting[0].includes('ждёт ответа'), notices);
   check('от ответа на выбор уведомления нет', notices.afterAnswer === 0, notices);
 
+  // Строка хода: показываем только то, что прислал агент.
+  const turnLine = await evaluate(`(() => {
+    const load = (patch) => window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test',
+      sessions: [{ ...window.__session, ...patch }] }] });
+    const read = () => { const b = document.getElementById('turn'); return b.hidden ? null : b.textContent; };
+    // Блок уведомлений закрыл открытую сессию: открываем её снова.
+    load({});
+    document.querySelector('#sessions .session').click();
+    load({ status: 'busy', turn: { started_at: Date.now() - 34000, input: 59319, output: 1234 } });
+    const full = read();
+    load({ status: 'busy', turn: { started_at: Date.now() - 5000 } });
+    const bare = read();
+    load({ status: 'busy' });
+    const noData = read();
+    load({ status: 'idle', turn: { started_at: Date.now() - 5000, input: 10, output: 10 } });
+    const idle = read();
+    load({});
+    return { full, bare, noData, idle };
+  })()`);
+  check('строка хода: время и оба счётчика', /^✻3[3-6]с↑ 59\.3k↓ 1\.23k$/.test(turnLine.full || ''), turnLine);
+  check('строка хода: до первого ответа токенов нет', /^✻[4-6]с$/.test(turnLine.bare || ''), turnLine);
+  check('строка хода: нет данных агента — строки нет', turnLine.noData === null, turnLine);
+  check('строка хода: сессия не работает — строки нет', turnLine.idle === null, turnLine);
+
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
   failures.push(String(error));

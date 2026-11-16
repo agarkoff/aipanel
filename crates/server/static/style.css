@@ -644,6 +644,24 @@ input, textarea, select {
 .prompt-save { color: var(--muted); font-size: 11px; margin-top: 6px; overflow-wrap: anywhere; }
 .prompt-external { color: var(--accent); font-size: 13px; }
 
+/* Строка хода: время и токены, пока сессия работает. Одна и та же на любом экране. */
+.turn {
+  margin: 0;
+  padding: 6px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.turn[hidden] { display: none; }
+.turn .turn-mark { color: var(--busy); animation: turn-pulse 1.6s ease-in-out infinite; }
+@keyframes turn-pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .turn .turn-mark { animation: none; } }
+
 .composer {
   display: flex;
   gap: 8px;

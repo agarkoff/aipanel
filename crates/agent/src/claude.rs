@@ -15,7 +15,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, SessionInfo};
+use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, SessionInfo, TurnUsage};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -39,6 +39,10 @@ const HANDOFF_BYTES: u64 = 2 * 1024 * 1024;
 const OLDER_BYTES: u64 = 1024 * 1024;
 const OLDER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_CHUNK: u64 = 32 * 1024 * 1024;
+/// Как далеко назад от конца транскрипта искать запрос, с которого начался ход,
+/// и каким куском читать. Ход длиннее предела считается неизвестным.
+const TURN_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const TURN_CHUNK: u64 = 1024 * 1024;
 const HISTORY_ITEMS: usize = 200;
 const TEXT_LIMIT: usize = 20_000;
 const RESULT_LIMIT: usize = 4_000;
@@ -98,10 +102,19 @@ struct TailMeta {
     model: Option<String>,
 }
 
+struct TurnCache {
+    /// Смещение строки с запросом пользователя, с которого начался ход.
+    at: Option<u64>,
+    mtime: SystemTime,
+    usage: Option<TurnUsage>,
+}
+
 #[derive(Default)]
 struct St {
     known: HashMap<String, Known>,
     tails: HashMap<PathBuf, (SystemTime, TailMeta)>,
+    /// Токены текущего хода и смещение запроса, с которого он начался.
+    turns: HashMap<PathBuf, TurnCache>,
     transcripts: HashMap<String, PathBuf>,
     /// Начало показанной части транскрипта: от него назад читается догрузка
     /// ранних сообщений. Ноль — показан весь транскрипт.
@@ -253,12 +266,17 @@ impl Claude {
                 }
                 let transcript = st.transcripts.get(sid).cloned();
                 let mut updated = v["statusUpdatedAt"].as_i64().or(v["updatedAt"].as_i64()).unwrap_or(0);
+                let status = v["status"].as_str().unwrap_or("idle").to_owned();
                 let mut meta = TailMeta::default();
+                let mut turn = None;
                 if let Some(p) = &transcript {
                     if let Ok(mtime) = fs::metadata(p).and_then(|m| m.modified()) {
                         meta = tail_meta(&mut st, p, mtime);
                         updated = updated.max(meta.updated);
                         used.insert(p.clone());
+                        if matches!(status.as_str(), "busy" | "shell" | "stalled") {
+                            turn = turn_usage(&mut st, p, mtime);
+                        }
                     }
                 }
                 let cwd = v["cwd"].as_str().unwrap_or_default().to_owned();
@@ -268,11 +286,12 @@ impl Claude {
                     tool: "claude".into(),
                     title: meta.title.unwrap_or_else(|| name.to_owned()),
                     cwd: cwd.clone(),
-                    status: v["status"].as_str().unwrap_or("idle").to_owned(),
+                    status,
                     live: true,
                     updated_at: updated,
                     delivery: if cfg!(windows) { "console" } else { "none" }.into(),
                     model: meta.model.unwrap_or_default(),
+                    turn,
                 });
                 known.insert(sid.to_owned(), Known { pid: Some(pid), cwd, path: transcript });
             }
@@ -304,6 +323,7 @@ impl Claude {
             let updated = last_update(&meta, mtime);
             let cwd = meta.cwd.clone().unwrap_or_default();
             let running = st.headless.contains_key(&sid) || st.launched.contains_key(&sid);
+            let turn = if running { turn_usage(&mut st, &path, mtime) } else { None };
             let title = meta.title.unwrap_or_else(|| match basename(&cwd) {
                 "" => sid.chars().take(8).collect(),
                 dir => dir.to_owned(),
@@ -325,11 +345,13 @@ impl Claude {
                 }
                 .into(),
                 model: meta.model.unwrap_or_default(),
+                turn,
             });
             known.insert(sid, Known { pid: None, cwd, path: Some(path) });
         }
 
         st.tails.retain(|p, _| used.contains(p));
+        st.turns.retain(|p, _| used.contains(p));
         st.known = known;
         out
     }
@@ -991,6 +1013,123 @@ fn tail_meta(st: &mut St, path: &Path, mtime: SystemTime) -> TailMeta {
     meta
 }
 
+/// Токены текущего хода по транскрипту. Результат пересчитывается только при
+/// смене mtime; смещение запроса, с которого начался ход, запоминается, чтобы
+/// не искать его заново при каждой дописанной строке.
+fn turn_usage(st: &mut St, path: &Path, mtime: SystemTime) -> Option<TurnUsage> {
+    if let Some(c) = st.turns.get(path).filter(|c| c.mtime == mtime) {
+        return c.usage.clone();
+    }
+    let len = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let prev = st.turns.get(path).and_then(|c| c.at);
+    let (at, usage) = read_turn(path, len, prev);
+    st.turns.insert(path.to_owned(), TurnCache { at, mtime, usage: usage.clone() });
+    usage
+}
+
+fn read_turn(path: &Path, len: u64, prev: Option<u64>) -> (Option<u64>, Option<TurnUsage>) {
+    // Запомненный запрос годится, пока на его месте всё ещё лежит запрос: файл
+    // могли переписать или обрезать.
+    if let Some(from) = prev.filter(|&p| p < len) {
+        if let Some((at, usage)) = sum_turn(&read_range(path, from, len), from) {
+            return (Some(at), Some(usage));
+        }
+    }
+    let Some(from) = find_prompt(path, len) else { return (None, None) };
+    match sum_turn(&read_range(path, from, len), from) {
+        Some((at, usage)) => (Some(at), Some(usage)),
+        None => (None, None),
+    }
+}
+
+fn has(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Строка транскрипта, с которой начинается ход: запрос самого пользователя, а не
+/// результат вызова инструмента, служебная вставка или запись подагента.
+fn is_prompt(line: &[u8]) -> bool {
+    has(line, b"\"type\":\"user\"")
+        && !has(line, b"\"type\":\"tool_result\"")
+        && !has(line, b"\"isMeta\":true")
+        && !has(line, b"\"isSidechain\":true")
+        && !has(line, b"\"isCompactSummary\":true")
+}
+
+/// Смещение последнего запроса пользователя; ищет назад от конца файла.
+fn find_prompt(path: &Path, len: u64) -> Option<u64> {
+    let floor = len.saturating_sub(TURN_MAX_BYTES);
+    let mut end = len;
+    let mut chunk = TURN_CHUNK;
+    while end > floor {
+        let start = end.saturating_sub(chunk).max(floor);
+        let data = read_range(path, start, end);
+        let mut lines: Vec<(u64, &[u8])> = Vec::new();
+        let mut pos = 0u64;
+        for line in data.split(|&b| b == b'\n') {
+            lines.push((pos, line));
+            pos += line.len() as u64 + 1;
+        }
+        // Первая строка куска может начинаться в предыдущем: её разбирает следующий круг.
+        let whole_from = usize::from(start > 0);
+        for (pos, line) in lines.iter().skip(whole_from).rev() {
+            if is_prompt(line) {
+                return Some(start + pos);
+            }
+        }
+        if start == 0 {
+            return None;
+        }
+        if lines.len() == 1 {
+            // В куске нет ни одного перевода строки: одна огромная строка. Берём кусок больше.
+            chunk *= 2;
+        } else {
+            end = start + lines[1].0;
+        }
+    }
+    None
+}
+
+/// Складывает токены хода из записей, начиная с запроса пользователя в `data`
+/// (`base` — его смещение в файле). Новый запрос внутри куска начинает ход заново.
+/// `None`, если кусок начинается не с запроса. Недописанная последняя строка
+/// пропускается: её подхватит следующий разбор.
+fn sum_turn(data: &[u8], base: u64) -> Option<(u64, TurnUsage)> {
+    let mut at = base;
+    let mut usage: Option<TurnUsage> = None;
+    // Ответ пишется в транскрипт несколькими записями с одним message.id и одинаковым
+    // usage (отдельно мысль, текст, вызов): считаем его один раз.
+    let mut outputs: HashMap<String, u64> = HashMap::new();
+    let mut pos = 0usize;
+    let mut parts = data.split(|&b| b == b'\n').peekable();
+    while let Some(line) = parts.next() {
+        let offset = pos;
+        pos += line.len() + 1;
+        if parts.peek().is_none() {
+            break;
+        }
+        if is_prompt(line) {
+            at = base + offset as u64;
+            usage = Some(TurnUsage { started_at: line_ts(&String::from_utf8_lossy(line)), input: 0, output: 0 });
+            outputs.clear();
+            continue;
+        }
+        let turn = usage.as_mut()?;
+        if !has(line, b"\"type\":\"assistant\"") || has(line, b"\"isSidechain\":true") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else { continue };
+        let u = &v["message"]["usage"];
+        let (Some(id), Some(out)) = (v["message"]["id"].as_str(), u["output_tokens"].as_u64()) else { continue };
+        let count = |key: &str| u[key].as_u64().unwrap_or(0);
+        turn.input = count("input_tokens") + count("cache_read_input_tokens") + count("cache_creation_input_tokens");
+        let slot = outputs.entry(id.to_owned()).or_insert(0);
+        *slot = (*slot).max(out);
+        turn.output = outputs.values().sum();
+    }
+    usage.map(|u| (at, u))
+}
+
 /// Время последней записи транскрипта; mtime — запасной вариант, если в файле
 /// не нашлось ни одной записи с меткой времени.
 fn last_update(meta: &TailMeta, mtime: SystemTime) -> i64 {
@@ -1244,6 +1383,83 @@ fn parse_queued(line: &str, out: &mut Vec<Item>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prompt_line(ts: &str) -> String {
+        format!(r#"{{"type":"user","timestamp":"{ts}","message":{{"role":"user","content":"привет"}}}}"#)
+    }
+
+    fn reply_line(id: &str, input: u64, cache: u64, output: u64) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}","content":[],"usage":{{"input_tokens":{input},"cache_creation_input_tokens":0,"cache_read_input_tokens":{cache},"output_tokens":{output}}}}}}}"#
+        )
+    }
+
+    const TOOL_RESULT: &str =
+        r#"{"type":"user","message":{"role":"user","content":[{"tool_use_id":"t1","type":"tool_result","content":"ok"}]}}"#;
+
+    #[test]
+    fn turn_counts_each_reply_once() {
+        let text = [
+            prompt_line("2026-11-15T03:48:19.364Z"),
+            // Один ответ записан тремя строками с одним usage.
+            reply_line("msg_1", 2, 1000, 300),
+            reply_line("msg_1", 2, 1000, 300),
+            TOOL_RESULT.to_owned(),
+            reply_line("msg_2", 3, 1500, 120),
+            String::new(),
+        ]
+        .join("\n");
+        let (at, turn) = sum_turn(text.as_bytes(), 40).unwrap();
+        assert_eq!(at, 40);
+        assert_eq!(turn.started_at, parse_iso_ms("2026-11-15T03:48:19.364Z"));
+        assert_eq!(turn.input, 1503);
+        assert_eq!(turn.output, 420);
+    }
+
+    #[test]
+    fn turn_restarts_on_new_prompt_and_skips_partial_line() {
+        let first = [prompt_line("2026-11-15T03:00:00.000Z"), reply_line("msg_1", 1, 10, 50)].join("\n");
+        let second = prompt_line("2026-11-15T03:10:00.000Z");
+        let partial = reply_line("msg_2", 1, 10, 70);
+        let text = format!("{first}\n{second}\n{}", &partial[..partial.len() / 2]);
+        let (at, turn) = sum_turn(text.as_bytes(), 0).unwrap();
+        assert_eq!(at, (first.len() + 1) as u64);
+        assert_eq!(turn.started_at, parse_iso_ms("2026-11-15T03:10:00.000Z"));
+        // У нового хода записанных ответов ещё нет: не переносим цифры прошлого.
+        assert_eq!((turn.input, turn.output), (0, 0));
+    }
+
+    #[test]
+    fn turn_must_start_with_prompt() {
+        let text = [TOOL_RESULT.to_owned(), reply_line("msg_1", 1, 1, 1), String::new()].join("\n");
+        assert!(sum_turn(text.as_bytes(), 0).is_none());
+        assert!(!is_prompt(TOOL_RESULT.as_bytes()));
+        let meta = r#"{"type":"user","isMeta":true,"message":{"role":"user","content":"x"}}"#;
+        assert!(!is_prompt(meta.as_bytes()));
+    }
+
+    #[test]
+    fn finds_turn_on_disk_and_reuses_offset() {
+        let dir = std::env::temp_dir().join(format!("aipanel-turn-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.jsonl");
+        let old = [prompt_line("2026-11-15T01:00:00.000Z"), reply_line("msg_0", 1, 1, 9)].join("\n");
+        let cur = [prompt_line("2026-11-15T02:00:00.000Z"), reply_line("msg_1", 2, 500, 40)].join("\n");
+        fs::write(&path, format!("{old}\n{cur}\n")).unwrap();
+        let len = fs::metadata(&path).unwrap().len();
+        let (at, turn) = read_turn(&path, len, None);
+        assert_eq!(at, Some((old.len() + 1) as u64));
+        let turn = turn.unwrap();
+        assert_eq!((turn.input, turn.output), (502, 40));
+        // Дописанный ответ: тот же запрос, смещение берётся из кеша.
+        fs::write(&path, format!("{old}\n{cur}\n{}\n", reply_line("msg_2", 2, 600, 15))).unwrap();
+        let len = fs::metadata(&path).unwrap().len();
+        let (at2, turn2) = read_turn(&path, len, at);
+        assert_eq!(at2, at);
+        let turn2 = turn2.unwrap();
+        assert_eq!((turn2.input, turn2.output), (602, 55));
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn launch_models_are_aliases() {

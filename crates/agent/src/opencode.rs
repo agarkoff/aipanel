@@ -387,6 +387,7 @@ impl OpenCode {
                 updated_at: s["time"]["updated"].as_i64().unwrap_or(0),
                 delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
                 model: session_model(&s["model"]),
+                turn: None,
             });
         }
         out

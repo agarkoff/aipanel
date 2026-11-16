@@ -696,7 +696,39 @@ function noteSessions(list) {
 
 // ------------------------------------------------------------ шапка и лента
 
+// Строка хода: сколько идёт запрос и сколько токенов записал транскрипт.
+// Только записанное агентом: до первого ответа токенов нет, и строка их не показывает.
+function fmtTokens(n) {
+  if (n < 1000) return String(n);
+  return `${(n / 1000).toFixed(n < 10000 ? 2 : 1).replace(/\.?0+$/, '')}k`;
+}
+
+function fmtElapsed(ms) {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s}с` : `${Math.floor(s / 60)}м ${String(s % 60).padStart(2, '0')}с`;
+}
+
+function renderTurn() {
+  const box = $('turn');
+  const cur = current();
+  const turn = cur && cur.agent.online && BUSY_STATUSES.has(cur.session.status) ? cur.session.turn : null;
+  if (!turn) {
+    box.hidden = true;
+    return;
+  }
+  const parts = [];
+  const mark = el('span', 'turn-mark', '✻');
+  parts.push(el('span', '', fmtElapsed(Date.now() - turn.started_at)));
+  if (turn.input) parts.push(el('span', '', `↑ ${fmtTokens(turn.input)}`));
+  if (turn.output) parts.push(el('span', '', `↓ ${fmtTokens(turn.output)}`));
+  box.replaceChildren(mark, ...parts);
+  box.title = 'Время с запроса и токены, записанные в транскрипт: ↑ контекст последнего ответа, ↓ выход за ход';
+  box.hidden = false;
+}
+setInterval(renderTurn, 1000);
+
 function renderHeader() {
+  renderTurn();
   const cur = current();
   const badge = $('status');
   if (!cur) {

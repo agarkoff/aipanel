@@ -23,6 +23,28 @@ pub struct SessionInfo {
     /// Модель последнего ответа (`claude-opus-…`, `anthropic/claude-sonnet-…`); пусто, если неизвестна.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// Токены текущего хода по данным транскрипта; нет, если их нечем подтвердить.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<TurnUsage>,
+}
+
+/// Что транскрипт сообщает о текущем ходе: от последнего запроса пользователя
+/// до конца записанного. Только записанное, без оценок: часть ещё не дописанного
+/// ответа сюда не попадает.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    /// Время запроса пользователя, мс с эпохи Unix.
+    pub started_at: i64,
+    /// Контекст последнего ответа: входные токены вместе с кешем; 0 — ответов ещё нет.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub input: u64,
+    /// Выходные токены всех ответов хода; 0 — ответов ещё нет.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub output: u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Элемент ленты сессии. Элемент с уже известным `id` заменяет прежний.
