@@ -1384,6 +1384,11 @@ fn is_notice(v: &Value, text: &str) -> bool {
     }
 }
 
+/// Сводка после сжатия контекста (`/compact` или автосжатие).
+fn is_compact(v: &Value) -> bool {
+    v["isCompactSummary"].as_bool() == Some(true)
+}
+
 /// Прогоняет завершённые строки `[start, end)` через слежение за вопросом
 /// (см. [`crate::ask::Tracker`]). Кусок тот же, что только что ушёл в ленту:
 /// новые строки короткие, а большой первый кусок читается один раз.
@@ -1476,6 +1481,17 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
     match &v["message"]["content"] {
         // Запрос, который Claude Code отправил сам (уведомление о фоновой задаче),
         // а не человек: в ленте это служебная строка, а не своё сообщение.
+        // Сводка, которой Claude Code продолжает сессию после сжатия контекста:
+        // запрос от имени пользователя, но писал его не человек.
+        Value::String(s) if role == "user" && is_compact(&v) => {
+            push(0, "system", "notice", truncate(s, TEXT_LIMIT), Some("compact".into()))
+        }
+        Value::Array(blocks) if role == "user" && is_compact(&v) => {
+            let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
+            if !text.trim().is_empty() {
+                push(0, "system", "notice", truncate(&text, TEXT_LIMIT), Some("compact".into()));
+            }
+        }
         Value::String(s) if role == "user" && is_notice(&v, s) => push(0, "system", "notice", truncate(s, TEXT_LIMIT), None),
         Value::String(s) if !s.trim().is_empty() => push(0, role, "text", truncate(s, TEXT_LIMIT), None),
         Value::Array(blocks) => {
@@ -1768,6 +1784,22 @@ mod tests {
         let got: Vec<_> = items.iter().map(|i| (i.role.as_str(), i.kind.as_str())).collect();
         assert_eq!(got, [("system", "notice"), ("system", "notice"), ("user", "text")]);
         assert_eq!(items[0].text, note);
+    }
+
+    #[test]
+    fn compact_summary_is_a_notice() {
+        let mut items = Vec::new();
+        parse_line(
+            r#"{"type":"user","uuid":"c","isVisibleInTranscriptOnly":true,"isCompactSummary":true,"message":{"role":"user","content":"This session is being continued…"}}"#,
+            &mut items,
+        );
+        parse_line(
+            r#"{"type":"user","uuid":"d","isCompactSummary":true,"message":{"role":"user","content":[{"type":"text","text":"Summary"}]}}"#,
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.role.as_str(), i.kind.as_str(), i.tool.as_deref())).collect();
+        assert_eq!(got, [("system", "notice", Some("compact")), ("system", "notice", Some("compact"))]);
+        assert_eq!(items[1].text, "Summary");
     }
 
     #[test]

@@ -1106,6 +1106,14 @@ function buildItem(item, call) {
     const body = el('div', 'body md');
     body.append(renderMarkdown(item.text, mdOptions()));
     node.append(label, body);
+  } else if (item.kind === 'notice' && item.tool === 'compact') {
+    // Сводка, с которой Claude Code продолжил сессию после сжатия контекста:
+    // её прислал не человек, поэтому плашка, а внутри — markdown.
+    const details = el('details');
+    const body = el('div', 'body md');
+    body.append(renderMarkdown(item.text, mdOptions()));
+    details.append(el('summary', '', 'Контекст сжат: сводка прежней части сессии'), body);
+    node.append(details);
   } else if (item.kind === 'notice') {
     // Служебный запрос Claude Code (уведомление о фоновой задаче): не своё
     // сообщение, а плашка, как у вызова инструмента; текст — XML с подсветкой.
