@@ -158,11 +158,37 @@ async function boot() {
   }
   const me = await res.json().catch(() => ({}));
   if (me.user) {
-    $('user').textContent = me.version ? `${me.user} · v${me.version}` : me.user;
-    $('user').title = me.version ? `Версия панели ${me.version}` : '';
+    who = me;
+    renderWho();
     $('user').hidden = false;
   }
   start();
+}
+
+// Вошедший пользователь и версия панели из /api/me.
+let who = null;
+
+// `9.14.0` → `9.14`: в панели версия показывается как major.minor.
+function shortVersion(v) {
+  const [major, minor] = String(v || '').split('.');
+  return minor === undefined ? String(v || '') : `${major}.${minor}`;
+}
+
+// «имя · ПАНЕЛЬ / АГЕНТ»: после версии панели через слеш — версия агентов в сети.
+// Если версии у агентов разные, они перечисляются через запятую; какая у какого
+// агента — в подсказке.
+function renderWho() {
+  if (!who) return;
+  const online = agents.filter((a) => a.online && a.version);
+  const versions = [...new Set(online.map((a) => shortVersion(a.version)))];
+  let text = who.user;
+  if (who.version) text += ` · ${who.version}`;
+  if (versions.length) text += ` / ${versions.join(', ')}`;
+  const tip = [];
+  if (who.version) tip.push(`Версия панели ${who.version}`);
+  for (const a of online) tip.push(`Агент ${a.name}: ${shortVersion(a.version)}`);
+  $('user').textContent = text;
+  $('user').title = tip.join('\n');
 }
 
 $('login').addEventListener('submit', async (e) => {
@@ -233,6 +259,7 @@ function onMessage(msg) {
     noteSessions(agents);
     renderSessions();
     renderHeader();
+    renderWho();
     // Сессию могли удалить в другой вкладке: её ленты больше нет.
     const open = selected && agents.find((a) => a.name === selected.agent);
     if (open && !open.sessions.some((s) => s.key === selected.session)) closeView();

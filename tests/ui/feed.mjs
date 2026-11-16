@@ -1168,6 +1168,23 @@ try {
   check('ожидание выбора — уведомление браузера', notices.waiting.length === 1 && notices.waiting[0].includes('ждёт ответа'), notices);
   check('от ответа на выбор уведомления нет', notices.afterAnswer === 0, notices);
 
+  // Шапка: после версии панели через слеш — версия агентов в сети (major.minor).
+  const whoLine = await evaluate(`(() => {
+    const roster = (list) => window.__sock.emit({ t: 'agents', agents: list.map(([name, version, online]) =>
+      ({ name, online, os: 'test', version, sessions: [window.__session] })) });
+    who = { user: 'tester', version: '9.15' };
+    roster([['ui-test', '9.15.0', true]]);
+    const one = document.getElementById('user').textContent;
+    roster([['ui-test', '9.15.0', true], ['laptop', '9.14.0', true], ['old', '1.0.0', false]]);
+    const two = document.getElementById('user').textContent;
+    const tip = document.getElementById('user').title;
+    roster([['ui-test', 'test', true]]);
+    return { one, two, tip };
+  })()`);
+  check('шапка: версия агента через слеш', whoLine.one === 'tester · 9.15 / 9.15', whoLine);
+  check('шапка: разные версии агентов через запятую, не в сети — не считаются',
+    whoLine.two === 'tester · 9.15 / 9.15, 9.14' && whoLine.tip.includes('Агент laptop: 9.14') && !whoLine.tip.includes('old'), whoLine);
+
   // Строка хода: показываем только то, что прислал агент.
   const turnLine = await evaluate(`(() => {
     const load = (patch) => window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test',
