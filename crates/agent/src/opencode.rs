@@ -11,7 +11,7 @@ use std::{
 };
 
 use aipanel_proto::{
-    AgentMsg, Command, Item, Limits, ModelInfo, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo,
+    AgentMsg, Command, Item, Limits, ModelInfo, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo, TurnUsage,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -24,6 +24,9 @@ use crate::{
 
 const TEXT_LIMIT: usize = 20_000;
 const RESULT_LIMIT: usize = 4_000;
+/// Сколько последних сообщений читается, чтобы собрать токены текущего хода.
+/// Ход длиннее страницы считается неизвестным: часть его токенов не видна.
+const TURN_PAGE: usize = 100;
 /// Ограничения на запросы выбора из окна opencode: форма приходит из локального
 /// сервиса, но её поля попадают в браузер, поэтому размеры ограничены.
 const PROMPT_FIELDS: usize = 20;
@@ -354,6 +357,12 @@ impl OpenCode {
             .to_owned()
     }
 
+    /// Токены текущего хода по последним сообщениям сессии.
+    async fn turn(&self, id: &str) -> Option<TurnUsage> {
+        let v = self.get(&format!("/api/session/{id}/message?limit={TURN_PAGE}&order=desc")).await.ok()?;
+        turn_from_messages(v["data"].as_array()?)
+    }
+
     pub async fn scan(&self) -> Vec<SessionInfo> {
         let Ok(list) = self.get(&format!("/api/session?limit={}", self.cfg.max_sessions)).await else {
             return Vec::new();
@@ -377,6 +386,7 @@ impl OpenCode {
                 windowed.contains(id),
                 &s["time"],
             );
+            let turn = if matches!(status, "busy" | "stalled") { self.turn(id).await } else { None };
             out.push(SessionInfo {
                 key: format!("opencode:{id}"),
                 tool: "opencode".into(),
@@ -387,7 +397,7 @@ impl OpenCode {
                 updated_at: s["time"]["updated"].as_i64().unwrap_or(0),
                 delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
                 model: session_model(&s["model"]),
-                turn: None,
+                turn,
             });
         }
         out
@@ -1037,6 +1047,42 @@ impl OpenCode {
     }
 }
 
+/// Токены текущего хода из сообщений сессии, новые первыми. Ход идёт от первого
+/// запроса пользователя после последней отметки `idle` (конца прошлого хода), так
+/// что сообщение, отправленное посреди хода, его не перезапускает. Токены есть только
+/// у завершённых шагов ассистента: недописанный шаг в сумму не входит.
+/// `None`, если запроса не видно или ход длиннее прочитанной страницы.
+fn turn_from_messages(msgs: &[Value]) -> Option<TurnUsage> {
+    let mut started: Option<i64> = None;
+    let mut input: Option<u64> = None;
+    let mut output = 0u64;
+    let mut ended = false;
+    for m in msgs {
+        match m["type"].as_str() {
+            Some("idle") => {
+                ended = true;
+                break;
+            }
+            // Идём от новых к старым, поэтому остаётся самый ранний запрос.
+            Some("user") => started = m["time"]["created"].as_i64().or(started),
+            Some("assistant") if m["tokens"].is_object() => {
+                let t = &m["tokens"];
+                let count = |v: &Value| v.as_u64().unwrap_or(0);
+                // Контекст последнего шага: новые входные токены вместе с кешем.
+                input.get_or_insert_with(|| {
+                    count(&t["input"]) + count(&t["cache"]["read"]) + count(&t["cache"]["write"])
+                });
+                output += count(&t["output"]) + count(&t["reasoning"]);
+            }
+            _ => {}
+        }
+    }
+    if !ended && msgs.len() >= TURN_PAGE {
+        return None;
+    }
+    Some(TurnUsage { started_at: started?, input: input.unwrap_or(0), output })
+}
+
 /// Статус сессии opencode для панели.
 ///
 /// `stalled` — сообщение принято, но opencode ещё не выполняет ход: сессии нет
@@ -1597,6 +1643,56 @@ mod tests {
                 ("m2:text:0", "text", "done"),
             ]
         );
+    }
+
+    fn step(input: u64, output: u64, reasoning: u64, cache_read: u64) -> Value {
+        json!({"type":"assistant","time":{"created":1},
+            "tokens":{"input":input,"output":output,"reasoning":reasoning,"cache":{"read":cache_read,"write":0}}})
+    }
+
+    #[test]
+    fn turn_sums_steps_after_last_idle() {
+        // Новые первыми: недописанный шаг, два завершённых, запрос, конец прошлого хода и его шаг.
+        let msgs = vec![
+            json!({"type":"assistant","time":{"created":9}}),
+            step(100, 20, 5, 1000),
+            step(90, 10, 0, 800),
+            json!({"type":"user","time":{"created":1000},"text":"сделай"}),
+            json!({"type":"idle","time":{"created":900},"outcome":"succeeded"}),
+            step(5000, 999, 999, 5000),
+        ];
+        let turn = turn_from_messages(&msgs).unwrap();
+        assert_eq!(turn.started_at, 1000);
+        // Контекст — по последнему завершённому шагу, выход — по всем шагам хода.
+        assert_eq!(turn.input, 1100);
+        assert_eq!(turn.output, 35);
+    }
+
+    #[test]
+    fn turn_keeps_start_when_user_writes_mid_turn() {
+        let msgs = vec![
+            step(10, 1, 0, 0),
+            json!({"type":"user","time":{"created":3000},"text":"ещё"}),
+            step(10, 2, 0, 0),
+            json!({"type":"user","time":{"created":1000},"text":"раз"}),
+            json!({"type":"idle","time":{"created":500}}),
+        ];
+        let turn = turn_from_messages(&msgs).unwrap();
+        assert_eq!(turn.started_at, 1000);
+        assert_eq!(turn.output, 3);
+    }
+
+    #[test]
+    fn turn_unknown_without_prompt_or_beyond_page() {
+        // Ход только начался: запрос есть, завершённых шагов нет.
+        let fresh = vec![json!({"type":"user","time":{"created":7}}), json!({"type":"idle","time":{"created":1}})];
+        let turn = turn_from_messages(&fresh).unwrap();
+        assert_eq!((turn.started_at, turn.input, turn.output), (7, 0, 0));
+        // Отметка конца хода есть, а запроса после неё нет.
+        assert!(turn_from_messages(&[step(1, 1, 0, 0), json!({"type":"idle","time":{"created":1}})]).is_none());
+        // Страница заполнена, и конца прошлого хода в ней не видно.
+        let long: Vec<Value> = (0..TURN_PAGE).map(|_| step(1, 1, 0, 0)).collect();
+        assert!(turn_from_messages(&long).is_none());
     }
 
     #[test]

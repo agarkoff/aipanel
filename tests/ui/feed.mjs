@@ -1189,6 +1189,8 @@ try {
   })()`);
   check('строка хода: время и оба счётчика', /^✻3[3-6]с↑ 59\.3k↓ 1\.23k$/.test(turnLine.full || ''), turnLine);
   check('строка хода: до первого ответа токенов нет', /^✻[4-6]с$/.test(turnLine.bare || ''), turnLine);
+  const elapsed = await evaluate(`[fmtElapsed(5000), fmtElapsed(125000), fmtElapsed(3725000), fmtElapsed(61285000)]`);
+  check('строка хода: секунды, минуты и часы', elapsed.join('|') === '5с|2м 05с|1ч 02м|17ч 01м', elapsed);
   check('строка хода: нет данных агента — строки нет', turnLine.noData === null, turnLine);
   check('строка хода: сессия не работает — строки нет', turnLine.idle === null, turnLine);
 

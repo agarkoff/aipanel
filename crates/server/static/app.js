@@ -705,7 +705,10 @@ function fmtTokens(n) {
 
 function fmtElapsed(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
-  return s < 60 ? `${s}с` : `${Math.floor(s / 60)}м ${String(s % 60).padStart(2, '0')}с`;
+  if (s < 60) return `${s}с`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}м ${String(s % 60).padStart(2, '0')}с`;
+  return `${Math.floor(m / 60)}ч ${String(m % 60).padStart(2, '0')}м`;
 }
 
 function renderTurn() {
