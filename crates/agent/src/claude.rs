@@ -8,14 +8,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, TurnUsage};
+use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, TurnUsage, MAX_TITLE};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -414,6 +414,48 @@ impl Claude {
         if let Some(kill) = self.lock().headless.remove(sid) {
             let _ = kill.send(());
         }
+        self.rescan.notify_one();
+        Ok(())
+    }
+
+    /// Переименовывает сессию так же, как это делает её `/rename`: в конец
+    /// транскрипта дописывается строка `custom-title`, которую Claude Code и
+    /// панель читают как название. Файл остаётся валидным для самого CLI: он
+    /// только дописывает строки, а не переписывает транскрипт.
+    pub fn rename(&self, sid: &str, title: &str) -> Result<(), String> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > MAX_TITLE {
+            return Err(format!("название сессии — от 1 до {MAX_TITLE} символов"));
+        }
+        if title.chars().any(char::is_control) {
+            return Err("в названии есть управляющие символы".into());
+        }
+        let path = self.find_path(sid).ok_or("транскрипт сессии не найден")?;
+        let line = serde_json::json!({
+            "type": "custom-title",
+            "customTitle": title,
+            "sessionId": sid,
+        })
+        .to_string();
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| format!("не удалось открыть транскрипт: {e}"))?;
+        // Название не должно склеиться с недописанной последней строкой.
+        let mut prefix = "";
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        if len > 0 {
+            let mut last = [0u8; 1];
+            let read_last = file.seek(SeekFrom::End(-1)).is_ok() && file.read_exact(&mut last).is_ok();
+            if read_last && last[0] != b'\n' {
+                prefix = "\n";
+            }
+        }
+        file.write_all(format!("{prefix}{line}\n").as_bytes())
+            .map_err(|e| format!("не удалось записать название: {e}"))?;
+        // Заголовок берётся из хвоста транскрипта, а его разбор кешируется по mtime.
+        self.lock().tails.remove(&path);
         self.rescan.notify_one();
         Ok(())
     }
@@ -1908,6 +1950,35 @@ mod tests {
         assert!(claude.delete(sid, false).await.is_err());
         assert!(path.exists());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Переименование дописывает в транскрипт ту же строку, что и `/rename`
+    /// в Claude Code: следующий обзор сессий показывает новое имя.
+    #[test]
+    fn rename_appends_custom_title() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-rename-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let project = dir.join("projects").join("p");
+        fs::create_dir_all(&project).unwrap();
+        let sid = "cccccccc-dddd-eeee-ffff-000000000000";
+        let path = project.join(format!("{sid}.jsonl"));
+        // Недописанный транскрипт: последняя строка без перевода строки.
+        fs::write(&path, r#"{"type":"user","message":{"role":"user","content":"hi"}}"#).unwrap();
+
+        let cfg = ClaudeCfg { home: Some(dir.clone()), ..ClaudeCfg::default() };
+        let claude = Claude::new(cfg, Arc::new(Notify::new()));
+        claude.rename(sid, "  Новое имя  ").unwrap();
+        assert_eq!(claude.scan()[0].title, "Новое имя");
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#"{"customTitle":"Новое имя","sessionId":"#));
+        assert!(text.ends_with('\n'));
+
+        // Позднее имя перекрывает прежнее, пустое и с переводами строк — не принимается.
+        claude.rename(sid, "Второе имя").unwrap();
+        assert_eq!(claude.scan()[0].title, "Второе имя");
+        assert!(claude.rename(sid, "   ").is_err());
+        assert!(claude.rename(sid, "имя\nс переводом").is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -115,6 +115,8 @@ let deleteId = null;
 let deleteRequest = null;
 // Закрытие консоли сессии без подтверждения: id команд, ожидающих ответа.
 const closeIds = new Set();
+// Переименование сессии: id команд, ожидающих ответа агента.
+const renameIds = new Set();
 // Прерывание хода: id команды, чтобы показать результат именно для неё.
 let interruptId = null;
 // Запросы opencode, ожидающие ответа: разрешения и формы с вариантами.
@@ -315,6 +317,7 @@ function onMessage(msg) {
     else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
     else if (deleteId && msg.id === deleteId) onDeleteResult(msg);
     else if (closeIds.has(msg.id)) onCloseResult(msg);
+    else if (renameIds.has(msg.id)) onRenameResult(msg);
     else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
     else if (modelSet && msg.id === modelSet.id) onModelResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
@@ -347,6 +350,9 @@ function dotClass(s, online) {
 }
 
 function renderSessions() {
+  // Пока в строке правится название, список не пересобираем: иначе поле
+  // потеряет фокус и недопечатанное имя. Новый список придёт после сохранения.
+  if (renaming && renaming.place === 'list') return;
   const box = $('sessions');
   const q = $('filter').value.trim().toLowerCase();
   box.replaceChildren();
@@ -367,9 +373,23 @@ function renderSessions() {
       // Подсвечивается открытая сессия, а после выхода из неё — та, где только что были.
       const mark = selected || lastViewed;
       if (mark && mark.agent === a.name && mark.session === s.key) btn.classList.add('active');
+      // Название открытой сессии правится нажатием на него; остальная строка
+      // по-прежнему открывает сессию. Правится именно открытая (selected), а не
+      // просто подсвеченная после выхода: на телефоне нажатие на имя последней
+      // сессии должно снова её открывать, а не включать поле.
+      const name = el('span', 'name', s.title || s.key);
+      if (selected && selected.agent === a.name && selected.session === s.key) {
+        name.classList.add('rename-target');
+        name.title = 'Переименовать сессию';
+        name.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          startRename('list', a, s, row);
+        });
+      }
       btn.append(
         el('span', dotClass(s, a.online)),
-        el('span', 'name', s.title || s.key),
+        name,
         el('span', 'when', ago(s.updated_at)),
         el('span', 'meta', `${s.tool} · ${s.cwd}`),
       );
@@ -530,6 +550,117 @@ function onCloseResult(msg) {
   setHint(msg.ok ? 'Консоль закрыта.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
 }
 
+// ------------------------------------------------------------ переименование
+
+// Название сессии меняется у самого инструмента: Claude Code получает в
+// транскрипт строку custom-title (так же, как от своего /rename), opencode —
+// новый заголовок через свой API. Панель правит имя на месте: нажатие на
+// название открытой сессии в списке или на заголовок в шапке открывает поле,
+// Enter и уход из поля сохраняют, Esc отменяет, пустое имя — тоже отмена.
+const RENAME_MAX = 200; // столько же, сколько у сервера и агента
+let renaming = null; // { agent, session, place, old, input } — открытое поле
+
+// Убирает поле, ничего не отправляя. Нужно, когда строку или шапку перерисовывает
+// другое действие: клик по другой сессии, возврат к списку.
+function dropRename() {
+  if (!renaming) return;
+  const input = renaming.input;
+  renaming = null;
+  input.remove();
+}
+
+function startRename(place, agent, session, row) {
+  if (!agent.online) {
+    setHint('Агент не в сети: переименовать нельзя.', true);
+    return;
+  }
+  commitRename();
+  if (place === 'list' && !row) return;
+  const old = session.title || session.key;
+  const input = el('input', `rename rename-${place}`);
+  input.type = 'text';
+  input.value = old;
+  input.maxLength = RENAME_MAX;
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.setAttribute('aria-label', 'Название сессии');
+  input.setAttribute('enterkeyhint', 'done');
+  // Свайп строки не должен ловить движение пальца по полю.
+  for (const type of ['pointerdown', 'pointermove', 'pointerup', 'click']) {
+    input.addEventListener(type, (e) => e.stopPropagation());
+  }
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      closeRename();
+    }
+  });
+  input.addEventListener('blur', () => {
+    if (renaming && renaming.input === input) commitRename();
+  });
+  renaming = { agent: agent.name, session: session.key, place, old, input };
+  // В шапке поле встаёт на место заголовка, в списке — поверх всей строки: на
+  // телефоне так удобнее печатать, и не приходится угадывать место под палец.
+  if (place === 'header') $('title').replaceChildren(input);
+  else if (row.isConnected) row.append(input);
+  else {
+    renaming = null;
+    return;
+  }
+  input.focus({ preventScroll: true });
+  input.setSelectionRange(0, input.value.length);
+}
+
+// Возвращает список и шапку к обычному виду: их текст снова собирается из данных.
+function closeRename() {
+  if (!renaming) return;
+  dropRename();
+  renderSessions();
+  renderHeader();
+}
+
+function commitRename() {
+  const r = renaming;
+  if (!r) return;
+  const value = r.input.value.trim();
+  dropRename();
+  // Пустое имя и прежнее имя ничего не меняют: отменяем молча.
+  if (value && value !== r.old) {
+    const id = String(++cmdSeq);
+    if (send({ t: 'rename', id, agent: r.agent, session: r.session, title: value })) {
+      renameIds.add(id);
+      setHint('Переименовываем…');
+    } else {
+      setHint('Нет соединения с сервером.', true);
+    }
+  }
+  renderSessions();
+  renderHeader();
+}
+
+function onRenameResult(msg) {
+  renameIds.delete(msg.id);
+  // Новое имя придёт следующим списком сессий от агента.
+  setHint(msg.ok ? 'Сессия переименована.' : `Ошибка: ${msg.error || 'не удалось переименовать'}`, !msg.ok);
+}
+
+$('title').addEventListener('click', () => {
+  if (renaming) return;
+  const cur = current();
+  if (cur) startRename('header', cur.agent, cur.session);
+});
+// Enter и пробел в шапке делают то же, что нажатие: правка имени с клавиатуры.
+$('title').addEventListener('keydown', (e) => {
+  if (e.target !== e.currentTarget) return;
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    $('title').click();
+  }
+});
+
 // ------------------------------------------------------------ удаление сессии
 
 function deleteHint(text, isError) {
@@ -619,6 +750,7 @@ function sessionId(key) {
 }
 
 function select(agent, session) {
+  dropRename();
   selected = { agent, session };
   lastViewed = selected;
   nodes.clear();
@@ -648,6 +780,7 @@ function select(agent, session) {
 }
 
 function closeView() {
+  dropRename();
   $('app').classList.remove('viewing');
   selected = null;
   favorites = [];
@@ -789,10 +922,17 @@ setInterval(renderTurn, 1000);
 
 function renderHeader() {
   renderTurn();
+  // Сессию могли убрать из списка, пока правили её имя: поле больше не к чему.
+  if (renaming && renaming.place === 'header' && !current()) dropRename();
   const cur = current();
+  const editing = renaming && renaming.place === 'header';
+  const titleEl = $('title');
   const badge = $('status');
   if (!cur) {
-    $('title').textContent = selected ? selected.session : 'Выберите сессию';
+    titleEl.textContent = selected ? selected.session : 'Выберите сессию';
+    titleEl.classList.remove('editable');
+    titleEl.removeAttribute('title');
+    titleEl.tabIndex = -1;
     $('subtitle').textContent = '';
     $('session-id').hidden = true;
     $('copy-id').hidden = true;
@@ -807,7 +947,13 @@ function renderHeader() {
     return;
   }
   const { agent, session } = cur;
-  $('title').textContent = session.title || session.key;
+  // Пока правится имя, заголовок занят полем: текст вернётся после сохранения.
+  if (!editing) {
+    titleEl.textContent = session.title || session.key;
+    titleEl.classList.add('editable');
+    titleEl.title = 'Переименовать сессию';
+    titleEl.tabIndex = 0;
+  }
   $('subtitle').textContent = `${agent.name} · ${session.tool} · ${session.cwd}`;
   $('session-id').hidden = false;
   $('session-id').textContent = sessionId(session.key);

@@ -12,6 +12,7 @@ use std::{
 
 use aipanel_proto::{
     AgentMsg, Command, Item, Limits, ModelInfo, Prompt, PromptField, PromptOption, PromptWhen, SessionInfo, TurnUsage,
+    MAX_TITLE,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -888,6 +889,21 @@ impl OpenCode {
     /// Убирает сообщение из очереди, пока opencode его не отправил.
     pub async fn cancel_queued(&self, id: &str, queue: &str) -> Result<(), String> {
         self.call(reqwest::Method::DELETE, &format!("/api/session/{id}/inbox/{queue}"), None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Переименовывает сессию: заголовок в списке сессий opencode меняется через
+    /// его API. Само окно opencode получает новое имя при следующем обновлении.
+    pub async fn rename(&self, id: &str, title: &str) -> Result<(), String> {
+        let title = title.trim();
+        if title.is_empty() || title.chars().count() > MAX_TITLE {
+            return Err(format!("название сессии — от 1 до {MAX_TITLE} символов"));
+        }
+        if title.chars().any(char::is_control) {
+            return Err("в названии есть управляющие символы".into());
+        }
+        self.call(reqwest::Method::PATCH, &format!("/api/session/{id}"), Some(json!({ "title": title })))
             .await
             .map(|_| ())
     }

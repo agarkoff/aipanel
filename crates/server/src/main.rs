@@ -845,6 +845,8 @@ enum BrowserMsg {
     },
     /// Закрыть окно консоли сессии, ничего не удаляя.
     Close { id: String, agent: String, session: String },
+    /// Переименовать сессию: имя меняется у самого инструмента, а не только в панели.
+    Rename { id: String, agent: String, session: String, title: String },
     /// Попросить у агента команды сессии для списка, который открывается по `/`.
     Commands { agent: String, session: String },
     /// Попросить у агента модели для окна «Новая сессия».
@@ -1090,6 +1092,19 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
         BrowserMsg::Close { id, agent, session } => {
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Close { id: cmd, session });
+        }
+        BrowserMsg::Rename { id, agent, session, title } => {
+            let title = title.trim().to_owned();
+            if title.is_empty() || title.chars().count() > aipanel_proto::MAX_TITLE {
+                reply(&inner, browser, &id, "название сессии пустое или слишком длинное");
+                return;
+            }
+            if title.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "в названии есть управляющие символы");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Rename { id: cmd, session, title });
         }
         BrowserMsg::Screens { id, agent } => {
             let cmd = format!("{browser}:{}", inner.id());

@@ -218,6 +218,39 @@ input, textarea, select {
 .session-delete:hover { background: var(--wait); color: #fff; }
 .session-close:hover { background: var(--accent); color: #fff; }
 .session .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Название открытой сессии правится нажатием: подчёркивание по наведению
+   показывает, что строка ведёт себя как поле, а не как остальная строка. */
+.session .name.rename-target { cursor: text; }
+.session.active .name.rename-target:hover { text-decoration: underline dotted; }
+/* Поле правки имени. В списке оно лежит поверх всей строки (так по нему проще
+   попасть пальцем), в шапке — на месте заголовка. */
+.rename {
+  min-width: 0;
+  margin: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  outline: none;
+}
+.rename-header { width: 100%; }
+.rename-list {
+  position: absolute;
+  inset: 3px 6px;
+  z-index: 3;
+  /* Общее правило `input { width: 100% }` тут мешает: поле растягивалось бы от
+     левого отступа ещё на всю ширину строки и вылезало за её правый край. */
+  width: auto;
+  padding: 0 8px;
+}
+@media (max-width: 760px) {
+  /* 16px не даёт мобильному Safari приблизить страницу при фокусе поля. */
+  .rename { font-size: 16px; }
+  .rename-list { inset: 4px 8px; }
+}
 .session .when { color: var(--muted); font-size: 12px; }
 .session .meta {
   grid-column: 2 / 4;
@@ -274,11 +307,13 @@ input, textarea, select {
   color: var(--fav);
 }
 .favorites:hover { background: var(--bg); }
-/* Счётчик у звезды: сколько сообщений этой сессии в избранном. */
+/* Счётчик у звезды: сколько сообщений этой сессии в избранном. Стоит в углу
+   самой звезды, а не кнопки: на телефоне кнопка крупнее, и счётчик у её края
+   выглядел бы отдельно от значка. */
 .fav-count {
   position: absolute;
-  top: -1px;
-  right: -3px;
+  top: calc(50% - 12px);
+  right: calc(50% - 12px);
   min-width: 15px;
   height: 15px;
   padding: 0 3px;
@@ -375,6 +410,10 @@ input, textarea, select {
 .sm-limit-reset, .sm-limits-empty { font-size: 11px; color: var(--muted); }
 .titles { min-width: 0; flex: 1; }
 .title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Заголовок открытой сессии переименовывается нажатием на него. */
+.title.editable { cursor: text; }
+.title.editable:hover { text-decoration: underline dotted; }
+.title:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
 .subtitle {
   display: flex;
   align-items: center;
