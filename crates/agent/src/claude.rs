@@ -6,7 +6,7 @@
 //! `claude --resume <id> -- <текст>` (вне Windows — фоновый `claude -p --resume`).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -456,6 +456,7 @@ impl Claude {
         // форма уходит, только когда список меняется.
         let mut ask = crate::ask::Tracker::default();
         let mut shown: Vec<Prompt> = Vec::new();
+        let mut queue = Queue::default();
         loop {
             if path.is_none() {
                 path = self.find_path(&sid);
@@ -465,7 +466,9 @@ impl Claude {
                     let len = md.len();
                     if first || len < offset {
                         let start = len.saturating_sub(HISTORY_BYTES);
-                        let (items, consumed, begin) = read_items(p, start, len, start > 0, HISTORY_ITEMS);
+                        queue = Queue::default();
+                        let (items, _, consumed, begin) =
+                            read_feed(p, start, len, start > 0, HISTORY_ITEMS, Some(&mut queue));
                         // С конца показанной части пойдёт догрузка ранних сообщений.
                         self.lock().heads.insert(sid.clone(), begin);
                         offset = start + consumed;
@@ -481,16 +484,16 @@ impl Claude {
                             more: begin > 0,
                         });
                     } else if len > offset {
-                        let (items, consumed, _) =
-                            read_items(p, offset, len.min(offset + MAX_CHUNK), false, usize::MAX);
+                        let (items, drop, consumed, _) =
+                            read_feed(p, offset, len.min(offset + MAX_CHUNK), false, usize::MAX, Some(&mut queue));
                         scan_ask(p, offset, offset + consumed, false, &mut ask);
                         offset += consumed;
-                        if !items.is_empty() {
+                        if !items.is_empty() || !drop.is_empty() {
                             let _ = out.send(AgentMsg::History {
                                 session: key.clone(),
                                 reset: false,
                                 items,
-                                drop: Vec::new(),
+                                drop,
                                 more: false,
                             });
                         }
@@ -1247,11 +1250,86 @@ fn read_range(path: &Path, start: u64, end: u64) -> Vec<u8> {
 /// идёт по строкам, чтобы смещение начала оставшегося было точным — с него
 /// продолжится догрузка ранних сообщений.
 fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: usize) -> (Vec<Item>, u64, u64) {
+    let (items, _, consumed, begin) = read_feed(path, start, end, skip_first, max_items, None);
+    (items, consumed, begin)
+}
+
+/// Очередь сообщений Claude Code по строкам `queue-operation` транскрипта.
+///
+/// Сообщение, набранное, пока модель занята (идёт долгий инструмент), Claude Code
+/// сразу пишет строкой `enqueue`, а в ход вкладывает (`queued_command`) только
+/// когда инструмент закончится. Чтобы панель показала его сразу, `enqueue` даёт
+/// элемент «в очереди», а когда сообщение покидает очередь — `remove` (вложено
+/// в ход), `dequeue` (ушло новым запросом, всегда голова очереди) или `popAll`
+/// (Esc вернул очередь в поле ввода), — элемент убирается. Настоящее сообщение
+/// затем приходит обычной строкой.
+///
+/// В очереди лежат и уведомления фоновых задач: их не показываем, но учитываем,
+/// иначе `dequeue` снял бы не тот элемент.
+#[derive(Default)]
+pub(crate) struct Queue {
+    /// Идентификатор показанного элемента ленты (по смещению строки `enqueue`;
+    /// `None` у служебных) и содержимое.
+    pending: VecDeque<(Option<String>, Value)>,
+}
+
+impl Queue {
+    /// Разбирает строку `queue-operation`: новый элемент «в очереди» и/или
+    /// идентификаторы элементов, покинувших очередь.
+    fn apply(&mut self, line: &str, at: u64, items: &mut Vec<Item>, gone: &mut Vec<String>) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+        if v["type"].as_str() != Some("queue-operation") {
+            return;
+        }
+        let content = &v["content"];
+        match v["operation"].as_str() {
+            Some("enqueue") => {
+                let text = content.as_str().unwrap_or_default();
+                // Служебное (уведомления задач, команды харнесса) начинается с тега.
+                if text.trim().is_empty() || text.trim_start().starts_with('<') {
+                    self.pending.push_back((None, content.clone()));
+                    return;
+                }
+                let id = format!("cq:{at}");
+                self.pending.push_back((Some(id.clone()), content.clone()));
+                items.push(Item {
+                    id,
+                    ts: v["timestamp"].as_str().map(parse_iso_ms).unwrap_or(0),
+                    role: "user".into(),
+                    kind: "queued".into(),
+                    text: truncate(text, TEXT_LIMIT),
+                    tool: None,
+                });
+            }
+            Some("dequeue") => gone.extend(self.pending.pop_front().and_then(|(id, _)| id)),
+            Some("remove") => {
+                if let Some(i) = self.pending.iter().position(|(_, c)| c == content) {
+                    gone.extend(self.pending.remove(i).and_then(|(id, _)| id));
+                }
+            }
+            Some("popAll") => gone.extend(self.pending.drain(..).filter_map(|(id, _)| id)),
+            _ => {}
+        }
+    }
+}
+
+/// То же, что `read_items`, но с учётом очереди сообщений (см. [`Queue`]), если
+/// она передана. Вторым значением — идентификаторы элементов «в очереди» из
+/// прошлых кусков, которые панель должна убрать.
+fn read_feed(
+    path: &Path,
+    start: u64,
+    end: u64,
+    skip_first: bool,
+    max_items: usize,
+    mut queue: Option<&mut Queue>,
+) -> (Vec<Item>, Vec<String>, u64, u64) {
     let buf = read_range(path, start, end);
     let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
-        return (Vec::new(), 0, start);
+        return (Vec::new(), Vec::new(), 0, start);
     };
     let mut lines: Vec<(u64, Vec<Item>)> = Vec::new();
+    let mut drop: Vec<String> = Vec::new();
     let mut at = 0usize;
     for (i, line) in buf[..last_nl].split(|b| *b == b'\n').enumerate() {
         let from = at;
@@ -1261,7 +1339,24 @@ fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: us
         }
         let mut items = Vec::new();
         if let Ok(line) = std::str::from_utf8(line) {
-            parse_line(line, &mut items);
+            match queue.as_deref_mut() {
+                Some(q) if line.starts_with("{\"type\":\"queue-operation\"") => {
+                    let mut gone = Vec::new();
+                    q.apply(line, start + from as u64, &mut items, &mut gone);
+                    for id in gone {
+                        // Элемент из этого же куска просто не отдаём.
+                        let before = lines.iter().map(|(_, l)| l.len()).sum::<usize>();
+                        for (_, l) in lines.iter_mut() {
+                            l.retain(|it| it.id != id);
+                        }
+                        lines.retain(|(_, l)| !l.is_empty());
+                        if lines.iter().map(|(_, l)| l.len()).sum::<usize>() == before {
+                            drop.push(id);
+                        }
+                    }
+                }
+                _ => parse_line(line, &mut items),
+            }
         }
         if !items.is_empty() {
             lines.push((start + from as u64, items));
@@ -1276,7 +1371,7 @@ fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: us
     }
     lines.drain(..cut);
     let begin = lines.first().map(|(at, _)| *at).unwrap_or(start + consumed);
-    (lines.into_iter().flat_map(|(_, items)| items).collect(), consumed, begin)
+    (lines.into_iter().flat_map(|(_, items)| items).collect(), drop, consumed, begin)
 }
 
 /// Запрос пользователя, который на деле прислал сам Claude Code: у таких строк
@@ -1946,6 +2041,51 @@ mod tests {
         let (empty, consumed, begin) = read_items(&path, cut, len - 1, false, usize::MAX);
         assert!(empty.is_empty());
         assert_eq!((consumed, begin), (0, cut));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Сообщение, набранное во время долгого инструмента, видно сразу по
+    /// `enqueue` и пропадает, когда покидает очередь, — в том же куске или в
+    /// следующем. Уведомления задач не показываются, но `dequeue` их учитывает.
+    #[test]
+    fn queued_message_shows_until_it_leaves_the_queue() {
+        let dir = std::env::temp_dir().join(format!("aipanel-claude-queue-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        let op = |op: &str, content: &str| {
+            format!(r#"{{"type":"queue-operation","operation":"{op}","timestamp":"2026-11-16T10:00:00.000Z","content":"{content}"}}"#)
+        };
+        let dequeue = r#"{"type":"queue-operation","operation":"dequeue","timestamp":"2026-11-16T10:00:01.000Z"}"#;
+        let first = format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            op("enqueue", "<task-notification>x</task-notification>"),
+            op("enqueue", "статус?"),
+            op("enqueue", "и ещё"),
+            op("remove", "и ещё"),
+            op("enqueue", "третье"),
+        );
+        fs::write(&path, &first).unwrap();
+        let mut queue = Queue::default();
+        let (items, drop, consumed, _) = read_feed(&path, 0, first.len() as u64, false, usize::MAX, Some(&mut queue));
+        let got: Vec<_> = items.iter().map(|i| (i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(got, [("queued", "статус?"), ("queued", "третье")]);
+        assert!(drop.is_empty());
+        let status = items[0].id.clone();
+        let third = items[1].id.clone();
+
+        // Голова очереди — уведомление, второй `dequeue` снимает «статус?»;
+        // `popAll` (Esc в консоли) — всё остальное.
+        let rest = format!("{dequeue}\n{dequeue}\n{}\n", op("popAll", "третье"));
+        fs::write(&path, format!("{first}{rest}")).unwrap();
+        let end = (first.len() + rest.len()) as u64;
+        let (items, drop, _, _) = read_feed(&path, consumed, end, false, usize::MAX, Some(&mut queue));
+        assert!(items.is_empty());
+        assert_eq!(drop, [status, third]);
+
+        // Без очереди (догрузка ранних, перенос) строки очереди не дают ничего.
+        let (items, _, _) = read_items(&path, 0, end, false, usize::MAX);
+        assert!(items.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }

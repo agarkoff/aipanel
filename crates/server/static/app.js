@@ -1087,13 +1087,19 @@ function buildItem(item, call) {
     node.append(el('div', 'body', item.text));
   } else if (item.kind === 'queued') {
     const label = el('div', 'queue-label');
-    label.append(el('span', '', 'В очереди — ждёт завершения текущего ответа'));
-    const cancel = el('button', 'queue-cancel', '×');
-    cancel.type = 'button';
-    cancel.title = 'Убрать из очереди';
-    cancel.setAttribute('aria-label', 'Убрать сообщение из очереди');
-    cancel.addEventListener('click', () => cancelQueued(item));
-    label.append(cancel);
+    // Очередь opencode (`queue:`) ждёт конца ответа и снимается из панели;
+    // очередь Claude Code (`cq:`) модель прочтёт после текущего инструмента,
+    // убрать её можно только в консоли.
+    const own = item.id.startsWith('queue:');
+    label.append(el('span', '', own ? 'В очереди — ждёт завершения текущего ответа' : 'В очереди — модель прочтёт после текущего шага'));
+    if (own) {
+      const cancel = el('button', 'queue-cancel', '×');
+      cancel.type = 'button';
+      cancel.title = 'Убрать из очереди';
+      cancel.setAttribute('aria-label', 'Убрать сообщение из очереди');
+      cancel.addEventListener('click', () => cancelQueued(item));
+      label.append(cancel);
+    }
     const body = el('div', 'body md');
     body.append(renderMarkdown(item.text, mdOptions()));
     node.append(label, body);
