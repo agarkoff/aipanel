@@ -4,6 +4,7 @@
 mod ask;
 mod claude;
 mod config;
+mod dirs;
 mod favorites;
 mod handoff;
 mod image;
@@ -237,6 +238,21 @@ impl Agent {
                         _ => Vec::new(),
                     };
                     let _ = me.out.send(AgentMsg::ToolModels { id, models });
+                });
+            }
+            ServerMsg::Dirs { id, path } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    // Каталог читается с диска: на сетевом диске это может
+                    // занять секунды, и ждать этого в общем потоке нельзя.
+                    let asked = path.clone();
+                    let result = tokio::task::spawn_blocking(move || crate::dirs::list(&asked)).await;
+                    let (entries, error) = match result {
+                        Ok(Ok(entries)) => (entries, None),
+                        Ok(Err(e)) => (Vec::new(), Some(e)),
+                        Err(_) => (Vec::new(), Some("не удалось прочитать каталог".into())),
+                    };
+                    let _ = me.out.send(AgentMsg::Dirs { id, path, entries, error });
                 });
             }
             ServerMsg::Start { id, tool, cwd, model, create } => {

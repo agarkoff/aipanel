@@ -53,6 +53,7 @@ const MAX_TEXT: usize = 200_000;
 const MAX_PROMPTS: usize = 50;
 const MAX_COMMANDS: usize = 200;
 const MAX_MODELS: usize = 600;
+const MAX_DIRS: usize = 2000;
 const MAX_ANSWER: usize = 64_000;
 const PING_EVERY: Duration = Duration::from_secs(25);
 const DEAD_AFTER: Duration = Duration::from_secs(90);
@@ -652,6 +653,27 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
                 }
             }
         }
+        AgentMsg::Dirs { id, path, mut entries, error } => {
+            entries.truncate(MAX_DIRS);
+            // Ответ только тому браузеру, который открыл окно выбора папки.
+            let allowed = inner
+                .pending
+                .get(&id)
+                .is_some_and(|p| p.owner == owner && p.agent == agent);
+            if allowed {
+                if let Some(p) = inner.pending.remove(&id) {
+                    if let Some(b) = inner.browsers.get(&p.browser) {
+                        let _ = b.tx.try_send(
+                            json!({
+                                "t": "dirs", "id": p.id, "path": path,
+                                "entries": entries, "error": error,
+                            })
+                            .to_string(),
+                        );
+                    }
+                }
+            }
+        }
         AgentMsg::Result { id, ok, error, session } => {
             // Отвечать на команду может только тот агент, которому она отправлена.
             let allowed = inner
@@ -851,6 +873,9 @@ enum BrowserMsg {
     Commands { agent: String, session: String },
     /// Попросить у агента модели для окна «Новая сессия».
     ToolModels { id: String, agent: String, tool: String, cwd: String },
+    /// Попросить у агента содержимое каталога для окна «Новая сессия».
+    /// Пустой `path` — корни дерева.
+    Dirs { id: String, agent: String, path: String },
     /// Попросить у агента модели сессии для окна выбора в `/models`.
     Models { agent: String, session: String },
     /// Переключить сессию на модель `provider`/`model`.
@@ -1061,6 +1086,15 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             }
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::ToolModels { id: cmd, tool, cwd });
+        }
+        BrowserMsg::Dirs { id, agent, path } => {
+            let path = path.trim().to_owned();
+            if path.len() > 4096 || path.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректный каталог");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Dirs { id: cmd, path });
         }
         BrowserMsg::Handoff { id, agent, session, tool } => {
             if !matches!(tool.as_str(), "claude" | "opencode") {

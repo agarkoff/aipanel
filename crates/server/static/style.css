@@ -864,17 +864,86 @@ input, textarea, select {
   background: var(--panel);
   color: var(--text);
   max-height: 90dvh;
+  overflow-y: auto;
 }
 .launch::backdrop { background: rgba(0, 0, 0, .4); }
 .launch form { display: grid; gap: 12px; padding: 16px; }
 .launch h2 { margin: 0; font-size: 17px; }
 .launch label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+.launch .field { display: grid; gap: 4px; }
 .launch .hint { padding: 0; background: none; }
 .launch .actions { display: flex; justify-content: flex-end; gap: 8px; }
 .confirm .confirm-text { margin: 0; overflow-wrap: anywhere; }
 .launch label.check { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--text); cursor: pointer; }
 .launch label.check input { width: auto; margin: 0; flex: none; }
 .confirm .danger { background: var(--wait); border-color: var(--wait); color: #fff; }
+
+/* Поле каталога: ввод и кнопка «Обзор…» в одну строку, как в диалоге Windows. */
+.path-field { display: flex; gap: 6px; align-items: stretch; }
+.path-field input { flex: 1; min-width: 0; }
+.path-field .browse { flex: none; padding: 6px 12px; white-space: nowrap; }
+
+/* Дерево каталогов: строки как в проводнике — треугольник, значок, отступ
+   по уровню. Раскрытие ленивое: папка запрашивается у агента при открытии. */
+.tree {
+  margin-top: 2px;
+  max-height: min(44dvh, 300px);
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  padding: 4px 2px;
+  font-size: 13px;
+  color: var(--text);
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding-right: 8px;
+  border-radius: 4px;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+  outline: none;
+}
+.tree-row:hover { background: var(--tool); }
+.tree-row.selected { background: var(--accent); color: #fff; }
+.tree-row:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.tree-row.selected:focus-visible { box-shadow: inset 0 0 0 1px #fff; }
+.tree-twist {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+}
+.tree-twist svg { transition: transform .12s ease; }
+.tree-node.open > .tree-row .tree-twist svg { transform: rotate(90deg); }
+.tree-twist.empty { visibility: hidden; }
+.tree-row.selected .tree-twist { color: #fff; }
+.tree-icon { flex: none; display: block; }
+.tree-icon.drive { color: var(--muted); }
+.tree-row.selected .tree-icon.drive { color: #fff; }
+.tree-name { overflow: hidden; text-overflow: ellipsis; }
+.tree-note {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tree-note.error { color: var(--wait); }
+@media (pointer: coarse) {
+  .tree-row { min-height: 34px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-twist svg { transition: none; }
+}
 
 /* Выбор модели: строки в прокручиваемом списке, текущая отмечена. */
 .models .models-list {

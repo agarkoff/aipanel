@@ -98,6 +98,22 @@ const claudeModels = [
   { provider: 'claude', id: 'opus', name: 'Opus — самая мощная' },
 ];
 
+// Дерево каталогов, которое «пришлёт агент» для окна выбора папки: диски,
+// вложенные папки и один каталог без доступа.
+const dirs = {
+  '': [
+    { name: 'Локальный диск (C:)', path: 'C:\\' },
+    { name: 'Локальный диск (D:)', path: 'D:\\' },
+  ],
+  'C:\\': [
+    { name: 'Projects', path: 'C:\\Projects' },
+    { name: 'ui-test', path: 'C:\\ui-test' },
+  ],
+  'C:\\Projects': [{ name: 'AiPanel', path: 'C:\\Projects\\demo' }],
+  'C:\\Projects\\demo': [],
+  'C:\\ui-test': [],
+};
+
 // ---------------------------------------------------------------- заглушка
 
 const stub = `
@@ -109,6 +125,7 @@ const stub = `
   const commands = ${JSON.stringify(commands)};
   const models = ${JSON.stringify(models)};
   const claudeModels = ${JSON.stringify(claudeModels)};
+  const dirs = ${JSON.stringify(dirs)};
   window.__sent = [];
   window.__screens = [];
   window.__screenShots = [];
@@ -122,6 +139,7 @@ const stub = `
   window.__favs = [];
   window.__favRequests = [];
   window.__favAsked = 0;
+  window.__dirs = [];
   // Уведомления: браузерное разрешение выдано, а сами уведомления записываются,
   // чтобы тест мог проверить, о чём панель сообщает.
   window.__notices = [];
@@ -155,6 +173,13 @@ const stub = `
       } else if (msg.t === 'tool_models') {
         const list = msg.tool === 'claude' ? claudeModels : models;
         setTimeout(() => this.emit({ t: 'tool_models', id: msg.id, models: list }), 0);
+      } else if (msg.t === 'dirs') {
+        window.__dirs.push(msg);
+        const error = msg.path === 'D:\\\\' ? 'нет доступа: D:\\\\' : null;
+        setTimeout(() => this.emit({
+          t: 'dirs', id: msg.id, path: msg.path,
+          entries: error ? [] : (dirs[msg.path] || []), error,
+        }), 0);
       } else if (msg.t === 'start') {
         window.__starts.push(msg);
         const error = window.__noDir ? 'каталог не найден: ' + msg.cwd : 'тест';
@@ -923,6 +948,111 @@ try {
   })`);
   check('окно запуска открылось с инструментом сессии', launchInit.tool === 'opencode', launchInit);
   check('поле модели пустое до выбора', launchInit.model === '', launchInit);
+
+  // Дерево выбора папки: «Обзор…» раскрывает диски и каталоги машины агента,
+  // показывает в дереве каталог сессии и заполняет поле выбранной папкой.
+  await evaluate(`document.getElementById('launch-browse').click()`);
+  const treeOpened = await waitFor(`(() => {
+    const t = document.getElementById('launch-tree');
+    return !t.hidden && t.querySelectorAll('.tree-row').length === 4;
+  })()`);
+  const treeOpenState = await evaluate(`(() => {
+    const t = document.getElementById('launch-tree');
+    return {
+      expanded: document.getElementById('launch-browse').getAttribute('aria-expanded'),
+      paths: [...t.querySelectorAll('.tree-row')].map((r) => r.dataset.path),
+      selected: t.querySelector('.tree-row.selected')?.dataset.path || '',
+      roots: [...t.querySelectorAll(':scope > .tree-node > .tree-row .tree-name')].map((n) => n.textContent),
+      agent: window.__dirs[0]?.agent,
+    };
+  })()`);
+  check(
+    '«Обзор…» раскрывает дерево и показывает диски',
+    treeOpened && treeOpenState.expanded === 'true' && treeOpenState.roots.length === 2,
+    treeOpenState,
+  );
+  check(
+    'дерево раскрывается до каталога сессии и выделяет его',
+    treeOpenState.paths.includes('C:\\ui-test') && treeOpenState.selected === 'C:\\ui-test',
+    treeOpenState,
+  );
+  check('дерево спрашивает папки у выбранного агента', treeOpenState.agent === 'ui-test', treeOpenState);
+
+  // Папка раскрывается треугольником, вложенная — тоже, и её можно выбрать.
+  await evaluate(`[...document.querySelectorAll('#launch-tree .tree-row')]
+    .find((r) => r.querySelector('.tree-name').textContent === 'Projects')
+    .querySelector('.tree-twist').click()`);
+  const projectsOpen = await waitFor(`[...document.querySelectorAll('#launch-tree .tree-row')]
+    .some((r) => r.querySelector('.tree-name').textContent === 'AiPanel')`);
+  check('треугольник раскрывает вложенную папку', projectsOpen, await evaluate(`window.__dirs.map((m) => m.path)`));
+
+  await evaluate(`[...document.querySelectorAll('#launch-tree .tree-row')]
+    .find((r) => r.querySelector('.tree-name').textContent === 'AiPanel').click()`);
+  const treePicked = await evaluate(`({
+    cwd: document.getElementById('launch-cwd').value,
+    selected: document.querySelector('#launch-tree .tree-row.selected')?.dataset.path || '',
+    focused: document.activeElement?.dataset?.path || '',
+  })`);
+  check(
+    'выбор папки в дереве заполняет поле каталога',
+    treePicked.cwd === 'C:\\Projects\\demo' && treePicked.selected === 'C:\\Projects\\demo',
+    treePicked,
+  );
+  check('выбранная строка получает фокус', treePicked.focused === 'C:\\Projects\\demo', treePicked);
+
+  // Стрелки ходят по видимым строкам, как в проводнике: вверх — к родителю.
+  await evaluate(`(() => {
+    const row = document.activeElement;
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }));
+  })()`);
+  const treeArrow = await evaluate(`({
+    cwd: document.getElementById('launch-cwd').value,
+    selected: document.querySelector('#launch-tree .tree-row.selected')?.dataset.path || '',
+  })`);
+  check(
+    'стрелка вверх переводит выбор на предыдущую папку',
+    treeArrow.cwd === 'C:\\Projects' && treeArrow.selected === 'C:\\Projects',
+    treeArrow,
+  );
+
+  // Влево сворачивает раскрытую папку, вправо раскрывает снова — уже без запроса.
+  await evaluate(`document.activeElement.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }))`);
+  const collapsed = await waitFor(`![...document.querySelectorAll('#launch-tree .tree-row')]
+    .some((r) => r.querySelector('.tree-name').textContent === 'AiPanel')`);
+  await evaluate(`document.activeElement.dispatchEvent(
+    new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }))`);
+  const expandedAgain = await waitFor(`[...document.querySelectorAll('#launch-tree .tree-row')]
+    .some((r) => r.querySelector('.tree-name').textContent === 'AiPanel')`);
+  const dirRequests = await evaluate(`window.__dirs.map((m) => m.path)`);
+  check('влево сворачивает, вправо раскрывает папку', collapsed && expandedAgain, { collapsed, expandedAgain });
+  check('повторное раскрытие не дублирует запросы', new Set(dirRequests).size === dirRequests.length, dirRequests);
+
+  // Недоступный диск: ошибка агента видна в дереве, а не теряется молча.
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#launch-tree .tree-row')]
+      .find((r) => r.dataset.path === 'D:\\\\');
+    row.click();
+    row.querySelector('.tree-twist').click();
+  })()`);
+  const treeError = await waitFor(`(() => {
+    const note = document.querySelector('#launch-tree .tree-note.error');
+    return note && note.textContent.includes('нет доступа');
+  })()`);
+  check('ошибка чтения каталога видна в дереве', treeError, await evaluate(`document.getElementById('launch-tree').textContent`));
+
+  await evaluate(`(() => {
+    document.getElementById('launch-browse').click();
+    const c = document.getElementById('launch-cwd');
+    c.value = 'C:/ui-test';
+    c.dispatchEvent(new Event('change', { bubbles: true }));
+  })()`);
+  const treeClosed = await evaluate(`({
+    hidden: document.getElementById('launch-tree').hidden,
+    expanded: document.getElementById('launch-browse').getAttribute('aria-expanded'),
+  })`);
+  check('повторное нажатие «Обзор…» прячет дерево', treeClosed.hidden && treeClosed.expanded === 'false', treeClosed);
+
 
   // Клик по пустому полю открывает весь список — набирать имя не обязательно.
   await evaluate(`document.getElementById('launch-model').click()`);

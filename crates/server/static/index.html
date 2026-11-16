@@ -149,9 +149,14 @@
     <label id="launch-agent-row">Компьютер
       <select id="launch-agent"></select>
     </label>
-    <label>Каталог
-      <input id="launch-cwd" placeholder="Абсолютный путь к папке" autocomplete="off" spellcheck="false" required>
-    </label>
+    <div class="field">
+      <label for="launch-cwd">Каталог</label>
+      <div class="path-field">
+        <input id="launch-cwd" placeholder="Абсолютный путь к папке" autocomplete="off" spellcheck="false" required>
+        <button id="launch-browse" class="browse" type="button" aria-expanded="false" aria-controls="launch-tree">Обзор…</button>
+      </div>
+      <div id="launch-tree" class="tree" role="tree" aria-label="Каталоги" hidden></div>
+    </div>
     <p id="launch-hint" class="hint"></p>
     <div class="actions">
       <button id="launch-cancel" class="link" type="button">Отмена</button>

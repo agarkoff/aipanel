@@ -107,6 +107,13 @@ pub struct Command {
     pub description: String,
 }
 
+/// Каталог в дереве выбора папки: имя для показа и полный путь на машине агента.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+}
+
 /// Модель, доступная в сессии opencode. Панель показывает их списком по `/models`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelInfo {
@@ -275,6 +282,17 @@ pub enum AgentMsg {
     ToolModels {
         id: String,
         models: Vec<ModelInfo>,
+    },
+    /// Содержимое каталога для дерева выбора папки в окне «Новая сессия».
+    /// Пустой `path` — корни дерева (диски на Windows, `/` на остальных).
+    Dirs {
+        id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        path: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        entries: Vec<DirEntry>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     Result {
         id: String,
@@ -526,6 +544,13 @@ pub enum ServerMsg {
     Models { session: String },
     /// Прислать модели для запуска новой сессии `tool` в каталоге `cwd`.
     ToolModels { id: String, tool: String, cwd: String },
+    /// Прислать содержимое каталога `path` для дерева выбора папки. Пустой
+    /// `path` — корни дерева.
+    Dirs {
+        id: String,
+        #[serde(default)]
+        path: String,
+    },
     /// Переключить сессию `session` на модель `provider`/`model`.
     SetModel {
         id: String,
