@@ -1279,6 +1279,16 @@ fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: us
     (lines.into_iter().flat_map(|(_, items)| items).collect(), consumed, begin)
 }
 
+/// Запрос пользователя, который на деле прислал сам Claude Code: у таких строк
+/// `origin.kind` не `human` (`task-notification`). В старых транскриптах поля
+/// нет — тогда узнаём уведомление по тегу в начале текста.
+fn is_notice(v: &Value, text: &str) -> bool {
+    match v["origin"]["kind"].as_str() {
+        Some(kind) => kind != "human",
+        None => text.trim_start().starts_with("<task-notification>"),
+    }
+}
+
 /// Прогоняет завершённые строки `[start, end)` через слежение за вопросом
 /// (см. [`crate::ask::Tracker`]). Кусок тот же, что только что ушёл в ленту:
 /// новые строки короткие, а большой первый кусок читается один раз.
@@ -1369,6 +1379,9 @@ fn parse_line(line: &str, out: &mut Vec<Item>) {
         out.push(Item { id: format!("{uuid}:{idx}"), ts, role: role.into(), kind: kind.into(), text, tool });
     };
     match &v["message"]["content"] {
+        // Запрос, который Claude Code отправил сам (уведомление о фоновой задаче),
+        // а не человек: в ленте это служебная строка, а не своё сообщение.
+        Value::String(s) if role == "user" && is_notice(&v, s) => push(0, "system", "notice", truncate(s, TEXT_LIMIT), None),
         Value::String(s) if !s.trim().is_empty() => push(0, role, "text", truncate(s, TEXT_LIMIT), None),
         Value::Array(blocks) => {
             for (i, b) in blocks.iter().enumerate() {
@@ -1624,6 +1637,25 @@ mod tests {
             &mut items,
         );
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn task_notification_is_a_notice() {
+        let mut items = Vec::new();
+        let note = "<task-notification>\n<status>completed</status>\n<summary>Готово</summary>\n</task-notification>";
+        let line = |origin: &str| {
+            format!(
+                r#"{{"type":"user","uuid":"u",{origin}"message":{{"role":"user","content":{}}}}}"#,
+                serde_json::to_string(note).unwrap()
+            )
+        };
+        parse_line(&line(r#""origin":{"kind":"task-notification"},"#), &mut items);
+        // Старый транскрипт без `origin` — по тегу.
+        parse_line(&line(""), &mut items);
+        parse_line(r#"{"type":"user","uuid":"h","origin":{"kind":"human"},"message":{"role":"user","content":"<b>моё</b>"}}"#, &mut items);
+        let got: Vec<_> = items.iter().map(|i| (i.role.as_str(), i.kind.as_str())).collect();
+        assert_eq!(got, [("system", "notice"), ("system", "notice"), ("user", "text")]);
+        assert_eq!(items[0].text, note);
     }
 
     #[test]

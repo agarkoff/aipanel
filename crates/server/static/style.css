@@ -439,6 +439,11 @@ input, textarea, select {
 .queue-cancel:hover { color: var(--wait); }
 .item.assistant.text .body { padding: 2px 0; }
 .item.system .body, .item.error .body { color: var(--wait); font-size: 13px; }
+/* Уведомление Claude Code (фоновая задача) — плашка, как у вызова инструмента:
+   текст обычного цвета, а не цвета системных сообщений. */
+.item.notice details .body { color: var(--text); font-size: 12px; }
+/* Задача завершилась неуспешно (failed, killed): строка красная. */
+.item.notice summary.failed { color: var(--wait); }
 .item.pending .body { opacity: .6; }
 .item details {
   background: var(--tool);

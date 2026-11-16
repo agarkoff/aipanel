@@ -1047,6 +1047,54 @@ try {
   );
   check('вопрос Claude: обрезанный JSON — обычный вызов', askItem.cut.startsWith('AskUserQuestion: {'), askItem);
 
+  // Уведомление Claude Code о фоновой задаче — служебная строка, не своё сообщение.
+  const notice = await evaluate(`(() => {
+    const text = '<task-notification>\\n<status>completed</status>\\n<summary>Background command "x" completed (exit code 0)</summary>\\n</task-notification>';
+    const node = buildItem({ id: 'n1', ts: 0, role: 'system', kind: 'notice', text }, null);
+    const failed = buildItem({ id: 'n2', ts: 0, role: 'system', kind: 'notice',
+      text: '<task-notification><status>failed</status><summary>Сборка</summary></task-notification>' }, null);
+    document.getElementById('feed').append(node);
+    const details = node.querySelector('details');
+    const collapsed = !details.open;
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+    const body = node.querySelector('.body');
+    const r = {
+      cls: node.className,
+      label: node.querySelector('summary').textContent,
+      collapsed,
+      highlighted: body.classList.contains('hl') && body.querySelectorAll('span').length > 0,
+      sameText: body.textContent === text,
+      failed: failed.querySelector('summary').textContent,
+      okClass: node.querySelector('summary').className,
+      failedClass: failed.querySelector('summary').className,
+    };
+    node.remove();
+    return r;
+  })()`);
+  check(
+    'уведомление: плашка с итогом, свёрнута',
+    notice.cls === 'item system notice' && notice.label === 'Background command "x" completed (exit code 0)'
+      && notice.collapsed,
+    notice,
+  );
+  check('уведомление: при раскрытии XML подсвечен, текст тот же', notice.highlighted && notice.sameText, notice);
+  check('уведомление: неуспешный статус виден', notice.failed === 'Сборка (failed)', notice);
+  check('уведомление: неуспешное — красная строка, успешное — обычная',
+    notice.failedClass === 'failed' && notice.okClass === '', notice);
+
+  // Своё сообщение из ленты попадает в историю запросов, уведомление — нет.
+  // Раньше одноимённая функция истории отправленного затирала эту.
+  const requests = await evaluate(`(() => {
+    const own = rememberRequest({ id: 'rq1', role: 'user', kind: 'text', text: 'мой запрос' });
+    const note = rememberRequest({ id: 'rq2', role: 'system', kind: 'notice', text: '<task-notification/>' });
+    const r = { own, note, stored: feedRequests.get('rq1') };
+    feedRequests.delete('rq1');
+    return r;
+  })()`);
+  check('история запросов: своё сообщение из ленты, без уведомлений',
+    requests.own === true && requests.note === false && requests.stored === 'мой запрос', requests);
+
   // Подсветка: результат Read Claude Code (вызов и результат — разные id),
   // результат bash opencode (`id:r`), дифф правки и блок кода в ответе.
   const hl = await evaluate(`(async () => {

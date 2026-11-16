@@ -1032,6 +1032,27 @@ function trackCall(item, isNew) {
   }
 }
 
+// Неуспешный статус уведомления (`failed`, `killed` и т.п.): строка плашки красная.
+function noticeFailed(text) {
+  const m = /<status>([\s\S]*?)<\/status>/.exec(text);
+  return !!m && m[1].trim() !== '' && m[1].trim() !== 'completed';
+}
+
+// Строка уведомления Claude Code: итог из `<summary>`, иначе первая строка без тегов.
+function noticeLabel(text) {
+  const tag = (name) => {
+    const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text);
+    return m ? m[1].trim() : '';
+  };
+  // Итог Claude Code пишет сам («Background command … completed»), своё
+  // название к нему не добавляем.
+  const summary = tag('summary');
+  const status = tag('status');
+  const failed = status && status !== 'completed';
+  const label = summary || `Уведомление: ${firstLine(text.replace(/<[^>]+>/g, ' ').trim())}`;
+  return `${label}${failed ? ` (${status})` : ''}`;
+}
+
 // Аргументы `AskUserQuestion` (JSON) — строка ленты и текст вопросов с вариантами.
 // Не разобрались (обрезанный JSON, другой формат) — null, строка покажется как обычный вызов.
 function askText(text) {
@@ -1076,6 +1097,14 @@ function buildItem(item, call) {
     const body = el('div', 'body md');
     body.append(renderMarkdown(item.text, mdOptions()));
     node.append(label, body);
+  } else if (item.kind === 'notice') {
+    // Служебный запрос Claude Code (уведомление о фоновой задаче): не своё
+    // сообщение, а плашка, как у вызова инструмента; текст — XML с подсветкой.
+    const details = el('details');
+    const body = el('div', 'body', item.text);
+    details.append(el('summary', noticeFailed(item.text) ? 'failed' : '', noticeLabel(item.text)), body);
+    highlightOnOpen(details, body, () => Highlight.fragment(item.text, 'xml'));
+    node.append(details);
   } else if (item.kind === 'diff') {
     node.append(diffDetails(item.text));
   } else {
@@ -1928,7 +1957,9 @@ function resetHistoryNav() {
   histDraft = $('text').value;
 }
 
-function rememberRequest(text) {
+// Отправленный запрос — в историю, пока он не пришёл в ленту. Имя не должно
+// совпадать с `rememberRequest` ленты: второе объявление функции затирает первое.
+function rememberSent(text) {
   const key = historyKey();
   if (!key) return;
   let list = sentRequests.get(key);
@@ -2664,7 +2695,7 @@ $('composer').addEventListener('submit', (e) => {
   if (!selected || !text.trim()) return;
   const ok = send({ t: 'send', id: String(++cmdSeq), agent: selected.agent, session: selected.session, text });
   if (ok) {
-    rememberRequest(text);
+    rememberSent(text);
     $('text').value = '';
     resetHistoryNav();
     autoGrow();
