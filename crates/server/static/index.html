@@ -55,6 +55,15 @@
           </button>
         </div>
       </div>
+      <button id="favorites" class="favorites" type="button" aria-label="Избранное" title="Избранное" aria-expanded="false" aria-controls="favorites-menu" hidden>
+        <svg viewBox="0 0 16 16" width="20" height="20" aria-hidden="true" fill="currentColor" stroke="currentColor" stroke-width="1" stroke-linejoin="round">
+          <path d="M8 2L9.5 6.1L13.9 6.3L10.5 9L11.6 13.2L8 10.8L4.4 13.2L5.5 9L2.1 6.3L6.5 6.1Z"></path>
+        </svg>
+      </button>
+      <div id="favorites-menu" class="session-menu fav-menu" hidden>
+        <div class="fav-head">Избранное</div>
+        <div id="favorites-list" class="fav-list"></div>
+      </div>
       <span id="status" class="badge" hidden></span>
       <button id="handoff" type="button" aria-label="Продолжить в другом инструменте" hidden><span class="icon">⇄</span><span class="label">В другой агент</span></button>
       <button id="interrupt" class="danger" type="button" aria-label="Прервать" hidden><span class="icon">■</span><span class="label">Прервать</span></button>

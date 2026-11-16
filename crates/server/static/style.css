@@ -5,6 +5,8 @@
   --text: #1c1c1a;
   --muted: #6d6d66;
   --accent: #2f6fde;
+  /* Избранное: залитая звезда в шапке и у сообщения. */
+  --fav: #e0a400;
   --user: #e6efff;
   --tool: #f0f0ec;
   --busy: #d98a00;
@@ -32,6 +34,7 @@
     --text: #e6e6e3;
     --muted: #9a9b9f;
     --accent: #6ea0ff;
+  --fav: #f2c230;
     --user: #24344f;
     --tool: #26282c;
     --diff-add: #1e3524;
@@ -255,6 +258,51 @@ input, textarea, select {
 }
 .more svg { transition: transform .15s; }
 .more[aria-expanded="true"] svg { transform: rotate(180deg); }
+/* Избранное: залитая жёлтым звезда слева от состояния сессии. */
+.favorites {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--fav);
+}
+.favorites:hover { background: var(--bg); }
+.fav-menu:not([hidden]) { gap: 6px; }
+.fav-head { font-size: 12px; font-weight: 600; }
+.fav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(60dvh, 420px);
+  overflow-y: auto;
+  margin: 0 -6px;
+}
+.fav-empty { margin: 0 6px; font-size: 13px; color: var(--muted); }
+/* Строка списка: кто написал и начало сообщения; нажатие ведёт к нему. */
+.fav-row {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  align-items: stretch;
+  min-width: 0;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.fav-row:hover { background: var(--tool); }
+.fav-row-head { display: flex; align-items: baseline; gap: 8px; }
+.fav-who { font-size: 11px; font-weight: 600; color: var(--accent); }
+.fav-when { margin-left: auto; font-size: 11px; color: var(--muted); }
+.fav-preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .session-menu:not([hidden]) {
   display: flex;
   flex-direction: column;
@@ -587,11 +635,11 @@ input, textarea, select {
 .md th.right, .md td.right { text-align: right; }
 .md input[type=checkbox] { width: auto; margin: 0 2px 0 0; vertical-align: middle; }
 
-/* Строка под сообщением: время слева, копирование текста — по правому краю. */
+/* Строка под сообщением: время слева, избранное и копирование — по правому краю. */
 .foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.foot-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .time { color: var(--muted); font-size: 11px; }
 .copy-text {
-  margin-left: auto;
   flex: none;
   display: inline-flex;
   align-items: center;
@@ -607,6 +655,25 @@ input, textarea, select {
 }
 .copy-text:hover { color: var(--text); }
 .copy-text.copied { color: var(--idle); }
+/* Звезда избранного у сообщения: контур, а в избранном — залитая жёлтым. */
+.fav {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.fav svg { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linejoin: round; }
+.fav:hover { color: var(--text); }
+.fav.on { color: var(--fav); }
+.fav.on svg { fill: currentColor; }
 
 /* Запросы opencode: разрешения и формы с вариантами ответа. */
 .prompts {
@@ -907,6 +974,8 @@ button .icon { display: none; }
   /* Вместо кнопки «⇄» — стрелка вниз; смена агента и модель — в выпадающей панели. */
   #handoff { display: none; }
   .more:not([hidden]) { width: 44px; height: 44px; }
+  .favorites { width: 40px; height: 40px; }
+  .fav-menu:not([hidden]) { width: min(320px, calc(100vw - 16px)); }
   .session-menu:not([hidden]) { width: min(320px, calc(100vw - 16px)); }
   #sm-handoff { min-height: 44px; }
   .sm-id { min-height: 40px; }

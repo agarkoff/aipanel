@@ -4,6 +4,7 @@
 mod ask;
 mod claude;
 mod config;
+mod favorites;
 mod handoff;
 mod image;
 mod install;
@@ -23,7 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo};
+use aipanel_proto::{AgentMsg, Favorite, Limits, ServerMsg, SessionInfo, MAX_ITEM_ID};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::TcpStream,
@@ -51,6 +52,8 @@ struct Agent {
     watchers: Mutex<HashMap<String, JoinHandle<()>>>,
     /// Каталог каждой известной сессии: от него считаются относительные пути картинок.
     cwds: Mutex<HashMap<String, String>>,
+    /// Избранные сообщения сессий: файл `favorites.json` в каталоге агента.
+    favorites: Mutex<favorites::Store>,
     // Состояние для команды `status` (см. status.rs).
     started: i64,
     connected_since: AtomicI64,
@@ -71,6 +74,16 @@ fn split_key(key: &str) -> Result<(&str, &str), String> {
 /// поэтому от сервера принимаются только безопасные символы.
 fn safe_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Что можно положить в избранное: сообщение человека или ответ агента и его
+/// идентификатор без управляющих символов. id элемента ленты содержит `:`,
+/// поэтому проверяется не как `safe_id`.
+fn valid_favorite(id: &str, role: &str) -> bool {
+    !id.is_empty()
+        && id.chars().count() <= MAX_ITEM_ID
+        && !id.chars().any(char::is_control)
+        && matches!(role, "user" | "assistant")
 }
 
 impl Agent {
@@ -111,6 +124,29 @@ impl Agent {
                     };
                     let _ = me.out.send(msg);
                 });
+            }
+            ServerMsg::Favorites { session } => {
+                let items = self.favorites.lock().unwrap().list(&session);
+                let _ = self.out.send(AgentMsg::Favorites { session, items });
+            }
+            ServerMsg::Favorite { session, item, on, ts, role, text } => {
+                // В избранном — только сообщения переписки: вызовы инструментов
+                // и служебные строки туда не попадают.
+                if !valid_favorite(&item, &role) {
+                    util::log(&format!("favorite: некорректное сообщение «{item}» ({role})"));
+                    return;
+                }
+                let (items, error) = {
+                    let mut store = self.favorites.lock().unwrap();
+                    let error = store.set(&session, Favorite { id: item, ts, role, text }, on).err();
+                    (store.list(&session), error)
+                };
+                if let Some(e) = error {
+                    util::log(&format!("favorite: {e}"));
+                }
+                // Список уходит и при ошибке записи: в памяти он уже изменён, а
+                // расходиться с показанными звёздами панели ему нельзя.
+                let _ = self.out.send(AgentMsg::Favorites { session, items });
             }
             ServerMsg::Send { id, session, text } => {
                 let me = Arc::clone(self);
@@ -242,6 +278,10 @@ impl Agent {
                         Ok(_) => Err("неизвестный тип сессии".into()),
                         Err(e) => Err(e),
                     };
+                    if result.is_ok() {
+                        // Сессии больше нет: её избранное не к чему относить.
+                        me.favorites.lock().unwrap().remove_session(&session);
+                    }
                     me.finish(id, result.map(|_| None));
                 });
             }
@@ -549,6 +589,7 @@ async fn run(cfg: Config) {
         force: AtomicBool::new(false),
         watchers: Mutex::new(HashMap::new()),
         cwds: Mutex::new(HashMap::new()),
+        favorites: Mutex::new(favorites::Store::open()),
         started: util::now_ms(),
         connected_since: AtomicI64::new(0),
         sessions: AtomicUsize::new(0),

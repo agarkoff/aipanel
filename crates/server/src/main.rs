@@ -8,7 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Limits, ServerMsg, SessionInfo, IMAGE_MIMES, MAX_IMAGE_BYTES, MAX_SCREEN_BYTES, MAX_SCREENS};
+use aipanel_proto::{
+    AgentMsg, Limits, ServerMsg, SessionInfo, IMAGE_MIMES, MAX_FAVORITES, MAX_FAVORITE_TEXT, MAX_IMAGE_BYTES, MAX_ITEM_ID,
+    MAX_SCREEN_BYTES, MAX_SCREENS,
+};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -469,6 +472,9 @@ async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) {
         watched.sort();
         watched.dedup();
         for session in watched {
+            // Панель могла открыть сессию, пока агент был не в сети: избранное
+            // она тогда не получила, поэтому список берём при подключении.
+            let _ = tx.try_send(ServerMsg::Favorites { session: session.clone() });
             let _ = tx.try_send(ServerMsg::Watch { session });
         }
         let (sessions, limits) = inner
@@ -562,6 +568,20 @@ fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
             let text = json!({
                 "t": "older", "agent": agent, "session": session,
                 "items": items, "more": more, "error": error,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
+        AgentMsg::Favorites { session, mut items } => {
+            items.truncate(MAX_FAVORITES);
+            let text = json!({
+                "t": "favorites", "agent": agent, "session": session, "items": items,
             })
             .to_string();
             for b in inner.browsers.values() {
@@ -851,6 +871,20 @@ enum BrowserMsg {
     /// Снять экраны машины агента: в ответ придут `screen` на каждый экран и
     /// `screens` в конце.
     Screens { id: String, agent: String },
+    /// Попросить у агента избранные сообщения сессии: они хранятся у него.
+    Favorites { agent: String, session: String },
+    /// Добавить сообщение `item` в избранное сессии (`on`) или убрать оттуда.
+    Favorite {
+        agent: String,
+        session: String,
+        item: String,
+        on: bool,
+        #[serde(default)]
+        ts: i64,
+        role: String,
+        #[serde(default)]
+        text: String,
+    },
 }
 
 async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -1060,6 +1094,37 @@ fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
         BrowserMsg::Screens { id, agent } => {
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Screens { id: cmd });
+        }
+        BrowserMsg::Favorites { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Список общий для всех, кто смотрит сессию: ответ агент рассылает.
+            inner.to_agent(&owner, &agent, ServerMsg::Favorites { session });
+        }
+        BrowserMsg::Favorite { agent, session, item, on, ts, role, text } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            if item.is_empty()
+                || item.chars().count() > MAX_ITEM_ID
+                || item.chars().any(char::is_control)
+                || !matches!(role.as_str(), "user" | "assistant")
+            {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            let text = truncate(text, MAX_FAVORITE_TEXT);
+            inner.to_agent(
+                &owner,
+                &agent,
+                ServerMsg::Favorite { session, item, on, ts: ts.max(0), role, text },
+            );
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
             if !safe_id(&prompt) {
@@ -1467,6 +1532,92 @@ mod tests {
         let msg = rx.try_recv().unwrap();
         assert!(msg.contains("\"t\":\"commands\"") && msg.contains("init"), "{msg}");
         assert!(other_rx.try_recv().is_err(), "список ушёл в чужую сессию");
+    }
+
+    #[test]
+    fn favorites_reach_only_watchers_of_that_session() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let (other, mut other_rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+            },
+        );
+        inner.browsers.insert(
+            2,
+            BrowserEntry {
+                tx: other,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s2".into())),
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Favorites {
+                session: "opencode:s1".into(),
+                items: vec![aipanel_proto::Favorite {
+                    id: "m1:part:0".into(),
+                    ts: 5,
+                    role: "assistant".into(),
+                    text: "ответ в избранном".into(),
+                }],
+            },
+        );
+        let msg = rx.try_recv().unwrap();
+        assert!(msg.contains("\"t\":\"favorites\"") && msg.contains("ответ в избранном"), "{msg}");
+        assert!(other_rx.try_recv().is_err(), "избранное ушло в чужую сессию");
+    }
+
+    #[test]
+    fn favorite_toggle_checks_role_and_truncates_text() {
+        let (agent_tx, mut agent_rx) = mpsc::channel::<ServerMsg>(4);
+        let (btx, _brx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        let mut agent = entry();
+        agent.tx = Some(agent_tx);
+        inner.agents.insert(("alice".into(), "pc".into()), agent);
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx: btx,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+
+        let toggle = |role: &str, text: &str| BrowserMsg::Favorite {
+            agent: "pc".into(),
+            session: "opencode:s1".into(),
+            item: "m1".into(),
+            on: true,
+            ts: -5,
+            role: role.into(),
+            text: text.into(),
+        };
+        // Служебная строка ленты в избранное не попадает: агенту ничего не уходит.
+        on_browser_msg(&app, 1, toggle("tool_use", "вызов"));
+        assert!(agent_rx.try_recv().is_err(), "служебное сообщение ушло агенту");
+
+        on_browser_msg(&app, 1, toggle("user", &"я".repeat(MAX_FAVORITE_TEXT + 50)));
+        match agent_rx.try_recv().unwrap() {
+            ServerMsg::Favorite { item, on, ts, role, text, .. } => {
+                assert_eq!(item, "m1");
+                assert!(on);
+                assert_eq!(ts, 0, "время раньше эпохи");
+                assert_eq!(role, "user");
+                assert_eq!(text.chars().count(), MAX_FAVORITE_TEXT);
+            }
+            other => panic!("агенту ушло не избранное: {other:?}"),
+        }
     }
 
     #[test]

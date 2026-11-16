@@ -10,6 +10,9 @@ const el = (tag, cls, text) => {
 
 // Иконка из путей SVG: текстовый символ вроде «⏻» есть не во всех шрифтах.
 const SVG_NS = 'http://www.w3.org/2000/svg';
+// Звезда избранного: залитая применяется и в шапке, и у сообщения.
+const STAR = 'M8 2L9.5 6.1L13.9 6.3L10.5 9L11.6 13.2L8 10.8L4.4 13.2L5.5 9L2.1 6.3L6.5 6.1Z';
+
 const icon = (paths) => {
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.setAttribute('viewBox', '0 0 16 16');
@@ -101,6 +104,10 @@ let handoffRequest = null;
 // Сессия, для которой открыта панель под стрелкой: при переходе к другой панель закрывается.
 let menuKey = null;
 let copyIdTimer = null;
+// Избранное открытой сессии. Список хранит агент (`favorites.json` в его
+// каталоге), поэтому звёзды и плашка в шапке одинаковы во всех браузерах.
+let favorites = []; // [{ id, ts, role, text }]
+const favButtons = new Map(); // id элемента ленты -> звезда в его строке
 let cancelQueuedId = null;
 // Удаление сессии: id команды и удаляемая сессия. Диалог остаётся открытым,
 // пока агент не ответит, чтобы ошибку было видно.
@@ -234,7 +241,11 @@ function connect() {
     modelsAsked.clear();
     launchModelCache.clear();
     launchModelsRequest = null;
-    if (selected) send({ t: 'watch', agent: selected.agent, session: selected.session });
+    if (selected) {
+      send({ t: 'watch', agent: selected.agent, session: selected.session });
+      // Избранное живёт у агента: после переподключения берём его заново.
+      send({ t: 'favorites', agent: selected.agent, session: selected.session });
+    }
   };
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
   ws.onclose = async () => {
@@ -273,6 +284,10 @@ function onMessage(msg) {
   } else if (msg.t === 'prompts') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyPrompts(msg.prompts || []);
+  } else if (msg.t === 'favorites') {
+    if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
+    favorites = Array.isArray(msg.items) ? msg.items : [];
+    applyFavorites();
   } else if (msg.t === 'commands') {
     const key = commandKey(msg.agent, msg.session);
     commandsAsked.delete(key);
@@ -608,6 +623,10 @@ function select(agent, session) {
   lastViewed = selected;
   nodes.clear();
   feedRequests.clear();
+  favorites = [];
+  favButtons.clear();
+  setFavoritesMenu(false);
+  applyFavorites();
   clearPrompts();
   resetHistoryNav();
   clearTimeout(copyIdTimer);
@@ -622,6 +641,8 @@ function select(agent, session) {
   // возвращала к списку сессий, а не уводила со страницы.
   if (!(history.state && history.state.viewing)) history.pushState({ viewing: true }, '');
   send({ t: 'watch', agent, session });
+  // Список избранного приходит от агента: у него он и хранится.
+  send({ t: 'favorites', agent, session });
   renderSessions();
   renderHeader();
 }
@@ -629,6 +650,10 @@ function select(agent, session) {
 function closeView() {
   $('app').classList.remove('viewing');
   selected = null;
+  favorites = [];
+  favButtons.clear();
+  setFavoritesMenu(false);
+  applyFavorites();
   clearPrompts();
   resetPin();
   resetOlder();
@@ -776,6 +801,8 @@ function renderHeader() {
     $('interrupt').hidden = true;
     $('composer').hidden = true;
     $('more').hidden = true;
+    $('favorites').hidden = true;
+    setFavoritesMenu(false);
     setSessionMenu(false);
     return;
   }
@@ -785,6 +812,7 @@ function renderHeader() {
   $('session-id').hidden = false;
   $('session-id').textContent = sessionId(session.key);
   $('copy-id').hidden = false;
+  $('favorites').hidden = false;
   badge.hidden = false;
   badge.className = `badge ${agent.online ? session.status : ''}`;
   badge.textContent = agent.online ? STATUS[session.status] || session.status : 'агент не в сети';
@@ -962,6 +990,118 @@ function copyTextButton(text) {
   });
   return btn;
 }
+
+// ------------------------------------------------------------ избранное
+
+// Звезда в строке сообщения: залита жёлтым, если сообщение в избранном.
+// Хранится список у агента, поэтому нажатие меняет только запрос к нему, а
+// звёзды обновляются по присланному списку (сразу — для отзывчивости).
+function isFavorite(id) {
+  return favorites.some((f) => f.id === id);
+}
+
+function setFavoriteButton(btn, on) {
+  btn.classList.toggle('on', on);
+  btn.title = on ? 'Убрать из избранного' : 'Добавить в избранное';
+  btn.setAttribute('aria-label', btn.title);
+  btn.setAttribute('aria-pressed', String(on));
+}
+
+function favoriteButton(item) {
+  const btn = el('button', 'fav');
+  btn.type = 'button';
+  btn.append(icon([STAR]));
+  setFavoriteButton(btn, isFavorite(item.id));
+  btn.addEventListener('click', () => toggleFavorite(item));
+  favButtons.set(item.id, btn);
+  return btn;
+}
+
+function toggleFavorite(item) {
+  const cur = current();
+  if (!cur) return;
+  const on = !isFavorite(item.id);
+  const fav = { id: item.id, ts: item.ts || 0, role: item.role, text: item.text || '' };
+  if (!send({
+    t: 'favorite',
+    agent: cur.agent.name,
+    session: cur.session.key,
+    item: fav.id,
+    on,
+    ts: fav.ts,
+    role: fav.role,
+    text: fav.text,
+  })) {
+    setHint('Нет соединения с сервером.', true);
+    return;
+  }
+  // Звезда загорается сразу: агент пришлёт полный список следом и подтвердит его.
+  favorites = on ? [...favorites, fav] : favorites.filter((f) => f.id !== fav.id);
+  applyFavorites();
+}
+
+// Список изменился: подтягиваем звёзды у всех показанных сообщений и плашку.
+function applyFavorites() {
+  const ids = new Set(favorites.map((f) => f.id));
+  for (const [id, btn] of favButtons) setFavoriteButton(btn, ids.has(id));
+  const btn = $('favorites');
+  btn.title = favorites.length ? `Избранное: ${favorites.length}` : 'Избранное';
+  btn.setAttribute('aria-label', btn.title);
+  if (!$('favorites-menu').hidden) renderFavoritesMenu();
+}
+
+function setFavoritesMenu(open) {
+  $('favorites-menu').hidden = !open;
+  $('favorites').setAttribute('aria-expanded', String(open));
+  if (open) renderFavoritesMenu();
+}
+
+// Плашка со списком: начало каждого сообщения, нажатие ведёт к нему в ленте.
+function renderFavoritesMenu() {
+  const box = $('favorites-list');
+  if (!favorites.length) {
+    box.replaceChildren(el('p', 'fav-empty', 'Пока пусто. Звезда у сообщения добавляет его сюда.'));
+    return;
+  }
+  const rows = favorites.map((f) => {
+    const row = el('button', 'fav-row');
+    row.type = 'button';
+    const head = el('span', 'fav-row-head');
+    head.append(el('span', 'fav-who', f.role === 'user' ? 'Вы' : 'Агент'));
+    if (f.ts) head.append(el('span', 'fav-when', new Date(f.ts).toLocaleString()));
+    row.append(head, el('span', 'fav-preview', firstLine(f.text || '') || 'Сообщение'));
+    row.title = f.text || 'Сообщение';
+    row.addEventListener('click', () => {
+      setFavoritesMenu(false);
+      gotoMessage(f.id);
+    });
+    return row;
+  });
+  box.replaceChildren(...rows);
+}
+
+// Переход к сообщению по id: прокрутка и подсветка, как у закрепа. Если строки
+// в ленте нет (сообщение старше загруженного), так и говорим.
+function gotoMessage(id) {
+  const node = nodes.get(id);
+  if (!node) {
+    setHint('Это сообщение не загружено в ленту: прокрутите её вверх — ранние сообщения подгрузятся.', true);
+    return;
+  }
+  jumpToNode(node);
+}
+
+$('favorites').addEventListener('click', () => setFavoritesMenu($('favorites-menu').hidden));
+document.addEventListener('click', (e) => {
+  if ($('favorites-menu').hidden) return;
+  if (!e.target.closest('#favorites-menu, #favorites')) setFavoritesMenu(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !$('favorites-menu').hidden) {
+    setFavoritesMenu(false);
+    $('favorites').focus();
+  }
+});
 
 function cancelQueued(item) {
   const cur = current();
@@ -1221,10 +1361,17 @@ function buildItem(item, call) {
     }
   }
   if (item.ts && (item.kind === 'text' || item.kind === 'error')) {
-    // Строка под сообщением: время слева, кнопка копирования текста — справа.
+    // Строка под сообщением: время слева, избранное и копирование — справа.
     const foot = el('div', 'foot');
     foot.append(el('div', 'time', new Date(item.ts).toLocaleString()));
-    if (item.text) foot.append(copyTextButton(item.text));
+    const actions = el('div', 'foot-actions');
+    // В избранное попадают свои сообщения и ответы агента: у ошибок и
+    // служебных строк в списке был бы мусор.
+    if (item.kind === 'text' && (item.role === 'user' || item.role === 'assistant')) {
+      actions.append(favoriteButton(item));
+    }
+    if (item.text) actions.append(copyTextButton(item.text));
+    if (actions.childElementCount) foot.append(actions);
     node.append(foot);
   }
   return node;
@@ -1262,6 +1409,7 @@ function applyHistory(msg) {
   const stick = Date.now() > scrollHoldUntil && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   if (msg.reset) {
     nodes.clear();
+    favButtons.clear();
     feedRequests.clear();
     toolCalls.clear();
     resultCalls.clear();
@@ -1283,6 +1431,7 @@ function applyHistory(msg) {
     feedRequests.delete(id);
     toolCalls.delete(id);
     resultCalls.delete(id);
+    favButtons.delete(id);
   }
   for (const item of msg.items) {
     // Отправленное из панели уже в ленте: очередь больше не нужна.
@@ -1454,22 +1603,29 @@ function clearFlash() {
   for (const node of nodes.values()) node.classList.remove('flash');
 }
 
-$('pin').addEventListener('click', () => {
-  const list = myMessages();
-  if (!list.length) return;
-  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
-  const node = list[pinIdx];
+// Прокрутка к сообщению с подсветкой. Нужна и закрепу, и переходу из избранного:
+// сообщение ставим ближе к верху ленты, чтобы был виден и ответ на него.
+function jumpToNode(node) {
   const feed = $('feed');
   const box = feed.getBoundingClientRect();
   const item = node.getBoundingClientRect();
-  // Сообщение ставим ближе к верху ленты: так видно и сам запрос, и ответ на него.
   const top = feed.scrollTop + item.top - box.top - Math.min(120, feed.clientHeight * 0.25);
+  // Авто-прилипание к концу на время перехода выключено: иначе первый же ответ
+  // агента вернул бы ленту вниз, не дав дочитать найденное сообщение.
   scrollHoldUntil = Date.now() + 600;
   feed.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
   clearFlash();
   flashId = node.dataset.id || '';
   node.classList.add('flash');
   flashTimer = setTimeout(clearFlash, 1600);
+}
+
+$('pin').addEventListener('click', () => {
+  const list = myMessages();
+  if (!list.length) return;
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  const node = list[pinIdx];
+  jumpToNode(node);
   // Следующее нажатие ведёт к более старому своему сообщению, а после самого
   // старого закреп возвращается к последнему.
   pinIdx = pinIdx === 0 ? list.length - 1 : pinIdx - 1;

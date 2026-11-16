@@ -117,6 +117,11 @@ const stub = `
   window.__olderPages = [];
   window.__setModels = [];
   window.__starts = [];
+  // Избранное: агент хранит список и присылает его целиком на каждый запрос
+  // и после каждого изменения.
+  window.__favs = [];
+  window.__favRequests = [];
+  window.__favAsked = 0;
   // Уведомления: браузерное разрешение выдано, а сами уведомления записываются,
   // чтобы тест мог проверить, о чём панель сообщает.
   window.__notices = [];
@@ -170,6 +175,15 @@ const stub = `
         shots.forEach((shot, i) =>
           setTimeout(() => this.emit({ t: 'screen', id: msg.id, index: i, count: shots.length, ...shot }), 0));
         setTimeout(() => this.emit({ t: 'screens', id: msg.id, error: window.__screensError || null }), 0);
+      } else if (msg.t === 'favorites') {
+        window.__favAsked += 1;
+        setTimeout(() => this.emit({ t: 'favorites', agent: msg.agent, session: msg.session, items: window.__favs }), 0);
+      } else if (msg.t === 'favorite') {
+        window.__favRequests.push(msg);
+        window.__favs = msg.on
+          ? [...window.__favs.filter((f) => f.id !== msg.item), { id: msg.item, ts: msg.ts, role: msg.role, text: msg.text }]
+          : window.__favs.filter((f) => f.id !== msg.item);
+        setTimeout(() => this.emit({ t: 'favorites', agent: msg.agent, session: msg.session, items: window.__favs }), 0);
       }
     }
     close() { this.readyState = 3; }
@@ -449,6 +463,137 @@ try {
   check('после копирования значок сменяется галочкой', copied.during.paths === 1 && copied.during.copied, copied);
   check('галочка возвращается к значку копирования', copied.after.paths === 2 && !copied.after.copied, copied);
   check('при копировании текст внизу панели не появляется', copied.during.hint === copied.before, copied);
+
+  // ------------------------------------------------------------ избранное
+  // Список хранит агент, а не браузер: панель спрашивает его при открытии
+  // сессии, а звёзды в строке сообщения показывают, что уже в избранном.
+  const favLayout = await evaluate(`(() => {
+    const texts = [...document.querySelectorAll('#feed .item.text')];
+    const first = texts[0];
+    const fav = first.querySelector('.foot .fav');
+    const copy = first.querySelector('.foot .copy-text');
+    const favBox = fav.getBoundingClientRect();
+    const copyBox = copy.getBoundingClientRect();
+    return {
+      items: texts.length,
+      withFav: texts.filter((n) => n.querySelector('.foot .fav')).length,
+      asked: window.__favAsked,
+      label: fav.getAttribute('aria-label'),
+      pressed: fav.getAttribute('aria-pressed'),
+      fill: getComputedStyle(fav.querySelector('svg')).fill,
+      leftOfCopy: favBox.right <= copyBox.left + 1,
+      sameRow: Math.abs(favBox.top - copyBox.top) < 3,
+      headerHidden: document.getElementById('favorites').hidden,
+    };
+  })()`);
+  check('звезда есть у каждого сообщения, слева от копирования', favLayout.items > 0 && favLayout.withFav === favLayout.items && favLayout.leftOfCopy && favLayout.sameRow, favLayout);
+  check('при открытии сессии панель спросила избранное у агента', favLayout.asked >= 1, favLayout);
+  check('по умолчанию звезда — контур, а не заливка', favLayout.label === 'Добавить в избранное' && favLayout.pressed === 'false' && favLayout.fill === 'none', favLayout);
+  check('звезда в шапке видна, когда открыта сессия', !favLayout.headerHidden, favLayout);
+
+  // Своё сообщение: нажатие уходит агенту вместе с началом текста.
+  const ownStar = await evaluate(`(async () => {
+    const node = [...document.querySelectorAll('#feed .item.text.user')].at(-1);
+    const fav = node.querySelector('.foot .fav');
+    fav.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const req = window.__favRequests.at(-1);
+    return {
+      on: req && req.on,
+      role: req && req.role,
+      item: req && req.item,
+      id: node.dataset.id,
+      text: req && req.text,
+      lit: fav.classList.contains('on'),
+      pressed: fav.getAttribute('aria-pressed'),
+      fill: getComputedStyle(fav.querySelector('svg')).fill,
+      title: document.getElementById('favorites').title,
+    };
+  })()`);
+  check('звезда у своего сообщения ставит его в избранное', ownStar.on === true && ownStar.item === ownStar.id && ownStar.lit, ownStar);
+  check('в избранное уходит начало сообщения', ownStar.role === 'user' && ownStar.text.startsWith('Последний вопрос'), ownStar);
+  check('в избранном звезда залита жёлтым', ownStar.pressed === 'true' && ownStar.fill !== 'none', ownStar);
+  check('в шапке показано, сколько в избранном', ownStar.title.includes('1'), ownStar);
+
+  // Ответ агента тоже можно добавить.
+  const agentStar = await evaluate(`(async () => {
+    const node = document.querySelector('#feed .item.text.assistant');
+    node.querySelector('.foot .fav').click();
+    await new Promise((r) => setTimeout(r, 150));
+    const req = window.__favRequests.at(-1);
+    return { on: req && req.on, role: req && req.role, item: req && req.item, id: node.dataset.id, text: req && req.text };
+  })()`);
+  check('ответ агента тоже добавляется в избранное', agentStar.on === true && agentStar.role === 'assistant' && agentStar.item === agentStar.id, agentStar);
+
+  // Плашка в шапке: начало каждого сообщения и кто его написал.
+  const favMenu = await evaluate(`(() => {
+    document.getElementById('favorites').click();
+    const box = document.getElementById('favorites-menu');
+    const rows = [...box.querySelectorAll('.fav-row')];
+    return {
+      open: !box.hidden,
+      expanded: document.getElementById('favorites').getAttribute('aria-expanded'),
+      rows: rows.map((r) => ({
+        who: r.querySelector('.fav-who').textContent,
+        text: r.querySelector('.fav-preview').textContent,
+      })),
+    };
+  })()`);
+  check('звезда в шапке открывает список избранного', favMenu.open && favMenu.expanded === 'true', favMenu);
+  check(
+    'в списке начало сообщений и кто их написал',
+    favMenu.rows.length === 2 &&
+      favMenu.rows.some((r) => r.who === 'Вы' && r.text.startsWith('Последний вопрос')) &&
+      favMenu.rows.some((r) => r.who === 'Агент'),
+    favMenu,
+  );
+
+  // Нажатие вне плашки её закрывает.
+  await evaluate(`document.getElementById('feed').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+  await sleep(80);
+  check('нажатие вне списка закрывает плашку', await evaluate(`document.getElementById('favorites-menu').hidden`));
+
+  // Переход из списка: первое сообщение далеко вверху — лента должна к нему
+  // прокрутиться и подсветить его.
+  const favJump = await evaluate(`(async () => {
+    [...document.querySelectorAll('#feed .item.text.user')][0].querySelector('.foot .fav').click();
+    await new Promise((r) => setTimeout(r, 150));
+    const feed = document.getElementById('feed');
+    feed.scrollTop = feed.scrollHeight;
+    feed.dispatchEvent(new Event('scroll'));
+    document.getElementById('favorites').click();
+    await new Promise((r) => setTimeout(r, 60));
+    const rows = [...document.querySelectorAll('#favorites-menu .fav-row')];
+    const row = rows.find((r) => r.querySelector('.fav-preview').textContent.startsWith('Первый вопрос'));
+    if (!row) return { missing: true, previews: rows.map((r) => r.querySelector('.fav-preview').textContent) };
+    row.click();
+    await new Promise((r) => setTimeout(r, 600));
+    const flash = document.querySelector('#feed .item.flash');
+    return {
+      closed: document.getElementById('favorites-menu').hidden,
+      flash: flash ? flash.textContent.replace(/\\s+/g, ' ').trim() : '',
+      top: flash ? flash.getBoundingClientRect().top : -1,
+      feedTop: feed.getBoundingClientRect().top,
+      feedBottom: feed.getBoundingClientRect().bottom,
+    };
+  })()`);
+  check(
+    'нажатие в списке закрывает плашку и ведёт к сообщению',
+    !favJump.missing && favJump.closed && favJump.flash.startsWith('Первый вопрос') &&
+      favJump.top >= favJump.feedTop - 1 && favJump.top <= favJump.feedBottom,
+    favJump,
+  );
+
+  // Повторное нажатие убирает сообщение из избранного.
+  const removeStar = await evaluate(`(async () => {
+    const node = document.querySelector('#feed .item.text.assistant');
+    const fav = node.querySelector('.foot .fav');
+    fav.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const req = window.__favRequests.at(-1);
+    return { on: req && req.on, item: req && req.item, id: node.dataset.id, lit: fav.classList.contains('on'), count: window.__favs.length };
+  })()`);
+  check('повторное нажатие убирает сообщение из избранного', removeStar.on === false && removeStar.item === removeStar.id && !removeStar.lit && removeStar.count === 2, removeStar);
 
   // Нажатия на закреп: переход к сообщению и переключение на предыдущее своё.
   const pinState = async () => evaluate(`(() => {
@@ -892,6 +1037,16 @@ try {
     deviceScaleFactor: 1,
     mobile: true,
   });
+  // Кнопки шапки (со звездой избранного) не должны вылезти за экран.
+  const narrowHeader = await evaluate(`(() => {
+    const ids = ['back', 'favorites', 'status', 'interrupt', 'more'];
+    const boxes = ids
+      .map((id) => document.getElementById(id))
+      .filter((n) => n && !n.hidden)
+      .map((n) => ({ id: n.id, left: Math.round(n.getBoundingClientRect().left), right: Math.round(n.getBoundingClientRect().right) }));
+    return { width: innerWidth, boxes, overflow: boxes.some((b) => b.right > innerWidth + 1 || b.left < -1) };
+  })()`);
+  check('на телефоне шапка со звездой избранного помещается в экран', !narrowHeader.overflow && narrowHeader.boxes.length >= 4, narrowHeader);
   await typeSlash('/');
   await waitFor(`(() => { const l = document.querySelector('#composer .sg-list'); return l && !l.hidden && l.querySelectorAll('.sg-item').length > 0; })()`);
   const narrow = await evaluate(`(() => {
