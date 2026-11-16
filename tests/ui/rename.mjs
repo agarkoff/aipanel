@@ -327,23 +327,20 @@ try {
   check('после ответа агента шапка показывает новое имя', true);
   check('поле в шапке закрылось', (await evaluate(`document.querySelector('.rename-header') === null`)) === true);
 
-  // Карандаш рядом с заголовком и пункт в панели под стрелкой открывают то же поле.
+  // Карандаш рядом с заголовком открывает то же поле. Отдельного пункта в панели
+  // под стрелкой нет: правка живёт в шапке, рядом с самим названием.
   await click('#rename');
   field = await renameInput('.rename-header');
   check('карандаш в шапке открывает поле', field !== null);
   await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 
   await click('#more');
-  const item = await evaluate(`(() => {
-    const b = document.getElementById('sm-rename');
-    return { open: !document.getElementById('session-menu').hidden, hidden: b.hidden, label: b.textContent.trim() };
-  })()`);
-  check('в панели под стрелкой есть переименование', item.open && !item.hidden && item.label === 'Переименовать сессию', item);
-  await click('#sm-rename');
-  field = await renameInput('.rename-header');
-  check('пункт «Переименовать сессию» открывает поле', field !== null);
-  check('панель под стрелкой закрылась', (await evaluate(`document.getElementById('session-menu').hidden`)) === true);
-  await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  const menu = await evaluate(`(() => ({
+    open: !document.getElementById('session-menu').hidden,
+    rename: document.getElementById('sm-rename') !== null,
+  }))()`);
+  check('в панели под стрелкой нет отдельного переименования', menu.open && !menu.rename, menu);
+  await click('#more');
 
   // --- список: имя открытой сессии правится нажатием (слева панель видна, пока
   // сессия открыта). Нажатие на имя другой строки по-прежнему открывает её.
@@ -425,12 +422,12 @@ try {
   check('поле на телефоне не приближает страницу (16px)', mobile && mobile.font === '16px', mobile);
   await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 
-  // На телефоне наведение недоступно, поэтому равнозначный путь — панель под стрелкой.
-  await click('#more');
-  await click('#sm-rename');
+  // На телефоне наведение недоступно, поэтому карандаш — основной вход.
+  await click('#rename');
   mobile = await renameInput('.rename-header');
-  check('на телефоне переименование есть в панели под стрелкой', mobile !== null, mobile);
-  check('поле из панели на телефоне тоже 16px', mobile && mobile.font === '16px', mobile);
+  check('карандаш на телефоне открывает поле', mobile !== null, mobile);
+  check('поле из карандаша на телефоне тоже 16px', mobile && mobile.font === '16px', mobile);
+  check('в панели под стрелкой нет отдельного пункта', (await evaluate(`document.getElementById('sm-rename') === null`)) === true);
   await evaluate(`document.querySelector('.rename-header').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
 
   await click('#back');

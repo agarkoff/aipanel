@@ -660,12 +660,6 @@ $('rename').addEventListener('click', () => {
   const cur = current();
   if (cur) startRename('header', cur.agent, cur.session);
 });
-// Та же правка из панели под стрелкой: на телефоне это главный путь.
-$('sm-rename').addEventListener('click', () => {
-  setSessionMenu(false);
-  const cur = current();
-  if (cur) startRename('header', cur.agent, cur.session);
-});
 // Enter и пробел в шапке делают то же, что нажатие: правка имени с клавиатуры.
 $('title').addEventListener('keydown', (e) => {
   if (e.target !== e.currentTarget) return;
@@ -948,7 +942,6 @@ function renderHeader() {
     titleEl.removeAttribute('title');
     titleEl.tabIndex = -1;
     $('rename').hidden = true;
-    $('sm-rename').hidden = true;
     $('subtitle').textContent = '';
     $('session-id').hidden = true;
     $('copy-id').hidden = true;
@@ -970,12 +963,10 @@ function renderHeader() {
     titleEl.title = 'Переименовать сессию';
     titleEl.tabIndex = 0;
   }
-  // Карандаш и пункт панели ведут к одному и тому же полю. У агента не в сети
-  // правка не отправится, поэтому кнопки неактивны.
+  // Карандаш ведёт к тому же полю, что и нажатие на заголовок. У агента не в
+  // сети правка не отправится, поэтому кнопка неактивна.
   $('rename').hidden = Boolean(editing);
   $('rename').disabled = !agent.online;
-  $('sm-rename').hidden = false;
-  $('sm-rename').disabled = !agent.online;
   $('subtitle').textContent = `${agent.name} · ${session.tool} · ${session.cwd}`;
   $('session-id').hidden = false;
   $('session-id').textContent = sessionId(session.key);

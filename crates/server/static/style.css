@@ -380,16 +380,6 @@ input, textarea, select {
   overflow-wrap: anywhere;
 }
 #sm-handoff { min-height: 36px; }
-/* Кнопка «Переименовать сессию» в панели под стрелкой: на телефоне это главный
-   путь к правке имени, поэтому у неё заметная высота и подпись, а не иконка. */
-.sm-action {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  text-align: left;
-}
-.sm-action svg { flex: none; color: var(--muted); }
 /* Идентификатор сессии живёт в панели; копируется нажатием на всю строку. */
 #session-id, #copy-id { display: none; }
 .sm-id {
@@ -1072,7 +1062,6 @@ button .icon { display: none; }
   .fav-menu:not([hidden]) { width: min(320px, calc(100vw - 16px)); }
   .session-menu:not([hidden]) { width: min(320px, calc(100vw - 16px)); }
   #sm-handoff { min-height: 44px; }
-  .sm-action { min-height: 44px; }
   .sm-id { min-height: 40px; }
   .composer button { font-size: 22px; font-weight: 600; }
 
