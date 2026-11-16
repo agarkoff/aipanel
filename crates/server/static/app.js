@@ -1047,6 +1047,10 @@ function applyFavorites() {
   const btn = $('favorites');
   btn.title = favorites.length ? `Избранное: ${favorites.length}` : 'Избранное';
   btn.setAttribute('aria-label', btn.title);
+  // Счётчик у звезды: сколько сообщений этой сессии в избранном.
+  const count = $('favorites-count');
+  count.hidden = !favorites.length;
+  count.textContent = favorites.length > 99 ? '99+' : String(favorites.length);
   if (!$('favorites-menu').hidden) renderFavoritesMenu();
 }
 

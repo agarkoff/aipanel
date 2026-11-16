@@ -484,12 +484,14 @@ try {
       leftOfCopy: favBox.right <= copyBox.left + 1,
       sameRow: Math.abs(favBox.top - copyBox.top) < 3,
       headerHidden: document.getElementById('favorites').hidden,
+      countHidden: document.getElementById('favorites-count').hidden,
     };
   })()`);
   check('звезда есть у каждого сообщения, слева от копирования', favLayout.items > 0 && favLayout.withFav === favLayout.items && favLayout.leftOfCopy && favLayout.sameRow, favLayout);
   check('при открытии сессии панель спросила избранное у агента', favLayout.asked >= 1, favLayout);
   check('по умолчанию звезда — контур, а не заливка', favLayout.label === 'Добавить в избранное' && favLayout.pressed === 'false' && favLayout.fill === 'none', favLayout);
   check('звезда в шапке видна, когда открыта сессия', !favLayout.headerHidden, favLayout);
+  check('без избранного счётчика у звезды нет', favLayout.countHidden, favLayout);
 
   // Своё сообщение: нажатие уходит агенту вместе с началом текста.
   const ownStar = await evaluate(`(async () => {
@@ -508,12 +510,15 @@ try {
       pressed: fav.getAttribute('aria-pressed'),
       fill: getComputedStyle(fav.querySelector('svg')).fill,
       title: document.getElementById('favorites').title,
+      count: document.getElementById('favorites-count').textContent,
+      countShown: !document.getElementById('favorites-count').hidden,
     };
   })()`);
   check('звезда у своего сообщения ставит его в избранное', ownStar.on === true && ownStar.item === ownStar.id && ownStar.lit, ownStar);
   check('в избранное уходит начало сообщения', ownStar.role === 'user' && ownStar.text.startsWith('Последний вопрос'), ownStar);
   check('в избранном звезда залита жёлтым', ownStar.pressed === 'true' && ownStar.fill !== 'none', ownStar);
   check('в шапке показано, сколько в избранном', ownStar.title.includes('1'), ownStar);
+  check('у звезды в шапке счётчик избранного', ownStar.countShown && ownStar.count === '1', ownStar);
 
   // Ответ агента тоже можно добавить.
   const agentStar = await evaluate(`(async () => {
@@ -521,9 +526,17 @@ try {
     node.querySelector('.foot .fav').click();
     await new Promise((r) => setTimeout(r, 150));
     const req = window.__favRequests.at(-1);
-    return { on: req && req.on, role: req && req.role, item: req && req.item, id: node.dataset.id, text: req && req.text };
+    return {
+      on: req && req.on,
+      role: req && req.role,
+      item: req && req.item,
+      id: node.dataset.id,
+      text: req && req.text,
+      count: document.getElementById('favorites-count').textContent,
+    };
   })()`);
   check('ответ агента тоже добавляется в избранное', agentStar.on === true && agentStar.role === 'assistant' && agentStar.item === agentStar.id, agentStar);
+  check('счётчик растёт со вторым сообщением', agentStar.count === '2', agentStar);
 
   // Плашка в шапке: начало каждого сообщения и кто его написал.
   const favMenu = await evaluate(`(() => {
@@ -591,9 +604,17 @@ try {
     fav.click();
     await new Promise((r) => setTimeout(r, 150));
     const req = window.__favRequests.at(-1);
-    return { on: req && req.on, item: req && req.item, id: node.dataset.id, lit: fav.classList.contains('on'), count: window.__favs.length };
+    return {
+      on: req && req.on,
+      item: req && req.item,
+      id: node.dataset.id,
+      lit: fav.classList.contains('on'),
+      count: window.__favs.length,
+      shown: document.getElementById('favorites-count').textContent,
+    };
   })()`);
   check('повторное нажатие убирает сообщение из избранного', removeStar.on === false && removeStar.item === removeStar.id && !removeStar.lit && removeStar.count === 2, removeStar);
+  check('счётчик уменьшается вместе со списком', removeStar.shown === '2', removeStar);
 
   // Нажатия на закреп: переход к сообщению и переключение на предыдущее своё.
   const pinState = async () => evaluate(`(() => {

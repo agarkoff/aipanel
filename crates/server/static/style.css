@@ -260,6 +260,7 @@ input, textarea, select {
 .more[aria-expanded="true"] svg { transform: rotate(180deg); }
 /* Избранное: залитая жёлтым звезда слева от состояния сессии. */
 .favorites {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -273,6 +274,24 @@ input, textarea, select {
   color: var(--fav);
 }
 .favorites:hover { background: var(--bg); }
+/* Счётчик у звезды: сколько сообщений этой сессии в избранном. */
+.fav-count {
+  position: absolute;
+  top: -1px;
+  right: -3px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--panel);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  pointer-events: none;
+}
 .fav-menu:not([hidden]) { gap: 6px; }
 .fav-head { font-size: 12px; font-weight: 600; }
 .fav-list {
