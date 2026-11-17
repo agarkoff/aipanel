@@ -20,6 +20,8 @@ pub(crate) fn router() -> Router<Arc<App>> {
         .route("/md.js", get(|| async { asset("text/javascript; charset=utf-8", MD_JS) }))
         .route("/hl.js", get(|| async { asset("text/javascript; charset=utf-8", HL_JS) }))
         .route("/suggest.js", get(|| async { asset("text/javascript; charset=utf-8", SUGGEST_JS) }))
+        // Service worker для push-уведомлений: лежит в корне, чтобы его область была весь сайт.
+        .route("/sw.js", get(|| async { asset("text/javascript; charset=utf-8", SW_JS) }))
         .route("/style.css", get(|| async { asset("text/css; charset=utf-8", STYLE_CSS) }))
         .route("/icon.svg", get(|| async { asset("image/svg+xml", ICON_SVG) }))
         .route("/favicon.ico", get(|| async { asset_bytes("image/x-icon", FAVICON_ICO) }))
@@ -43,6 +45,7 @@ pub(crate) const SCRIPTS: &[(&str, &str)] = &[
     ("/app.boot.js", include_str!("../static/app.boot.js")),
     ("/app.sessions.js", include_str!("../static/app.sessions.js")),
     ("/app.notify.js", include_str!("../static/app.notify.js")),
+    ("/app.push.js", include_str!("../static/app.push.js")),
     ("/app.feed.js", include_str!("../static/app.feed.js")),
     ("/app.favorites.js", include_str!("../static/app.favorites.js")),
     ("/app.paging.js", include_str!("../static/app.paging.js")),
@@ -57,6 +60,7 @@ pub(crate) const SCRIPTS: &[(&str, &str)] = &[
 pub(crate) const MD_JS: &str = include_str!("../static/md.js");
 pub(crate) const HL_JS: &str = include_str!("../static/hl.js");
 pub(crate) const SUGGEST_JS: &str = include_str!("../static/suggest.js");
+pub(crate) const SW_JS: &str = include_str!("../static/sw.js");
 pub(crate) const STYLE_CSS: &str = include_str!("../static/style.css");
 pub(crate) const ICON_SVG: &str = include_str!("../static/icon.svg");
 pub(crate) const MANIFEST: &str = include_str!("../static/app.webmanifest");

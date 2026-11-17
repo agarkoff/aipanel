@@ -203,6 +203,11 @@ const stub = `
       } else if (msg.t === 'favorites') {
         window.__favAsked += 1;
         setTimeout(() => this.emit({ t: 'favorites', agent: msg.agent, session: msg.session, items: window.__favs }), 0);
+      } else if (msg.t === 'push_subscribe' || msg.t === 'push_unsubscribe') {
+        // Подписка на push-уведомления: сервер её принимает или отвечает ошибкой.
+        (window.__push = window.__push || []).push(msg);
+        const error = window.__pushError || '';
+        setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: !error, error }), 0);
       } else if (msg.t === 'favorite') {
         window.__favRequests.push(msg);
         window.__favs = msg.on
@@ -1991,6 +1996,92 @@ try {
   } else {
     check('очередь: сообщение в очереди показано', false);
   }
+  // Push-уведомления: колокольчик в шапке списка подписывает это устройство.
+  // Сервис-воркер и push-службу подменяем: настоящей подписке нужна FCM.
+  const push = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const btn = document.getElementById('push');
+    const hiddenWithoutKey = btn.hidden;
+    const key = 'BOn9ac1a5Ffn8m7RmprRtBR1oT1tH4FKN2NXdvh8NjzfCyUFz8zPpTnS5QrmDtIk_x2vvqRoTn5pHTOsrMzyD0E';
+    const calls = { subscribe: 0, unsubscribe: 0, options: null };
+    const sub = {
+      endpoint: 'https://fcm.googleapis.com/fcm/send/test-device',
+      options: { applicationServerKey: null },
+      toJSON() { return { endpoint: this.endpoint, keys: { p256dh: 'BPk', auth: 'AAA' } }; },
+      unsubscribe() { calls.unsubscribe += 1; return Promise.resolve(true); },
+    };
+    const reg = {
+      pushManager: {
+        getSubscription: () => Promise.resolve(null),
+        subscribe: (opts) => {
+          calls.subscribe += 1;
+          calls.options = opts;
+          sub.options.applicationServerKey = opts.applicationServerKey.buffer;
+          return Promise.resolve(sub);
+        },
+      },
+    };
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { register: () => Promise.resolve(reg), ready: Promise.resolve(reg), addEventListener() {} },
+    });
+    who = { user: 'stas', version: '11.0', push_key: key };
+    await initPush();
+    const shown = !btn.hidden && !btn.classList.contains('on');
+    window.__push = [];
+    btn.click();
+    await wait(50);
+    const subscribed = btn.classList.contains('on') && btn.getAttribute('aria-pressed') === 'true';
+    const sent = window.__push[0] || {};
+    // Пока устройство подписано, уведомления страницы не дублируют push.
+    const before = window.__notices.length;
+    showNotice({ name: 'ui-test' }, { key: 's', title: 'T' }, 'done');
+    const pageNotice = window.__notices.length - before;
+    btn.click();
+    await wait(50);
+    const off = !btn.classList.contains('on');
+    const unsub = window.__push[1] || {};
+    // Сервер отказал (нет агента в сети) — подписка браузера снимается.
+    window.__pushError = 'нет агента в сети: подписку негде сохранить';
+    btn.click();
+    await wait(50);
+    const refused = !btn.classList.contains('on') && calls.unsubscribe === 2;
+    const refusedHint = document.getElementById('hint-list').textContent;
+    window.__pushError = '';
+    return {
+      hiddenWithoutKey, shown, subscribed, pageNotice, off, refused, refusedHint,
+      userVisibleOnly: calls.options && calls.options.userVisibleOnly,
+      keyLen: calls.options && calls.options.applicationServerKey.length,
+      sentType: sent.t, sentSub: sent.sub,
+      unsubType: unsub.t, unsubEndpoint: unsub.endpoint,
+    };
+  })()`);
+  check('push: без ключа сервера колокольчика нет', push.hiddenWithoutKey, push);
+  check('push: колокольчик виден и выключен', push.shown, push);
+  check(
+    'push: подписка уходит на сервер с ключом VAPID',
+    push.subscribed && push.userVisibleOnly === true && push.keyLen === 65 && push.sentType === 'push_subscribe'
+      && push.sentSub.endpoint === 'https://fcm.googleapis.com/fcm/send/test-device'
+      && push.sentSub.p256dh === 'BPk' && push.sentSub.auth === 'AAA',
+    push,
+  );
+  check('push: уведомления страницы не дублируют push', push.pageNotice === 0, push);
+  check('push: повторное нажатие отписывает устройство',
+    push.off && push.unsubType === 'push_unsubscribe' && push.unsubEndpoint === 'https://fcm.googleapis.com/fcm/send/test-device', push);
+  check('push: отказ сервера снимает подписку и объясняет причину',
+    push.refused && push.refusedHint.includes('нет агента в сети'), push);
+
+  // Нажатие на уведомление открывает сессию: адрес `#agent=…&session=…`.
+  const opened = await evaluate(`(async () => {
+    closeView();
+    location.hash = new URLSearchParams({ agent: 'ui-test', session: window.__session.key }).toString();
+    takeOpenFromHash();
+    tryPendingOpen();
+    await new Promise((r) => setTimeout(r, 20));
+    return { selected: selected && selected.session, hash: location.hash };
+  })()`);
+  check('push: сессия из уведомления открывается, адрес очищается',
+    opened.selected === session.key && opened.hash === '', opened);
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

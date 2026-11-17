@@ -7,7 +7,8 @@ use std::{
 };
 
 use aipanel_proto::{
-    AgentMsg, ServerMsg, IMAGE_MIMES, MAX_FAVORITES, MAX_IMAGE_BYTES, MAX_SCREENS, MAX_SCREEN_BYTES,
+    AgentMsg, PushSub, ServerMsg, IMAGE_MIMES, MAX_FAVORITES, MAX_IMAGE_BYTES, MAX_PUSH_SUBS, MAX_SCREENS,
+    MAX_SCREEN_BYTES,
 };
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -21,6 +22,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::header_str,
+    push,
     ws_browser::{truncate, MAX_COMMANDS, MAX_DIRS, MAX_MODELS, MAX_PROMPTS},
     AgentEntry, App, DEAD_AFTER, PING_EVERY,
 };
@@ -105,7 +107,9 @@ pub(crate) async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) 
                 Some(Ok(Message::Text(t))) => {
                     last_rx = Instant::now();
                     if let Ok(msg) = serde_json::from_str::<AgentMsg>(t.as_str()) {
-                        on_agent_msg(&app, &owner, &name, msg);
+                        if let Some(job) = on_agent_msg(&app, &owner, &name, msg) {
+                            push::dispatch(&app, job);
+                        }
                     }
                 }
                 Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
@@ -138,16 +142,52 @@ pub(crate) async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) 
     }
 }
 
-pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
+/// Разбирает сообщение агента. Если оно требует push-уведомлений, возвращает
+/// их: рассылку запускает вызывающий (`push::dispatch`), уже без блокировки.
+pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -> Option<push::Job> {
     let mut inner = app.lock();
     match msg {
         AgentMsg::Hello { .. } => {}
         AgentMsg::Sessions { mut sessions } => {
             sessions.truncate(MAX_SESSIONS_PER_AGENT);
+            let mut events = Vec::new();
             if let Some(a) = inner.agents.get_mut(&(owner.to_owned(), agent.to_owned())) {
+                events = push::status_events(&a.sessions, &sessions);
                 a.sessions = sessions;
             }
             inner.broadcast_agents();
+            let subs = inner.push.get(owner).cloned().unwrap_or_default();
+            if !events.is_empty() && !subs.is_empty() && app.vapid.is_some() {
+                return Some(push::Job {
+                    owner: owner.to_owned(),
+                    agent: agent.to_owned(),
+                    events,
+                    subs,
+                    contact: app.vapid_contact.clone().or_else(|| inner.origin.clone()),
+                });
+            }
+        }
+        AgentMsg::PushSubs { subs } => {
+            let known = inner.push.entry(owner.to_owned()).or_default();
+            for sub in subs.iter().filter(|s| s.valid()) {
+                match known.iter_mut().find(|k| k.endpoint == sub.endpoint) {
+                    Some(k) => *k = sub.clone(),
+                    None => known.push(sub.clone()),
+                }
+            }
+            if known.len() > MAX_PUSH_SUBS {
+                let extra = known.len() - MAX_PUSH_SUBS;
+                known.drain(..extra);
+            }
+            // Подписки, сделанные, пока этот агент был не в сети, — ему на хранение.
+            let missing: Vec<PushSub> = known
+                .iter()
+                .filter(|k| !subs.iter().any(|s| s.endpoint == k.endpoint))
+                .cloned()
+                .collect();
+            for sub in missing {
+                inner.to_agent(owner, agent, ServerMsg::PushSub { sub, on: true });
+            }
         }
         AgentMsg::Limits { mut limits } => {
             limits.truncate(4);
@@ -300,11 +340,9 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
             // Картинку принимаем только от того агента, у которого её просили.
             let allowed = inner.images.get(&id).is_some_and(|w| w.owner == owner && w.agent == agent);
             if !allowed {
-                return;
+                return None;
             }
-            let Some(wait) = inner.images.remove(&id) else {
-                return;
-            };
+            let wait = inner.images.remove(&id)?;
             let result = match error {
                 Some(e) => Err(e),
                 None if !IMAGE_MIMES.contains(&mime.as_str()) => Err("неизвестный тип картинки".into()),
@@ -319,20 +357,18 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
         AgentMsg::Screen { id, index, count, label, width, height, data } => {
             // Снимок идёт тому браузеру, который его попросил, и только от того
             // агента, которому команда была отправлена.
-            let Some(p) = inner.pending.get(&id) else {
-                return;
-            };
+            let p = inner.pending.get(&id)?;
             if p.owner != owner || p.agent != agent {
-                return;
+                return None;
             }
             // Кривой ответ агента не пересылаем: панель по нему строит страницы.
             if count == 0 || count > MAX_SCREENS || index >= count || width == 0 || height == 0 {
-                return;
+                return None;
             }
             // В base64 картинка вырастает на треть; больше сообщения WebSocket
             // агент всё равно отправить не смог бы.
             if data.len() > MAX_SCREEN_BYTES * 4 / 3 + 8 {
-                return;
+                return None;
             }
             let (browser, orig_id, label) = (p.browser, p.id.clone(), truncate(label, 64));
             if let Some(b) = inner.browsers.get(&browser) {
@@ -351,7 +387,7 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
                 .get(&id)
                 .is_some_and(|p| p.owner == owner && p.agent == agent);
             if !allowed {
-                return;
+                return None;
             }
             if let Some(p) = inner.pending.remove(&id) {
                 if let Some(b) = inner.browsers.get(&p.browser) {
@@ -361,4 +397,5 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) {
             }
         }
     }
+    None
 }

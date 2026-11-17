@@ -5,6 +5,7 @@
 mod assets;
 mod auth;
 mod image;
+mod push;
 mod ws_agent;
 mod ws_browser;
 
@@ -14,7 +15,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{Limits, ServerMsg, SessionInfo};
+use aipanel_proto::{Limits, PushSub, ServerMsg, SessionInfo};
 use axum::{
     http::HeaderMap,
     routing::{get, post},
@@ -76,6 +77,12 @@ struct Inner {
     next_id: u64,
     fail_window: Option<Instant>,
     fail_count: u32,
+    /// Подписки устройств на push-уведомления по пользователям. Хранят их
+    /// агенты, сервер собирает их при подключении агентов.
+    push: HashMap<String, Vec<PushSub>>,
+    /// Адрес панели (`https://…`) по заголовку Origin браузера: контакт для
+    /// VAPID, если `PANEL_VAPID_SUB` не задан.
+    origin: Option<String>,
 }
 
 impl Inner {
@@ -141,6 +148,35 @@ impl Inner {
         }
     }
 
+    /// Сохранить или удалить подписку у всех агентов пользователя в сети.
+    fn push_to_agents(&self, owner: &str, sub: &PushSub, on: bool) -> usize {
+        let names: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|((o, _), a)| o == owner && a.tx.is_some())
+            .map(|((_, name), _)| name.clone())
+            .collect();
+        names
+            .iter()
+            .filter(|name| self.to_agent(owner, name, ServerMsg::PushSub { sub: sub.clone(), on }))
+            .count()
+    }
+
+    /// Забыть подписки, которых больше нет у push-службы.
+    fn drop_push(&mut self, owner: &str, endpoints: &[String]) {
+        let gone: Vec<PushSub> = match self.push.get_mut(owner) {
+            Some(list) => {
+                let (gone, keep) = list.drain(..).partition(|s| endpoints.contains(&s.endpoint));
+                *list = keep;
+                gone
+            }
+            None => return,
+        };
+        for sub in gone {
+            self.push_to_agents(owner, &sub, false);
+        }
+    }
+
     fn unwatch(&mut self, browser: u64) {
         let Some(b) = self.browsers.get_mut(&browser) else {
             return;
@@ -164,6 +200,10 @@ struct User {
 struct App {
     inner: Mutex<Inner>,
     users: BTreeMap<String, User>,
+    /// Ключ VAPID из `PANEL_VAPID_KEY`; без него push-уведомлений нет.
+    vapid: Option<push::Vapid>,
+    /// Контакт для VAPID из `PANEL_VAPID_SUB` (`mailto:…` или `https://…`).
+    vapid_contact: Option<String>,
 }
 
 impl App {
@@ -245,9 +285,18 @@ async fn main() {
         let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
         std::process::exit(if healthcheck(&bind) { 0 } else { 1 });
     }
+    // `aipanel-server vapid-key` — новый ключ для PANEL_VAPID_KEY.
+    if std::env::args().nth(1).as_deref() == Some("vapid-key") {
+        let (private, public) = push::Vapid::generate();
+        println!("PANEL_VAPID_KEY={private}");
+        eprintln!("public key: {public}");
+        return;
+    }
     let app = Arc::new(App {
         inner: Mutex::new(Inner::default()),
         users: auth::load_users(),
+        vapid: push::load_vapid(),
+        vapid_contact: std::env::var("PANEL_VAPID_SUB").ok().map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()),
     });
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
 
@@ -349,7 +398,7 @@ mod tests {
     }"#;
 
     fn app_with(raw: &str) -> App {
-        App { inner: Mutex::new(Inner::default()), users: parse_users(raw).unwrap() }
+        App { inner: Mutex::new(Inner::default()), users: parse_users(raw).unwrap(), vapid: None, vapid_contact: None }
     }
 
     #[test]
@@ -442,6 +491,83 @@ mod tests {
         assert!(inner.browser_owns(1, "alice-pc"));
     }
 
+    fn session(key: &str, status: &str) -> SessionInfo {
+        serde_json::from_value(json!({
+            "key": key, "tool": "claude", "title": format!("t-{key}"), "cwd": "/p",
+            "status": status, "live": true, "updated_at": 0, "delivery": "console",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn push_events_on_waiting_and_turn_end() {
+        let old = [session("a", "busy"), session("b", "idle"), session("c", "busy"), session("d", "busy")];
+        let new = [
+            session("a", "idle"),     // ход кончился
+            session("b", "waiting"),  // просит выбор
+            session("c", "busy"),     // без изменений
+            session("d", "stopped"),  // окно закрыли — не повод звать
+            session("e", "waiting"),  // новая сессия: прошлого статуса нет
+        ];
+        let got: Vec<_> = crate::push::status_events(&old, &new).into_iter().map(|e| (e.session, e.waiting)).collect();
+        assert_eq!(got, [("a".to_string(), false), ("b".to_string(), true)]);
+        let payload: serde_json::Value =
+            serde_json::from_str(&crate::push::payload("pc", &crate::push::status_events(&old, &new)[1])).unwrap();
+        assert_eq!(payload["title"], "t-b");
+        assert_eq!(payload["body"], "pc · сессия ждёт ответа");
+        assert_eq!(payload["tag"], "aipanel:pc:b");
+        assert_eq!(payload["session"], "b");
+    }
+
+    fn push_sub(id: &str) -> PushSub {
+        let mut key = vec![4u8];
+        key.extend([5u8; 64]);
+        PushSub {
+            endpoint: format!("https://fcm.googleapis.com/fcm/send/{id}"),
+            p256dh: aipanel_proto::b64url::encode(&key),
+            auth: aipanel_proto::b64url::encode(&[3u8; 16]),
+        }
+    }
+
+    /// Подписки собираются от всех агентов, а агенту, который был не в сети,
+    /// уходят те, которых у него нет.
+    #[test]
+    fn push_subs_merge_across_agents() {
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(8);
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), AgentEntry { tx: Some(tx), ..entry() });
+        inner.push.insert("alice".into(), vec![push_sub("phone")]);
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        let mut bad = push_sub("evil");
+        bad.endpoint = "https://example.com/x".into();
+        on_agent_msg(&app, "alice", "pc", AgentMsg::PushSubs { subs: vec![push_sub("laptop"), bad] });
+        let endpoints: Vec<_> = app.lock().push["alice"].iter().map(|s| s.endpoint.clone()).collect();
+        assert_eq!(endpoints, [push_sub("phone").endpoint, push_sub("laptop").endpoint]);
+        match rx.try_recv().unwrap() {
+            ServerMsg::PushSub { sub, on } => assert!(on && sub == push_sub("phone")),
+            other => panic!("{other:?}"),
+        }
+        assert!(rx.try_recv().is_err());
+        // Без ключа VAPID смена статуса уведомлений не порождает.
+        assert!(on_agent_msg(&app, "alice", "pc", AgentMsg::Sessions { sessions: vec![session("a", "busy")] }).is_none());
+        assert!(on_agent_msg(&app, "alice", "pc", AgentMsg::Sessions { sessions: vec![session("a", "idle")] }).is_none());
+    }
+
+    #[test]
+    fn dead_push_subs_are_dropped_everywhere() {
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(8);
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), AgentEntry { tx: Some(tx), ..entry() });
+        inner.push.insert("alice".into(), vec![push_sub("phone"), push_sub("old")]);
+        inner.drop_push("alice", &[push_sub("old").endpoint]);
+        assert_eq!(inner.push["alice"], [push_sub("phone")]);
+        match rx.try_recv().unwrap() {
+            ServerMsg::PushSub { sub, on } => assert!(!on && sub.endpoint == push_sub("old").endpoint),
+            other => panic!("{other:?}"),
+        }
+    }
+
     #[test]
     fn commands_reach_only_watchers_of_that_session() {
         let (tx, mut rx) = mpsc::channel::<String>(4);
@@ -463,7 +589,7 @@ mod tests {
                 watching: Some(("pc".into(), "opencode:s2".into())),
             },
         );
-        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
 
         on_agent_msg(
             &app,
@@ -503,7 +629,7 @@ mod tests {
                 watching: Some(("pc".into(), "opencode:s2".into())),
             },
         );
-        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
 
         on_agent_msg(
             &app,
@@ -541,7 +667,7 @@ mod tests {
                 watching: Some(("pc".into(), "opencode:s1".into())),
             },
         );
-        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
 
         let toggle = |role: &str, text: &str| BrowserMsg::Favorite {
             agent: "pc".into(),
@@ -607,7 +733,7 @@ mod tests {
                 watching: Some(("pc".into(), "opencode:s2".into())),
             },
         );
-        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
 
         on_agent_msg(
             &app,
@@ -650,7 +776,7 @@ mod tests {
                 watching: Some(("pc".into(), "opencode:s1".into())),
             },
         );
-        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
 
         on_browser_msg(
             &app,
@@ -681,6 +807,8 @@ mod tests {
         let app = App {
             inner: Mutex::new(inner),
             users: BTreeMap::new(),
+            vapid: None,
+            vapid_contact: None,
         };
 
         on_agent_msg(
@@ -707,7 +835,7 @@ mod tests {
         let (tx, mut rx) = oneshot::channel();
         let mut inner = Inner::default();
         inner.images.insert("img:1".into(), ImageWait { owner: "alice".into(), agent: "pc".into(), tx });
-        let app = App { inner: Mutex::new(inner), users: BTreeMap::new() };
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
         let png = AgentMsg::Image {
             id: "img:1".into(),
             mime: "image/png".into(),

@@ -11,7 +11,6 @@
 const BUSY_STATUSES = new Set(['busy', 'shell', 'stalled']);
 // Тот же признак, что у зелёного кружка в списке: ход кончился, сессия свободна.
 const DONE_STATUSES = new Set(['idle', 'ready']);
-const notifiedAsk = 'aipanel.notify-asked';
 const sessionStatuses = new Map(); // "агент\nсессия" -> прошлый статус
 let statusesSeeded = false; // первый список — точка отсчёта, по нему не уведомляем
 
@@ -19,20 +18,12 @@ function notifySupported() {
   return typeof Notification !== 'undefined';
 }
 
-// Браузеры спрашивают разрешение только по действию пользователя, поэтому
-// первым нажатием на страницу и пользуемся. Отказ не переспрашиваем.
-function askNotify() {
-  if (!notifySupported() || Notification.permission !== 'default') return;
-  if (localStorage.getItem(notifiedAsk)) return;
-  localStorage.setItem(notifiedAsk, '1');
-  // В старых браузерах requestPermission возвращает не промис, а принимает callback.
-  const asked = Notification.requestPermission();
-  if (asked && asked.catch) asked.catch(() => {});
-}
-document.addEventListener('pointerdown', askNotify, { once: true });
-
+// Разрешение на уведомления спрашивает только колокольчик в шапке
+// (app.push.js): Safari разрешает спросить лишь по явному действию.
 function showNotice(agent, session, kind) {
   if (!notifySupported() || Notification.permission !== 'granted') return;
+  // Это устройство подписано на push: то же уведомление пришлёт сервер.
+  if (pushSub) return;
   // Пользователь смотрит именно эту сессию — уведомление ему не нужно.
   const open = selected && selected.agent === agent.name && selected.session === session.key;
   if (open && document.visibilityState === 'visible') return;

@@ -291,6 +291,13 @@ pub enum AgentMsg {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         items: Vec<Favorite>,
     },
+    /// Подписки устройств пользователя на push-уведомления, сохранённые у
+    /// агента. Приходит после `Hello`: у сервера нет диска, и после перезапуска
+    /// он узнаёт подписки от агентов.
+    PushSubs {
+        #[serde(default)]
+        subs: Vec<PushSub>,
+    },
     /// Команды, доступные в сессии. Приходит весь список, в том числе пустой:
     /// панель заменяет им показанный ранее.
     Commands {
@@ -408,6 +415,149 @@ pub const MAX_FAVORITE_TEXT: usize = 2000;
 
 /// Наибольшая длина идентификатора элемента ленты.
 pub const MAX_ITEM_ID: usize = 200;
+
+/// Подписка устройства на push-уведомления (Web Push): адрес у push-службы
+/// браузера и ключи, которыми шифруется уведомление. Это `PushSubscription.toJSON()`
+/// браузера без лишних полей: ключи — в base64url без `=`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushSub {
+    pub endpoint: String,
+    /// Открытый ключ ECDH устройства (P-256, 65 байт без сжатия).
+    pub p256dh: String,
+    /// Общий секрет устройства (16 байт).
+    pub auth: String,
+}
+
+/// Сколько устройств одного пользователя может подписаться.
+pub const MAX_PUSH_SUBS: usize = 20;
+
+/// Push-службы браузеров. Сервер шлёт запросы на адрес из подписки, поэтому
+/// другие адреса не принимаются: иначе через подписку можно было бы заставить
+/// сервер ходить куда угодно.
+const PUSH_HOSTS: &[&str] = &[
+    "fcm.googleapis.com",          // Chrome, Edge на Android, Яндекс Браузер
+    "android.googleapis.com",      // старые подписки Chrome
+    "push.apple.com",              // Safari (web.push.apple.com)
+    "push.services.mozilla.com",   // Firefox
+    "notify.windows.com",          // Edge на Windows (*.notify.windows.com)
+];
+
+impl PushSub {
+    /// Адрес — https на одной из push-служб, ключи нужной длины.
+    pub fn valid(&self) -> bool {
+        let Some(rest) = self.endpoint.strip_prefix("https://") else {
+            return false;
+        };
+        if self.endpoint.len() > 1024 || self.endpoint.chars().any(|c| c.is_control() || c.is_whitespace()) {
+            return false;
+        }
+        let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        // Порт и учётные данные в адресе push-службы не бывают.
+        if host.contains([':', '@']) {
+            return false;
+        }
+        let host = host.to_ascii_lowercase();
+        let known = PUSH_HOSTS.iter().any(|h| host == *h || host.ends_with(&format!(".{h}")));
+        let key = b64url::decode(&self.p256dh);
+        let auth = b64url::decode(&self.auth);
+        known
+            && key.is_some_and(|k| k.len() == 65 && k[0] == 4)
+            && auth.is_some_and(|a| a.len() == 16)
+    }
+}
+
+/// Base64url без `=` (RFC 4648, раздел 5): так записаны ключи Web Push.
+pub mod b64url {
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+    pub fn encode(data: &[u8]) -> String {
+        let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+        for chunk in data.chunks(3) {
+            let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..=chunk.len() {
+                out.push(ABC[(n >> (18 - 6 * i) & 63) as usize] as char);
+            }
+        }
+        out
+    }
+
+    /// Принимает и вариант с `=` в конце, и стандартный алфавит (`+`, `/`):
+    /// браузеры отдают ключи по-разному.
+    pub fn decode(text: &str) -> Option<Vec<u8>> {
+        let s = text.trim_end_matches('=').as_bytes();
+        if s.len() % 4 == 1 {
+            return None;
+        }
+        let val = |c: u8| -> Option<u32> {
+            Some(match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'-' | b'+' => 62,
+                b'_' | b'/' => 63,
+                _ => return None,
+            } as u32)
+        };
+        let mut out = Vec::with_capacity(s.len() * 3 / 4);
+        for q in s.chunks(4) {
+            let mut n = 0u32;
+            for &c in q {
+                n = (n << 6) | val(c)?;
+            }
+            n <<= 6 * (4 - q.len()) as u32;
+            let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
+            out.extend_from_slice(&bytes[..q.len() - 1]);
+        }
+        Some(out)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn round_trip() {
+            for len in 0..40 {
+                let data: Vec<u8> = (0..len).map(|i| (i * 53 + 7) as u8).collect();
+                assert_eq!(decode(&encode(&data)).as_deref(), Some(&data[..]), "len {len}");
+            }
+            assert_eq!(encode(b"\xfb\xff"), "-_8");
+            assert_eq!(decode("-_8=").unwrap(), b"\xfb\xff");
+            assert_eq!(decode("+/8").unwrap(), b"\xfb\xff");
+            assert!(decode("A").is_none());
+            assert!(decode("a*b").is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod push_tests {
+    use super::*;
+
+    fn sub(endpoint: &str) -> PushSub {
+        let mut key = vec![4u8];
+        key.extend([7u8; 64]);
+        PushSub { endpoint: endpoint.into(), p256dh: b64url::encode(&key), auth: b64url::encode(&[1u8; 16]) }
+    }
+
+    #[test]
+    fn accepts_only_known_push_services() {
+        assert!(sub("https://fcm.googleapis.com/fcm/send/abc").valid());
+        assert!(sub("https://web.push.apple.com/QGx").valid());
+        assert!(sub("https://updates.push.services.mozilla.com/wpush/v2/x").valid());
+        assert!(sub("https://wns2-db5p.notify.windows.com/w/?token=x").valid());
+        assert!(!sub("http://fcm.googleapis.com/fcm/send/abc").valid());
+        assert!(!sub("https://evil.example/fcm.googleapis.com").valid());
+        assert!(!sub("https://fcm.googleapis.com.evil.example/x").valid());
+        assert!(!sub("https://user@fcm.googleapis.com/x").valid());
+        assert!(!sub("https://fcm.googleapis.com:444/x").valid());
+        assert!(!sub("https://127.0.0.1/x").valid());
+        let mut bad = sub("https://fcm.googleapis.com/x");
+        bad.auth = b64url::encode(&[1u8; 8]);
+        assert!(!bad.valid());
+    }
+}
 
 /// Наибольшая длина названия сессии в символах. Предел общий для панели,
 /// сервера и агента: имя уходит и в заголовок окна, и в транскрипт.
@@ -611,4 +761,7 @@ pub enum ServerMsg {
         #[serde(default, skip_serializing_if = "String::is_empty")]
         of: String,
     },
+    /// Сохранить подписку устройства на push-уведомления (`on`) или удалить её.
+    /// Ответа нет: весь список агент присылает при подключении (`PushSubs`).
+    PushSub { sub: PushSub, on: bool },
 }

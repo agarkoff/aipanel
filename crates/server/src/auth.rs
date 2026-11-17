@@ -175,10 +175,13 @@ pub(crate) fn release_version(full: &str) -> String {
 
 pub(crate) async fn me(State(app): State<Arc<App>>, headers: HeaderMap) -> Response {
     match app.authed(&headers) {
-        Some(user) => {
-            Json(json!({ "user": user, "version": release_version(env!("CARGO_PKG_VERSION")) }))
-                .into_response()
-        }
+        Some(user) => Json(json!({
+            "user": user,
+            "version": release_version(env!("CARGO_PKG_VERSION")),
+            // Открытый ключ VAPID для подписки устройства; null — уведомления не настроены.
+            "push_key": app.vapid.as_ref().map(|v| v.public_key()),
+        }))
+        .into_response(),
         None => StatusCode::UNAUTHORIZED.into_response(),
     }
 }

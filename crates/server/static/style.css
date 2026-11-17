@@ -106,6 +106,28 @@ input, textarea, select {
 }
 .sidebar header { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; }
 .sidebar header .link { margin-left: auto; }
+/* Колокольчик push-уведомлений этого устройства: стоит справа, перед «Выйти». */
+.push-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.push-btn:hover { background: var(--tool); }
+.push-btn[hidden] { display: none; }
+.sidebar header .push-btn:not([hidden]) + .link { margin-left: 0; }
+.push-btn.on { color: var(--accent); }
+.push-btn.on .push-slash { display: none; }
+.push-btn:disabled { opacity: .5; cursor: progress; }
 .conn { width: 9px; height: 9px; border-radius: 50%; background: var(--off); }
 .conn.on { background: var(--idle); }
 /* Имя вошедшего пользователя. Класс не `user`, чтобы не совпадать с классом
@@ -1168,6 +1190,8 @@ button .icon { display: none; }
     font-size: 18px;
   }
   .sidebar header .link { min-height: 44px; padding: 0 8px; font-size: 15px; }
+  .push-btn { width: 44px; height: 44px; }
+  .push-btn svg { width: 22px; height: 22px; }
   .filter { margin: 0 16px 8px; padding: 10px 12px; }
   .new-session { width: 32px; height: 32px; }
   .new-session svg { width: 18px; height: 18px; }

@@ -12,6 +12,7 @@ mod image;
 mod install;
 mod opencode;
 mod platform;
+mod push;
 mod repo;
 mod screen;
 mod status;
@@ -58,6 +59,8 @@ struct Agent {
     cwds: Mutex<HashMap<String, String>>,
     /// Избранные сообщения сессий: файл `favorites.json` в каталоге агента.
     favorites: Mutex<favorites::Store>,
+    /// Подписки устройств на push-уведомления: файл `push.json` в каталоге агента.
+    push: Mutex<push::Store>,
     // Состояние для команды `status` (см. status.rs).
     started: i64,
     connected_since: AtomicI64,
@@ -124,6 +127,14 @@ impl Agent {
                     };
                     let _ = me.out.send(msg);
                 });
+            }
+            ServerMsg::PushSub { sub, on } => {
+                let endpoint = sub.endpoint.clone();
+                if let Err(e) = self.push.lock().unwrap().set(sub, on) {
+                    util::log(&format!("push: {e}"));
+                } else {
+                    util::log(&format!("push: подписка {} {endpoint}", if on { "сохранена" } else { "удалена" }));
+                }
             }
             ServerMsg::Favorites { session } => {
                 let items = self.favorites.lock().unwrap().list(&session);
@@ -595,6 +606,12 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
     if sink.send(text_msg(&hello)).await.is_err() {
         return;
     }
+    // Подписки на push-уведомления: сервер их не хранит и после перезапуска
+    // узнаёт от агентов.
+    let subs = AgentMsg::PushSubs { subs: agent.push.lock().unwrap().list() };
+    if sink.send(text_msg(&subs)).await.is_err() {
+        return;
+    }
     agent.force.store(true, Ordering::Relaxed);
     agent.force_limits.store(true, Ordering::Relaxed);
     agent.online.store(true, Ordering::Relaxed);
@@ -673,6 +690,7 @@ async fn run(cfg: Config) {
         watchers: Mutex::new(HashMap::new()),
         cwds: Mutex::new(HashMap::new()),
         favorites: Mutex::new(favorites::Store::open()),
+        push: Mutex::new(push::Store::open()),
         started: util::now_ms(),
         connected_since: AtomicI64::new(0),
         sessions: AtomicUsize::new(0),

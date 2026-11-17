@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use aipanel_proto::{ServerMsg, MAX_FAVORITE_TEXT, MAX_ITEM_ID};
+use aipanel_proto::{PushSub, ServerMsg, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PUSH_SUBS};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
@@ -16,7 +16,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::{
-    auth::origin_ok,
+    auth::{header_str, origin_ok},
     ws_agent::safe_id,
     App, BrowserEntry, Inner, Pending, DEAD_AFTER, PING_EVERY,
 };
@@ -108,6 +108,10 @@ pub(crate) enum BrowserMsg {
         #[serde(default)]
         of: String,
     },
+    /// Подписать это устройство на push-уведомления: подписка из браузера.
+    PushSubscribe { id: String, sub: PushSub },
+    /// Отписать устройство с адресом подписки `endpoint`.
+    PushUnsubscribe { id: String, endpoint: String },
 }
 
 pub(crate) async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -116,6 +120,10 @@ pub(crate) async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, 
     };
     if !origin_ok(&headers) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    // Адрес панели — контакт VAPID по умолчанию: Apple требует настоящий.
+    if let Some(origin) = header_str(&headers, "origin").filter(|o| o.starts_with("https://") && o.len() <= 200) {
+        app.lock().origin = Some(origin.to_owned());
     }
     ws.max_message_size(1 << 20)
         .on_upgrade(move |socket| browser_conn(app, owner, socket))
@@ -403,6 +411,52 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 ServerMsg::PromptReply { id: cmd, session, prompt, kind, decision, answer, message, cancel },
             );
         }
+        BrowserMsg::PushSubscribe { id, sub } => {
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            if app.vapid.is_none() {
+                reply(&inner, browser, &id, "уведомления не настроены на сервере (нет PANEL_VAPID_KEY)");
+                return;
+            }
+            if !sub.valid() {
+                reply(&inner, browser, &id, "подписка не от известной push-службы");
+                return;
+            }
+            // Подписку хранит агент: без агента в сети она пропала бы при перезапуске сервера.
+            if inner.push_to_agents(&owner, &sub, true) == 0 {
+                reply(&inner, browser, &id, "нет агента в сети: подписку негде сохранить");
+                return;
+            }
+            let list = inner.push.entry(owner).or_default();
+            match list.iter_mut().find(|s| s.endpoint == sub.endpoint) {
+                Some(s) => *s = sub,
+                None => list.push(sub),
+            }
+            if list.len() > MAX_PUSH_SUBS {
+                let extra = list.len() - MAX_PUSH_SUBS;
+                list.drain(..extra);
+            }
+            reply_ok(&inner, browser, &id);
+        }
+        BrowserMsg::PushUnsubscribe { id, endpoint } => {
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            if let Some(list) = inner.push.get_mut(&owner) {
+                list.retain(|s| s.endpoint != endpoint);
+            }
+            // Ключи для удаления не нужны: агент узнаёт подписку по адресу.
+            let sub = PushSub { endpoint, p256dh: String::new(), auth: String::new() };
+            inner.push_to_agents(&owner, &sub, false);
+            reply_ok(&inner, browser, &id);
+        }
+    }
+}
+
+fn reply_ok(inner: &Inner, browser: u64, id: &str) {
+    if let Some(b) = inner.browsers.get(&browser) {
+        let _ = b.tx.try_send(json!({ "t": "result", "id": id, "ok": true }).to_string());
     }
 }
 

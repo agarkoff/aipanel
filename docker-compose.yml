@@ -5,6 +5,9 @@ services:
     restart: unless-stopped
     environment:
       PANEL_USERS: ${PANEL_USERS:-}
+      # Push-уведомления: ключ VAPID и контакт для push-служб (см. README).
+      PANEL_VAPID_KEY: ${PANEL_VAPID_KEY:-}
+      PANEL_VAPID_SUB: ${PANEL_VAPID_SUB:-}
     ports:
       # По умолчанию порт открыт только на самом хосте: снаружи панель должна быть за HTTPS-прокси.
       - "${PANEL_LISTEN:-127.0.0.1:8080}:8080"

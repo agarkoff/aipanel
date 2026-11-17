@@ -17,7 +17,10 @@ async function boot() {
     renderWho();
     $('user').hidden = false;
   }
+  // Панель открыли нажатием на уведомление: сессия — в адресе.
+  takeOpenFromHash();
   start();
+  initPush();
 }
 
 // Вошедший пользователь и версия панели из /api/me.
@@ -94,6 +97,8 @@ function connect() {
       // Избранное живёт у агента: после переподключения берём его заново.
       send({ t: 'favorites', agent: selected.agent, session: selected.session });
     }
+    // Сервер мог перезапуститься без агентов в сети: напоминаем свою подписку.
+    if (pushSub) sendPush({ t: 'push_subscribe', sub: pushSubJson(pushSub) });
   };
   ws.onmessage = (e) => onMessage(JSON.parse(e.data));
   ws.onclose = async () => {
@@ -123,6 +128,7 @@ function onMessage(msg) {
     const open = selected && agents.find((a) => a.name === selected.agent);
     if (open && !open.sessions.some((s) => s.key === selected.session)) closeView();
     checkPendingLaunch();
+    tryPendingOpen();
   } else if (msg.t === 'history') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyHistory(msg);
@@ -160,6 +166,7 @@ function onMessage(msg) {
   } else if (msg.t === 'dirs') {
     onDirsResult(msg);
   } else if (msg.t === 'result') {
+    if (onPushResult(msg)) return;
     if (launchId && msg.id === launchId) onLaunchResult(msg);
     else if (handoffId && msg.id === handoffId) onHandoffResult(msg);
     else if (cancelQueuedId && msg.id === cancelQueuedId) onCancelQueuedResult(msg);
