@@ -31,6 +31,9 @@ pub(crate) fn router() -> Router<Arc<App>> {
         .route("/icon-maskable-512.png", get(|| async { asset_bytes("image/png", ICON_MASKABLE_512) }))
         // Значок уведомления для строки состояния Android: там картинка рисуется
         // силуэтом по альфе, поэтому нужен прозрачный фон без цветной плитки.
+        // Размер силуэта в строке состояния задаёт не CSS, а то, какую долю кадра
+        // он занимает: рисунок увеличен в 1,5 раза (84x72 из 96x96), иначе в
+        // строке он выглядел точкой.
         .route("/badge.png", get(|| async { asset_bytes("image/png", BADGE) }))
         .route("/app.webmanifest", get(|| async { asset("application/manifest+json", MANIFEST) }));
     // Части панели — из таблицы: добавить файл значит дописать одну строку.
