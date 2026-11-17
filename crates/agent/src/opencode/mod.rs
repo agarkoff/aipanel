@@ -3,6 +3,7 @@
 //! Адрес и пароль сервиса opencode хранит в `~/.local/state/opencode/service.json`.
 
 mod convert;
+mod tasks;
 
 use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
@@ -13,7 +14,7 @@ use std::{
 };
 
 use aipanel_proto::{
-    AgentMsg, Command, Item, Limits, ModelInfo, SessionInfo, TurnUsage, MAX_TITLE,
+    AgentMsg, BgTask, Command, Item, Limits, ModelInfo, SessionInfo, TurnUsage, MAX_TITLE,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -142,6 +143,21 @@ impl Feed {
     }
 }
 
+/// Список фоновых задач уходит в панель, только когда меняется: как и лента,
+/// он приходит целиком и заменяет показанный.
+fn send_tasks(
+    out: &UnboundedSender<AgentMsg>,
+    key: &str,
+    tasks: &tasks::Tracker,
+    shown: &mut Option<Vec<BgTask>>,
+) {
+    let now = tasks.running();
+    if shown.as_ref() != Some(&now) {
+        let _ = out.send(AgentMsg::Tasks { session: key.to_owned(), tasks: now.clone() });
+        *shown = Some(now);
+    }
+}
+
 /// Пересылает части рассуждений и текста этой сессии из потока событий opencode.
 async fn watch_events(
     cfg: OpenCodeCfg,
@@ -162,14 +178,20 @@ async fn watch_events(
                         let Some(data) = line.strip_prefix("data:") else { continue };
                         let Ok(v) = serde_json::from_str::<Value>(data.trim()) else { continue };
                         let kind = v["type"].as_str().unwrap_or_default();
-                        if !(kind.starts_with("session.reasoning.") || kind.starts_with("session.text.")) {
-                            continue;
-                        }
-                        if !(kind.ends_with(".delta") || kind.ends_with(".ended")) {
-                            continue;
-                        }
-                        if v["data"]["sessionID"].as_str() != Some(session.as_str()) {
-                            continue;
+                        // Концы фоновых команд: по ним задача уходит из списка.
+                        // Запуск берётся из сообщений, поэтому `shell.created` тут
+                        // не нужен — по нему не отличить фоновую команду от обычной.
+                        let ended = kind == "shell.exited" || kind == "shell.deleted";
+                        if !ended {
+                            if !(kind.starts_with("session.reasoning.") || kind.starts_with("session.text.")) {
+                                continue;
+                            }
+                            if !(kind.ends_with(".delta") || kind.ends_with(".ended")) {
+                                continue;
+                            }
+                            if v["data"]["sessionID"].as_str() != Some(session.as_str()) {
+                                continue;
+                            }
                         }
                         if tx.send(v).await.is_err() {
                             return;
@@ -464,6 +486,9 @@ impl OpenCode {
         let mut queued: HashSet<String> = HashSet::new();
         let mut first = true;
         let mut prompts_sig: Option<u64> = None;
+        // Фоновые задачи: команды с `background: true` и подагенты.
+        let mut tasks = tasks::Tracker::default();
+        let mut shown_tasks: Option<Vec<BgTask>> = None;
         let (tx, mut events) = mpsc::channel(256);
         let _events = AbortOnDrop(tokio::spawn(watch_events(
             self.cfg.clone(),
@@ -493,6 +518,7 @@ impl OpenCode {
                                     }
                                 }
                                 convert(m, &mut items);
+                                tasks.message(m);
                             }
                             items.retain(|it| feed.changed(it));
                             // Первая страница — та, что панель показала сразу:
@@ -592,9 +618,13 @@ impl OpenCode {
                         });
                         first = false;
                     }
+                    send_tasks(&out, &key, &tasks, &mut shown_tasks);
                 }
                 event = events.recv() => {
                     let Some(event) = event else { break };
+                    // Концы фоновых команд нужны и до первой ленты: сама лента
+                    // ещё не отправлена, а список задач уже собирается.
+                    tasks.event(&event);
                     // До первой ленты браузер ещё не получил reset: пропускаем.
                     if first {
                         continue;
@@ -1660,5 +1690,6 @@ mod tests {
         // Старый opencode курсоров не знает — догрузку не предлагаем.
         assert!(!older_page(&json!({"data": []})).1);
     }
+
 }
 
