@@ -2,6 +2,7 @@
 //! сообщает о сессиях Claude Code и opencode и выполняет команды из панели.
 
 mod ask;
+mod backend;
 mod claude;
 mod config;
 mod dirs;
@@ -37,12 +38,13 @@ use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream,
 };
 
-use crate::{claude::Claude, config::Config, opencode::OpenCode};
+use crate::{backend::Backend, claude::Claude, config::Config, opencode::OpenCode};
 
 struct Agent {
     cfg: Config,
-    claude: Arc<Claude>,
-    opencode: Arc<OpenCode>,
+    /// Инструменты, сессии которых показывает агент. Порядок — порядок в
+    /// `agent.toml`: он же и в списке сессий.
+    backends: Vec<Box<dyn Backend>>,
     out: mpsc::UnboundedSender<AgentMsg>,
     rescan: Arc<Notify>,
     /// Будит проверку лимитов: сразу после подключения к серверу.
@@ -95,10 +97,8 @@ impl Agent {
                 let key = session.clone();
                 let task = tokio::spawn(async move {
                     let out = me.out.clone();
-                    match split_key(&key) {
-                        Ok(("claude", id)) => me.claude.watch(key.clone(), id.to_owned(), out).await,
-                        Ok(("opencode", id)) => me.opencode.watch(key.clone(), id.to_owned(), out).await,
-                        _ => {}
+                    if let Ok((backend, id)) = me.session(&key) {
+                        backend.watch(key.clone(), id.to_owned(), out).await;
                     }
                 });
                 if let Some(old) = self.watchers.lock().unwrap().insert(session, task) {
@@ -113,10 +113,8 @@ impl Agent {
             ServerMsg::Older { session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.older(sid),
-                        Ok(("opencode", sid)) => me.opencode.older(sid).await,
-                        Ok(_) => Err("неизвестный тип сессии".into()),
+                    let result = match me.session(&session) {
+                        Ok((backend, id)) => backend.older(id).await,
                         Err(e) => Err(e),
                     };
                     let msg = match result {
@@ -152,18 +150,13 @@ impl Agent {
             ServerMsg::Send { id, session, text } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let mut queued = None;
-                    let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.send(sid, &text, &me.out).await,
-                        Ok(("opencode", sid)) => match me.opencode.send(sid, &text).await {
-                            Ok(item) => {
-                                queued = item;
-                                Ok(())
-                            }
-                            Err(e) => Err(e),
-                        },
-                        Ok(_) => Err("неизвестный тип сессии".into()),
-                        Err(e) => Err(e),
+                    let (result, queued) = match me.session(&session) {
+                        Ok((backend, sid)) => {
+                            let sent = backend.send(sid, &text, &me.out).await;
+                            let queued = sent.as_ref().ok().and_then(|item| item.clone());
+                            (sent.map(|_| None), queued)
+                        }
+                        Err(e) => (Err(e), None),
                     };
                     // Сообщение, принятое в очередь, показываем сразу: в ленту opencode
                     // его отдаст только после завершения текущего ответа.
@@ -178,20 +171,19 @@ impl Agent {
                         });
                         // Только после отправки клиенту: иначе наблюдение могло бы убрать
                         // сообщение из ленты раньше, чем оно туда попало.
-                        if let Ok(("opencode", sid)) = split_key(&session) {
-                            me.opencode.note_optimistic(sid, &item_id);
+                        if let Ok((backend, sid)) = me.session(&session) {
+                            backend.note_optimistic(sid, &item_id);
                         }
                     }
-                    me.finish(id, result.map(|_| None));
+                    me.finish(id, result);
                 });
             }
             ServerMsg::Commands { session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let commands = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.commands(sid),
-                        Ok(("opencode", sid)) => me.opencode.commands(sid).await,
-                        _ => Vec::new(),
+                    let commands = match me.session(&session) {
+                        Ok((backend, id)) => backend.commands(id).await,
+                        Err(_) => Vec::new(),
                     };
                     let _ = me.out.send(AgentMsg::Commands { session, commands });
                 });
@@ -199,9 +191,9 @@ impl Agent {
             ServerMsg::Models { session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let models = match split_key(&session) {
-                        Ok(("opencode", sid)) => me.opencode.models(sid).await,
-                        _ => Vec::new(),
+                    let models = match me.session(&session) {
+                        Ok((backend, id)) => backend.models(id).await,
+                        Err(_) => Vec::new(),
                     };
                     let _ = me.out.send(AgentMsg::Models { session, models });
                 });
@@ -209,9 +201,8 @@ impl Agent {
             ServerMsg::SetModel { id, session, provider, model } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match split_key(&session) {
-                        Ok(("opencode", sid)) => me.opencode.set_model(sid, &provider, &model).await,
-                        Ok(_) => Err("смена модели есть только у сессий opencode".into()),
+                    let result = match me.session(&session) {
+                        Ok((backend, sid)) => backend.set_model(sid, &provider, &model).await,
                         Err(e) => Err(e),
                     };
                     me.finish(id, result.map(|_| None));
@@ -220,10 +211,8 @@ impl Agent {
             ServerMsg::Interrupt { id, session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.interrupt(sid).await,
-                        Ok(("opencode", sid)) => me.opencode.interrupt(sid).await,
-                        Ok(_) => Err("неизвестный тип сессии".into()),
+                    let result = match me.session(&session) {
+                        Ok((backend, sid)) => backend.interrupt(sid).await,
                         Err(e) => Err(e),
                     };
                     me.finish(id, result.map(|_| None));
@@ -232,10 +221,9 @@ impl Agent {
             ServerMsg::ToolModels { id, tool, cwd } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let models = match tool.as_str() {
-                        "claude" => crate::claude::launch_models(),
-                        "opencode" => me.opencode.models_at(&cwd).await,
-                        _ => Vec::new(),
+                    let models = match me.tool(&tool) {
+                        Ok(backend) => backend.launch_models(&cwd).await,
+                        Err(_) => Vec::new(),
                     };
                     let _ = me.out.send(AgentMsg::ToolModels { id, models });
                 });
@@ -262,10 +250,9 @@ impl Agent {
                     // того, как человек разрешил создать отсутствующий каталог.
                     let result = match crate::util::session_dir_with(&cwd, create) {
                         Err(e) => Err(e),
-                        Ok(_) => match tool.as_str() {
-                            "claude" => me.claude.start(&cwd, &model),
-                            "opencode" => me.opencode.start(&cwd, &model).await,
-                            _ => Err("неизвестный тип сессии".into()),
+                        Ok(_) => match me.tool(&tool) {
+                            Ok(backend) => backend.start(&cwd, &model).await,
+                            Err(e) => Err(e),
                         },
                     };
                     me.finish(id, result);
@@ -288,10 +275,8 @@ impl Agent {
             ServerMsg::Delete { id, session, close } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.delete(sid, close).await,
-                        Ok(("opencode", sid)) => me.opencode.delete(sid, close).await,
-                        Ok(_) => Err("неизвестный тип сессии".into()),
+                    let result = match me.session(&session) {
+                        Ok((backend, sid)) => backend.delete(sid, close).await,
                         Err(e) => Err(e),
                     };
                     if result.is_ok() {
@@ -304,10 +289,8 @@ impl Agent {
             ServerMsg::Close { id, session } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.close(sid).await,
-                        Ok(("opencode", sid)) => me.opencode.close(sid).await,
-                        Ok(_) => Err("неизвестный тип сессии".into()),
+                    let result = match me.session(&session) {
+                        Ok((backend, sid)) => backend.close(sid).await,
                         Err(e) => Err(e),
                     };
                     me.finish(id, result.map(|_| None));
@@ -316,10 +299,8 @@ impl Agent {
             ServerMsg::Rename { id, session, title } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
-                    let result = match split_key(&session) {
-                        Ok(("claude", sid)) => me.claude.rename(sid, &title),
-                        Ok(("opencode", sid)) => me.opencode.rename(sid, &title).await,
-                        Ok(_) => Err("неизвестный тип сессии".into()),
+                    let result = match me.session(&session) {
+                        Ok((backend, sid)) => backend.rename(sid, &title).await,
                         Err(e) => Err(e),
                     };
                     me.finish(id, result.map(|_| None));
@@ -378,7 +359,23 @@ impl Agent {
         }
     }
 
-    /// Отвечает на запрос opencode: разрешение, форма или её отмена.
+    /// Инструмент сессии по её ключу `tool:id`.
+    fn session<'a, 'k>(&'a self, key: &'k str) -> Result<(&'a dyn Backend, &'k str), String> {
+        let (tool, id) = split_key(key)?;
+        Ok((self.tool(tool)?, id))
+    }
+
+    /// Инструмент по имени: так панель обращается к нему и до появления сессии
+    /// (модели для окна «Новая сессия», запуск).
+    fn tool(&self, tool: &str) -> Result<&dyn Backend, String> {
+        self.backends
+            .iter()
+            .map(|backend| backend.as_ref())
+            .find(|backend| backend.tool() == tool)
+            .ok_or_else(|| format!("неизвестный тип сессии: {tool}"))
+    }
+
+    /// Отвечает на запрос инструмента: разрешение, форма или её отмена.
     #[allow(clippy::too_many_arguments)]
     async fn reply_prompt(
         &self,
@@ -396,14 +393,8 @@ impl Agent {
         if message.chars().count() > 4000 {
             return Err("слишком длинное сообщение к запросу".into());
         }
-        match split_key(session)? {
-            ("opencode", id) => {
-                self.opencode.reply_prompt(id, prompt, kind, decision, answer, message, cancel).await
-            }
-            // У Claude Code из панели отвечают только на вопросы с вариантами.
-            ("claude", id) if kind == "form" => self.claude.reply_prompt(id, prompt, answer, cancel).await,
-            _ => Err("на этот запрос из панели не ответить".into()),
-        }
+        let (backend, id) = self.session(session)?;
+        backend.reply_prompt(id, prompt, kind, decision, answer, message, cancel).await
     }
 
     /// Убирает сообщение из очереди opencode, пока оно не отправлено.
@@ -411,32 +402,23 @@ impl Agent {
         if !safe_id(queue) {
             return Err("некорректный идентификатор очереди".into());
         }
-        match split_key(session)? {
-            ("opencode", id) => self.opencode.cancel_queued(id, queue).await,
-            _ => Err("очередь есть только у сессий opencode".into()),
-        }
+        let (backend, id) = self.session(session)?;
+        backend.cancel_queued(id, queue).await
     }
 
     /// Продолжает сессию в другом инструменте: собирает выжимку из её переписки
     /// и открывает новую сессию в том же каталоге.
     async fn handoff(&self, session: &str, tool: &str) -> Result<Option<String>, String> {
-        let (source, id) = split_key(session)?;
-        if source == tool {
+        let (source, id) = self.session(session)?;
+        if source.tool() == tool {
             return Err("сессия уже открыта в этом инструменте".into());
         }
-        let (cwd, text) = match source {
-            "claude" => self.claude.handoff_source(id)?,
-            "opencode" => self.opencode.handoff_source(id).await?,
-            _ => return Err("неизвестный тип сессии".into()),
-        };
-        match tool {
-            "claude" if self.cfg.claude.enabled => self.claude.start_with_prompt(&cwd, Some(&text), ""),
-            "opencode" if self.cfg.opencode.enabled => {
-                self.opencode.start_with_prompt(&cwd, Some(&text), "").await
-            }
-            "claude" | "opencode" => Err(format!("инструмент {tool} выключен в agent.toml")),
-            _ => Err("неизвестный тип сессии".into()),
+        let (cwd, text) = source.handoff_source(id).await?;
+        let target = self.tool(tool)?;
+        if !target.enabled() {
+            return Err(format!("инструмент {tool} выключен в agent.toml"));
         }
+        target.start_with_prompt(&cwd, Some(&text), "").await
     }
 
     fn finish(&self, id: String, result: Result<Option<String>, String>) {
@@ -463,11 +445,10 @@ async fn scanner(agent: Arc<Agent>) {
     loop {
         if agent.online.load(Ordering::Relaxed) {
             let mut list = Vec::new();
-            if agent.cfg.claude.enabled {
-                list.extend(agent.claude.scan());
-            }
-            if agent.cfg.opencode.enabled {
-                list.extend(agent.opencode.scan().await);
+            for backend in &agent.backends {
+                if backend.enabled() {
+                    list.extend(backend.scan().await);
+                }
             }
             list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             agent.sessions.store(list.len(), Ordering::Relaxed);
@@ -549,19 +530,27 @@ fn refresh_expired(mut l: Limits, now: i64) -> Limits {
 /// не свежий. Раньше отказ одного источника (например, 429 от Anthropic)
 /// убирал его строку из списка, и панель писала «нет данных».
 async fn limits_watcher(agent: Arc<Agent>) {
-    let mut claude = LimitSource::new();
-    let mut opencode = LimitSource::new();
+    // Свой последний удачный ответ и свой отступ — у каждого инструмента.
+    let mut sources: HashMap<&'static str, LimitSource> = HashMap::new();
     let mut last: Vec<Limits> = Vec::new();
     loop {
         if agent.online.load(Ordering::Relaxed) {
-            if agent.cfg.claude.enabled && claude.due() {
-                claude.record(agent.claude.limits().await);
-            }
-            if agent.cfg.opencode.enabled && opencode.due() {
-                opencode.record(agent.opencode.limits().await);
+            for backend in &agent.backends {
+                if !backend.enabled() {
+                    continue;
+                }
+                let source = sources.entry(backend.tool()).or_insert_with(LimitSource::new);
+                if source.due() {
+                    source.record(backend.limits().await);
+                }
             }
             let now = util::now_ms();
-            let list: Vec<Limits> = [claude.current(now), opencode.current(now)].into_iter().flatten().collect();
+            let list: Vec<Limits> = agent
+                .backends
+                .iter()
+                .filter(|backend| backend.enabled())
+                .filter_map(|backend| sources.get(backend.tool()).and_then(|source| source.current(now)))
+                .collect();
             // После подключения сервер ничего не знает о лимитах: отправляем
             // список, даже если он не изменился.
             if agent.force_limits.swap(false, Ordering::Relaxed) || list != last {
@@ -575,7 +564,6 @@ async fn limits_watcher(agent: Arc<Agent>) {
         }
     }
 }
-
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 async fn connect(cfg: &Config) -> Result<Ws, String> {
@@ -667,8 +655,10 @@ async fn run(cfg: Config) {
     let rescan = Arc::new(Notify::new());
     let limits_now = Arc::new(Notify::new());
     let agent = Arc::new(Agent {
-        claude: Arc::new(Claude::new(cfg.claude.clone(), Arc::clone(&rescan))),
-        opencode: Arc::new(OpenCode::new(cfg.opencode.clone())),
+        backends: vec![
+            Box::new(Arc::new(Claude::new(cfg.claude.clone(), Arc::clone(&rescan)))) as Box<dyn Backend>,
+            Box::new(Arc::new(OpenCode::new(cfg.opencode.clone()))) as Box<dyn Backend>,
+        ],
         cfg,
         out,
         rescan,

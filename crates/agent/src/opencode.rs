@@ -6,7 +6,7 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
 
 use crate::{
+    backend::{Backend, Fut},
     config::OpenCodeCfg,
     handoff,
     util::{basename, create_diff, edit_diff, is_edit_tool, meter, tool_path, tool_text, truncate, DIFF_LIMIT},
@@ -1580,6 +1581,118 @@ fn write_json(path: &Path, v: &Value) -> Result<(), String> {
     let text = serde_json::to_string(v).map_err(|e| e.to_string())?;
     std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// `Backend` для opencode: агент не разбирает ключ сессии в каждом
+/// обработчике, а зовёт эти методы (см. `crate::backend`).
+impl Backend for Arc<OpenCode> {
+    fn tool(&self) -> &'static str {
+        "opencode"
+    }
+
+    fn enabled(&self) -> bool {
+        self.cfg.enabled
+    }
+
+    fn scan(&self) -> Fut<'_, Vec<SessionInfo>> {
+        Box::pin(async move { OpenCode::scan(self).await })
+    }
+
+    fn limits(&self) -> Fut<'_, Option<Limits>> {
+        Box::pin(async move { OpenCode::limits(self).await })
+    }
+
+    fn watch(&self, key: String, id: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()> {
+        Box::pin(async move { OpenCode::watch(self, key, id, out).await })
+    }
+
+    fn older<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(Vec<Item>, bool), String>> {
+        Box::pin(async move { OpenCode::older(self, id).await })
+    }
+
+    fn send<'a>(
+        &'a self,
+        id: &'a str,
+        text: &'a str,
+        _out: &'a UnboundedSender<AgentMsg>,
+    ) -> Fut<'a, Result<Option<Item>, String>> {
+        // opencode держит принятое сообщение в очереди до конца текущего ответа:
+        // его элемент возвращается, чтобы панель показала сообщение сразу.
+        Box::pin(async move { OpenCode::send(self, id, text).await })
+    }
+
+    fn commands<'a>(&'a self, id: &'a str) -> Fut<'a, Vec<Command>> {
+        Box::pin(async move { OpenCode::commands(self, id).await })
+    }
+
+    fn models<'a>(&'a self, id: &'a str) -> Fut<'a, Vec<ModelInfo>> {
+        Box::pin(async move { OpenCode::models(self, id).await })
+    }
+
+    fn launch_models<'a>(&'a self, cwd: &'a str) -> Fut<'a, Vec<ModelInfo>> {
+        Box::pin(async move { OpenCode::models_at(self, cwd).await })
+    }
+
+    fn set_model<'a>(&'a self, id: &'a str, provider: &'a str, model: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::set_model(self, id, provider, model).await })
+    }
+
+    fn interrupt<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::interrupt(self, id).await })
+    }
+
+    fn rename<'a>(&'a self, id: &'a str, title: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::rename(self, id, title).await })
+    }
+
+    fn delete<'a>(&'a self, id: &'a str, close: bool) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::delete(self, id, close).await })
+    }
+
+    fn close<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::close(self, id).await })
+    }
+
+    fn start<'a>(&'a self, cwd: &'a str, model: &'a str) -> Fut<'a, Result<Option<String>, String>> {
+        Box::pin(async move { OpenCode::start(self, cwd, model).await })
+    }
+
+    fn start_with_prompt<'a>(
+        &'a self,
+        cwd: &'a str,
+        prompt: Option<&'a str>,
+        model: &'a str,
+    ) -> Fut<'a, Result<Option<String>, String>> {
+        Box::pin(async move { OpenCode::start_with_prompt(self, cwd, prompt, model).await })
+    }
+
+    fn handoff_source<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(String, String), String>> {
+        Box::pin(async move { OpenCode::handoff_source(self, id).await })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reply_prompt<'a>(
+        &'a self,
+        id: &'a str,
+        prompt: &'a str,
+        kind: &'a str,
+        decision: &'a str,
+        answer: &'a Value,
+        message: &'a str,
+        cancel: bool,
+    ) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move {
+            OpenCode::reply_prompt(self, id, prompt, kind, decision, answer, message, cancel).await
+        })
+    }
+
+    fn cancel_queued<'a>(&'a self, id: &'a str, queue: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::cancel_queued(self, id, queue).await })
+    }
+
+    fn note_optimistic(&self, id: &str, item: &str) {
+        OpenCode::note_optimistic(self, id, item);
+    }
 }
 
 #[cfg(test)]

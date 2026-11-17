@@ -23,6 +23,7 @@ use tokio::{
 };
 
 use crate::{
+    backend::{Backend, Fut},
     config::ClaudeCfg,
     handoff,
     util::{basename, create_diff, edit_diff, meter, now_ms, parse_iso_ms, to_ms, tool_text, truncate, DIFF_LIMIT},
@@ -1630,6 +1631,120 @@ fn parse_queued(line: &str, out: &mut Vec<Item>) {
         text: truncate(text, TEXT_LIMIT),
         tool: None,
     });
+}
+
+/// `Backend` для Claude Code: агент не разбирает ключ сессии в каждом
+/// обработчике, а зовёт эти методы (см. `crate::backend`).
+impl Backend for Arc<Claude> {
+    fn tool(&self) -> &'static str {
+        "claude"
+    }
+
+    fn enabled(&self) -> bool {
+        self.cfg.enabled
+    }
+
+    fn scan(&self) -> Fut<'_, Vec<SessionInfo>> {
+        Box::pin(async move { Claude::scan(self) })
+    }
+
+    fn limits(&self) -> Fut<'_, Option<Limits>> {
+        Box::pin(async move { Claude::limits(self).await })
+    }
+
+    fn watch(&self, key: String, id: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()> {
+        Box::pin(async move { Claude::watch(self, key, id, out).await })
+    }
+
+    fn older<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(Vec<Item>, bool), String>> {
+        Box::pin(async move { Claude::older(self, id) })
+    }
+
+    fn send<'a>(
+        &'a self,
+        id: &'a str,
+        text: &'a str,
+        out: &'a UnboundedSender<AgentMsg>,
+    ) -> Fut<'a, Result<Option<Item>, String>> {
+        // Claude Code показывает сообщение сам: в окне консоли или в транскрипте
+        // фонового процесса. Панели показывать нечего.
+        Box::pin(async move { Claude::send(self, id, text, out).await.map(|_| None) })
+    }
+
+    fn commands<'a>(&'a self, id: &'a str) -> Fut<'a, Vec<Command>> {
+        Box::pin(async move { Claude::commands(self, id) })
+    }
+
+    fn models<'a>(&'a self, _id: &'a str) -> Fut<'a, Vec<ModelInfo>> {
+        // Модель выбирается при запуске сессии, переключать её на ходу нельзя.
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn launch_models<'a>(&'a self, _cwd: &'a str) -> Fut<'a, Vec<ModelInfo>> {
+        // CLI принимает алиасы (`--model`), каталог на список не влияет.
+        Box::pin(async move { crate::claude::launch_models() })
+    }
+
+    fn set_model<'a>(&'a self, _id: &'a str, _provider: &'a str, _model: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { Err("смена модели есть только у сессий opencode".into()) })
+    }
+
+    fn interrupt<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { Claude::interrupt(self, id).await })
+    }
+
+    fn rename<'a>(&'a self, id: &'a str, title: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { Claude::rename(self, id, title) })
+    }
+
+    fn delete<'a>(&'a self, id: &'a str, close: bool) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { Claude::delete(self, id, close).await })
+    }
+
+    fn close<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { Claude::close(self, id).await })
+    }
+
+    fn start<'a>(&'a self, cwd: &'a str, model: &'a str) -> Fut<'a, Result<Option<String>, String>> {
+        Box::pin(async move { Claude::start(self, cwd, model) })
+    }
+
+    fn start_with_prompt<'a>(
+        &'a self,
+        cwd: &'a str,
+        prompt: Option<&'a str>,
+        model: &'a str,
+    ) -> Fut<'a, Result<Option<String>, String>> {
+        Box::pin(async move { Claude::start_with_prompt(self, cwd, prompt, model) })
+    }
+
+    fn handoff_source<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(String, String), String>> {
+        Box::pin(async move { Claude::handoff_source(self, id) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reply_prompt<'a>(
+        &'a self,
+        id: &'a str,
+        prompt: &'a str,
+        kind: &'a str,
+        _decision: &'a str,
+        answer: &'a Value,
+        _message: &'a str,
+        cancel: bool,
+    ) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move {
+            // У Claude Code из панели отвечают только на вопросы с вариантами.
+            if kind != "form" {
+                return Err("на этот запрос из панели не ответить".into());
+            }
+            Claude::reply_prompt(self, id, prompt, answer, cancel).await
+        })
+    }
+
+    fn cancel_queued<'a>(&'a self, _id: &'a str, _queue: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { Err("очередь есть только у сессий opencode".into()) })
+    }
 }
 
 #[cfg(test)]
