@@ -15,7 +15,7 @@
   ```sh
   cargo build --release -p aipanel-server   # или docker compose up -d --build
   ```
-- **Перед коммитом:** `cargo test --workspace`; для `app.js` — `node --check crates/server/static/app.js`.
+- **Перед коммитом:** `cargo test --workspace`; для скриптов панели — `node --check` каждому файлу `crates/server/static/app.*.js`.
 
 ## Переводы строк
 

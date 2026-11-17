@@ -1,0 +1,249 @@
+'use strict';
+
+// Прокрутка ленты: догрузка ранних сообщений, закреп за своим сообщением
+// и кнопка «в конец».
+
+// ------------------------------------------------------------ ранние сообщения
+
+// Кнопка догрузки живёт первой строкой ленты: очистка ленты выбрасывает её из
+// DOM, поэтому возвращаем на место перед каждым новым элементом.
+function mountOlder() {
+  const feed = $('feed');
+  if (feed.firstChild !== olderBtn) feed.prepend(olderBtn);
+}
+
+function updateOlder() {
+  olderBtn.hidden = !olderMore || !nodes.size;
+  olderBtn.disabled = olderPending;
+  olderBtn.textContent = olderPending ? 'Загрузка…' : 'Загрузить ранние сообщения';
+}
+
+function resetOlder() {
+  clearTimeout(olderTimer);
+  olderPending = false;
+  // Пока агент не сказал, что перед лентой что-то есть, кнопки не показываем.
+  olderMore = false;
+  mountOlder();
+  updateOlder();
+}
+
+function askOlder() {
+  if (!selected || olderPending || !olderMore || !nodes.size) return;
+  if (!send({ t: 'older', agent: selected.agent, session: selected.session })) return;
+  olderPending = true;
+  updateOlder();
+  // Старая версия агента команду не знает и ответа не пришлёт: не оставляем
+  // кнопку навсегда в «Загрузке».
+  clearTimeout(olderTimer);
+  olderTimer = setTimeout(() => {
+    olderPending = false;
+    updateOlder();
+    setHint('Ранние сообщения не загрузились: агент не ответил.', true);
+  }, 10_000);
+}
+
+// Прокрутка до верхней кромки сама просит более ранние сообщения: доводить до
+// них отдельным нажатием кнопки не нужно. Кнопка остаётся для тех случаев,
+// когда догрузку не вышло запустить прокруткой.
+function askOlderAtTop() {
+  if (!olderMore || olderPending || !nodes.size) return;
+  if ($('feed').scrollTop > 0) return;
+  askOlder();
+}
+
+olderBtn.addEventListener('click', askOlder);
+
+// Ранние сообщения пришли: ставим их в начало ленты, не сдвигая то место,
+// которое человек читает.
+function applyOlder(msg) {
+  clearTimeout(olderTimer);
+  olderPending = false;
+  if (msg.error) {
+    updateOlder();
+    setHint(`Ранние сообщения не загрузились: ${msg.error}`, true);
+    return;
+  }
+  olderMore = msg.more !== false;
+  mountOlder();
+  const feed = $('feed');
+  const pinned = myMessages()[pinIdx] || null;
+  // Держимся за первый элемент ленты: после вставки выше он же должен остаться
+  // на том же месте экрана. Браузер сам подтягивает прокрутку (scroll anchoring),
+  // но не везде и не всегда — остаток доводим вручную.
+  const anchor = olderBtn.nextElementSibling;
+  const anchorTop = anchor ? anchor.getBoundingClientRect().top : 0;
+  const frag = document.createDocumentFragment();
+  // Результаты вызовов сопоставляются между собой внутри старой части ленты:
+  // очередь вызовов новой части им не достаётся.
+  const savedCalls = pendingCalls;
+  pendingCalls = [];
+  for (const item of msg.items || []) {
+    // Такое сообщение уже показано: страницы не пересекаются, но агент может
+    // ответить повторно на второй запрос.
+    if (nodes.has(item.id)) continue;
+    rememberRequest(item);
+    placeItem(item, frag);
+  }
+  pendingCalls = savedCalls;
+  olderBtn.after(frag);
+  if (anchor) {
+    const shift = anchor.getBoundingClientRect().top - anchorTop;
+    if (shift) feed.scrollTop += shift;
+  }
+  // Закреп остаётся на том же сообщении, но его номер среди своих сдвинулся.
+  const list = myMessages();
+  pinIdx = pinned ? list.indexOf(pinned) : list.length - 1;
+  updateOlder();
+  syncPin();
+  updateToEnd();
+}
+
+// ------------------------------------------------------------ закреп и конец ленты
+
+// Свои сообщения в ленте по порядку: отправленные и ещё стоящие в очереди.
+// Порядок берём из DOM: ранние сообщения вставляются в начало ленты, а не в
+// конец, и порядок вставки в `nodes` этому уже не соответствует.
+function myMessages() {
+  return [...$('feed').querySelectorAll('.item.user')];
+}
+
+function messageText(node) {
+  const body = node.querySelector('.body');
+  return ((body ? body.textContent : node.textContent) || '').replace(/\s+/g, ' ').trim();
+}
+
+function renderPin(list) {
+  $('pin-preview').textContent = messageText(list[pinIdx]) || 'Сообщение';
+  const count = $('pin-count');
+  // Счётчик нужен, только когда закрепов несколько: по нему видно, где мы.
+  count.hidden = list.length < 2;
+  count.textContent = `${pinIdx + 1} / ${list.length}`;
+}
+
+// Лента изменилась: новое своё сообщение снова становится закрепом, а если
+// закреплённое пропало (сообщение ушло из очереди), индекс подтягиваем к концу.
+function syncPin() {
+  const list = myMessages();
+  if (!list.length) {
+    resetPin();
+    return;
+  }
+  const newest = list[list.length - 1].dataset.id || '';
+  if (newest !== pinNewestId) {
+    pinNewestId = newest;
+    pinIdx = list.length - 1;
+  }
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  $('pin').hidden = false;
+  renderPin(list);
+}
+
+function resetPin() {
+  clearFlash();
+  clearTimeout(pinJumpTimer);
+  pinJumping = false;
+  scrollHoldUntil = 0;
+  $('pin').hidden = true;
+  $('pin-preview').textContent = '';
+  $('pin-count').hidden = true;
+  $('to-end').hidden = true;
+  pinIdx = -1;
+  pinNewestId = '';
+}
+
+function clearFlash() {
+  clearTimeout(flashTimer);
+  flashId = '';
+  for (const node of nodes.values()) node.classList.remove('flash');
+}
+
+// Прокрутка к сообщению с подсветкой. Нужна и закрепу, и переходу из избранного:
+// сообщение ставим ближе к верху ленты, чтобы был виден и ответ на него.
+function jumpToNode(node) {
+  const feed = $('feed');
+  const box = feed.getBoundingClientRect();
+  const item = node.getBoundingClientRect();
+  const top = feed.scrollTop + item.top - box.top - Math.min(120, feed.clientHeight * 0.25);
+  // Авто-прилипание к концу на время перехода выключено: иначе первый же ответ
+  // агента вернул бы ленту вниз, не дав дочитать найденное сообщение.
+  scrollHoldUntil = Date.now() + 600;
+  feed.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+  clearFlash();
+  flashId = node.dataset.id || '';
+  node.classList.add('flash');
+  flashTimer = setTimeout(clearFlash, 1600);
+}
+
+$('pin').addEventListener('click', () => {
+  const list = myMessages();
+  if (!list.length) return;
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  const node = list[pinIdx];
+  jumpToNode(node);
+  // Следующее нажатие ведёт к более старому своему сообщению, а после самого
+  // старого закреп возвращается к последнему.
+  pinIdx = pinIdx === 0 ? list.length - 1 : pinIdx - 1;
+  renderPin(list);
+  // Пока лента едет к сообщению, закреп не пересчитываем по положению: он уже
+  // показывает следующее. Следующая ручная прокрутка снова включит следование.
+  pinJumping = true;
+  clearTimeout(pinJumpTimer);
+  pinJumpTimer = setTimeout(() => {
+    pinJumping = false;
+  }, 1500);
+});
+
+function nearEnd() {
+  const feed = $('feed');
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+}
+
+// Закреп следует за прокруткой: показывает своё сообщение, ближайшее выше верхней
+// кромки ленты, а у самого низа — последнее своё. Как в Telegram, где закреп
+// меняется синхронно с движением ленты.
+function followPin() {
+  const list = myMessages();
+  if (!list.length) return;
+  let idx = list.length - 1;
+  if (!nearEnd()) {
+    const edge = $('feed').getBoundingClientRect().top + 1;
+    idx = 0;
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].getBoundingClientRect().top <= edge) idx = i;
+      else break;
+    }
+  }
+  if (idx !== pinIdx) {
+    pinIdx = idx;
+    renderPin(list);
+  }
+}
+
+// Кнопка «в конец» — только когда лента прокручена вверх: внизу она не нужна.
+function updateToEnd() {
+  $('to-end').hidden = nodes.size === 0 || nearEnd();
+}
+
+$('to-end').addEventListener('click', () => {
+  scrollHoldUntil = 0;
+  const feed = $('feed');
+  feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+});
+
+$('feed').addEventListener(
+  'scroll',
+  () => {
+    updateToEnd();
+    if (pinJumping) {
+      // Ждём, пока плавная прокрутка к закрепу перестанет присылать события.
+      clearTimeout(pinJumpTimer);
+      pinJumpTimer = setTimeout(() => {
+        pinJumping = false;
+      }, 150);
+      return;
+    }
+    followPin();
+    askOlderAtTop();
+  },
+  { passive: true },
+);

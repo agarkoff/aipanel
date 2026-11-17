@@ -30,7 +30,24 @@ use sha2::Sha256;
 use tokio::sync::{mpsc, oneshot};
 
 const INDEX_HTML: &str = include_str!("../static/index.html");
-const APP_JS: &str = include_str!("../static/app.js");
+/// Части панели. Порядок тот же, что у тегов в `index.html`: каждая часть
+/// видит объявления предыдущих, поэтому сборка не нужна — файлы отдаются как есть.
+const SCRIPTS: &[(&str, &str)] = &[
+    ("/app.core.js", include_str!("../static/app.core.js")),
+    ("/app.boot.js", include_str!("../static/app.boot.js")),
+    ("/app.sessions.js", include_str!("../static/app.sessions.js")),
+    ("/app.notify.js", include_str!("../static/app.notify.js")),
+    ("/app.feed.js", include_str!("../static/app.feed.js")),
+    ("/app.favorites.js", include_str!("../static/app.favorites.js")),
+    ("/app.paging.js", include_str!("../static/app.paging.js")),
+    ("/app.prompts.js", include_str!("../static/app.prompts.js")),
+    ("/app.launch-tree.js", include_str!("../static/app.launch-tree.js")),
+    ("/app.launch.js", include_str!("../static/app.launch.js")),
+    ("/app.commands.js", include_str!("../static/app.commands.js")),
+    ("/app.composer.js", include_str!("../static/app.composer.js")),
+    ("/app.shots.js", include_str!("../static/app.shots.js")),
+    ("/app.main.js", include_str!("../static/app.main.js")),
+];
 const MD_JS: &str = include_str!("../static/md.js");
 const HL_JS: &str = include_str!("../static/hl.js");
 const SUGGEST_JS: &str = include_str!("../static/suggest.js");
@@ -1346,9 +1363,8 @@ async fn main() {
     });
     let bind = std::env::var("BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
 
-    let router = Router::new()
+    let mut router = Router::new()
         .route("/", get(|| async { asset("text/html; charset=utf-8", INDEX_HTML) }))
-        .route("/app.js", get(|| async { asset("text/javascript; charset=utf-8", APP_JS) }))
         .route("/md.js", get(|| async { asset("text/javascript; charset=utf-8", MD_JS) }))
         .route("/hl.js", get(|| async { asset("text/javascript; charset=utf-8", HL_JS) }))
         .route("/suggest.js", get(|| async { asset("text/javascript; charset=utf-8", SUGGEST_JS) }))
@@ -1366,8 +1382,13 @@ async fn main() {
         .route("/api/me", get(me))
         .route("/api/image", get(image))
         .route("/ws", get(browser_ws))
-        .route("/agent", get(agent_ws))
-        .with_state(app);
+        .route("/agent", get(agent_ws));
+
+    // Части панели — из таблицы: добавить файл значит дописать одну строку.
+    for &(path, body) in SCRIPTS {
+        router = router.route(path, get(move || async move { asset("text/javascript; charset=utf-8", body) }));
+    }
+    let router = router.with_state(app);
 
     let listener = match tokio::net::TcpListener::bind(&bind).await {
         Ok(l) => l,

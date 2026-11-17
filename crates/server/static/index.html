@@ -231,6 +231,21 @@
 <script src="/hl.js"></script>
 <script src="/md.js"></script>
 <script src="/suggest.js"></script>
-<script src="/app.js"></script>
+<!-- Панель собрана из частей: порядок скриптов важен — каждая часть видит
+     объявления предыдущих и дополняет общее состояние из app.core.js. -->
+<script src="/app.core.js"></script>
+<script src="/app.boot.js"></script>
+<script src="/app.sessions.js"></script>
+<script src="/app.notify.js"></script>
+<script src="/app.feed.js"></script>
+<script src="/app.favorites.js"></script>
+<script src="/app.paging.js"></script>
+<script src="/app.prompts.js"></script>
+<script src="/app.launch-tree.js"></script>
+<script src="/app.launch.js"></script>
+<script src="/app.commands.js"></script>
+<script src="/app.composer.js"></script>
+<script src="/app.shots.js"></script>
+<script src="/app.main.js"></script>
 </body>
 </html>

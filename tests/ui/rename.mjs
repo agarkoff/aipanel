@@ -116,18 +116,21 @@ const stub = `
 
 const fixture = fs
   .readFileSync(path.join(STATIC, 'index.html'), 'utf8')
-  .replace('<script src="/app.js"></script>', `<script>${stub}</script>\n<script src="/app.js"></script>`);
+  .replace('<script src="/hl.js"></script>', `<script>${stub}</script>\n<script src="/hl.js"></script>`);
 
 // ---------------------------------------------------------------- страница
 
 const assets = new Map([
-  ['/app.js', 'text/javascript; charset=utf-8'],
   ['/md.js', 'text/javascript; charset=utf-8'],
   ['/hl.js', 'text/javascript; charset=utf-8'],
   ['/suggest.js', 'text/javascript; charset=utf-8'],
   ['/style.css', 'text/css; charset=utf-8'],
   ['/icon.svg', 'image/svg+xml'],
 ]);
+// Части панели: имена берём из каталога, порядок задаёт index.html.
+for (const name of fs.readdirSync(STATIC).filter((f) => /^app\..*\.js$/.test(f))) {
+  assets.set(`/${name}`, 'text/javascript; charset=utf-8');
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1');
