@@ -567,6 +567,31 @@ try {
   check('звезда в шапке видна, когда открыта сессия', !favLayout.headerHidden, favLayout);
   check('без избранного счётчика у звезды нет', favLayout.countHidden, favLayout);
 
+  // Фоновые задачи: строка над полем ввода с числом задач, список — по нажатию.
+  const bgTasks = await evaluate(`(async () => {
+    const box = document.getElementById('tasks');
+    const before = box.hidden;
+    const key = session.key;
+    const emit = (tasks) => window.__sock.emit({ t: 'tasks', agent: 'ui-test', session: key, tasks });
+    emit([
+      { id: 'b1', kind: 'bash', title: 'Сборка образа', started_at: Date.now() - 5 * 60000 },
+      { id: 'a1', kind: 'agent', title: 'Поиск по коду' },
+    ]);
+    // Чужая сессия не влияет на показанный список.
+    window.__sock.emit({ t: 'tasks', agent: 'ui-test', session: 'other', tasks: [] });
+    const shown = {
+      hidden: box.hidden,
+      title: document.getElementById('tasks-title').textContent,
+      rows: [...box.querySelectorAll('.bg-task')].map((r) => r.textContent),
+      aboveComposer: !!(box.compareDocumentPosition(document.getElementById('composer')) & Node.DOCUMENT_POSITION_FOLLOWING),
+    };
+    emit([]);
+    return { before, shown, after: box.hidden };
+  })()`.replace('session.key', JSON.stringify(session.key)));
+  check('без фоновых задач строки нет', bgTasks.before && bgTasks.after, bgTasks);
+  check('фоновые задачи видны с числом', !bgTasks.shown.hidden && bgTasks.shown.title === '2 фоновые задачи' && bgTasks.shown.aboveComposer, bgTasks);
+  check('в списке задач вид, описание и время', bgTasks.shown.rows[0] === 'командаСборка образа5 мин' && bgTasks.shown.rows[1] === 'агентПоиск по коду', bgTasks);
+
   // Своё сообщение: нажатие уходит агенту вместе с началом текста.
   const ownStar = await evaluate(`(async () => {
     const node = [...document.querySelectorAll('#feed .item.text.user')].at(-1);

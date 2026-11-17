@@ -402,6 +402,15 @@ pub(super) fn is_compact(v: &Value) -> bool {
 /// (см. [`crate::ask::Tracker`]). Кусок тот же, что только что ушёл в ленту:
 /// новые строки короткие, а большой первый кусок читается один раз.
 pub(super) fn scan_ask(path: &Path, start: u64, end: u64, skip_first: bool, ask: &mut crate::ask::Tracker) {
+    scan_lines(path, start, end, skip_first, |l| ask.line(l));
+}
+
+/// То же для фоновых задач (см. [`crate::tasks::Tracker`]).
+pub(super) fn scan_tasks(path: &Path, start: u64, end: u64, skip_first: bool, tasks: &mut crate::tasks::Tracker) {
+    scan_lines(path, start, end, skip_first, |l| tasks.line(l));
+}
+
+fn scan_lines(path: &Path, start: u64, end: u64, skip_first: bool, mut f: impl FnMut(&str)) {
     let buf = read_range(path, start, end);
     let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else { return };
     for (i, line) in buf[..last_nl].split(|b| *b == b'\n').enumerate() {
@@ -409,7 +418,7 @@ pub(super) fn scan_ask(path: &Path, start: u64, end: u64, skip_first: bool, ask:
             continue;
         }
         if let Ok(line) = std::str::from_utf8(line) {
-            ask.line(line);
+            f(line);
         }
     }
 }

@@ -16,6 +16,7 @@ mod push;
 mod repo;
 mod screen;
 mod status;
+mod tasks;
 mod util;
 
 use std::{

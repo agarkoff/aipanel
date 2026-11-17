@@ -945,6 +945,24 @@ input, textarea, select {
 @keyframes turn-pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .turn .turn-mark { animation: none; } }
 
+/* Фоновые задачи сессии: строка над полем ввода, список раскрывается. */
+.bg-tasks {
+  flex: none;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 12px;
+}
+.bg-tasks[hidden] { display: none; }
+.bg-tasks summary { padding: 6px 16px; cursor: pointer; user-select: none; }
+.bg-tasks .turn-mark { color: var(--busy); animation: turn-pulse 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .bg-tasks .turn-mark { animation: none; } }
+.bg-tasks-list { list-style: none; margin: 0; padding: 0 16px 8px; max-height: 30dvh; overflow-y: auto; }
+.bg-task { display: flex; gap: 8px; align-items: baseline; padding: 2px 0; min-width: 0; }
+.bg-task-kind { flex: none; min-width: 5.5em; }
+.bg-task-title { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bg-task-age { flex: none; font-variant-numeric: tabular-nums; }
+
 .composer {
   display: flex;
   gap: 8px;

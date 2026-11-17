@@ -138,6 +138,9 @@ function onMessage(msg) {
   } else if (msg.t === 'prompts') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyPrompts(msg.prompts || []);
+  } else if (msg.t === 'tasks') {
+    if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
+    applyTasks(msg.tasks);
   } else if (msg.t === 'favorites') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     favorites = Array.isArray(msg.items) ? msg.items : [];

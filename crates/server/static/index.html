@@ -137,6 +137,10 @@
       </button>
     </div>
     <p id="turn" class="turn" hidden></p>
+    <details id="tasks" class="bg-tasks" hidden>
+      <summary><span class="turn-mark" aria-hidden="true">●</span> <span id="tasks-title"></span></summary>
+      <ul id="tasks-list" class="bg-tasks-list"></ul>
+    </details>
     <div id="prompts" class="prompts" role="region" aria-label="Запросы opencode" aria-live="polite"></div>
     <form id="composer" class="composer" hidden>
       <textarea id="text" rows="1" placeholder="Сообщение в сессию"></textarea>
@@ -267,6 +271,7 @@
 <script src="/app.favorites.js"></script>
 <script src="/app.paging.js"></script>
 <script src="/app.prompts.js"></script>
+<script src="/app.tasks.js"></script>
 <script src="/app.launch-tree.js"></script>
 <script src="/app.launch.js"></script>
 <script src="/app.commands.js"></script>

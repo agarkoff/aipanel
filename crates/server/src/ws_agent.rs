@@ -252,6 +252,20 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                 }
             }
         }
+        AgentMsg::Tasks { session, mut tasks } => {
+            tasks.truncate(aipanel_proto::MAX_TASKS);
+            let text = json!({
+                "t": "tasks", "agent": agent, "session": session, "tasks": tasks,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
         AgentMsg::Commands { session, mut commands } => {
             commands.truncate(MAX_COMMANDS);
             let text = json!({

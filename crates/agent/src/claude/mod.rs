@@ -17,7 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, MAX_TITLE};
+use aipanel_proto::{AgentMsg, BgTask, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, MAX_TITLE};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -32,12 +32,14 @@ use crate::{
 };
 
 use transcript::{
-    last_update, read_feed, read_items, scan_ask, tail_meta, turn_usage, Queue, TailMeta, TurnCache,
+    last_update, read_feed, read_items, scan_ask, scan_tasks, tail_meta, turn_usage, Queue, TailMeta, TurnCache,
 };
 
 const TAIL_META_BYTES: u64 = 256 * 1024;
 const HEAD_META_BYTES: u64 = 64 * 1024;
 const HISTORY_BYTES: u64 = 4 * 1024 * 1024;
+/// Сколько конца транскрипта просматривается в поисках запущенных фоновых задач.
+const TASKS_BYTES: u64 = 64 * 1024 * 1024;
 /// Для выжимки достаточно хвоста транскрипта: он содержит последние реплики.
 const HANDOFF_BYTES: u64 = 2 * 1024 * 1024;
 /// Сколько байт транскрипта читается за одну догрузку ранних сообщений и предел
@@ -209,6 +211,15 @@ impl Claude {
 
     fn lock(&self) -> MutexGuard<'_, St> {
         self.st.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Работает ли процесс Claude Code этой сессии: открытое окно или
+    /// запуск без окна, начатый агентом.
+    fn is_running(&self, sid: &str) -> bool {
+        let st = self.lock();
+        st.known.get(sid).is_some_and(|k| k.pid.is_some())
+            || st.headless.contains_key(sid)
+            || st.launched.contains_key(sid)
     }
 
     /// Все транскрипты верхнего уровня: sessionId -> путь.
@@ -492,6 +503,10 @@ impl Claude {
         // форма уходит, только когда список меняется.
         let mut ask = crate::ask::Tracker::default();
         let mut shown: Vec<Prompt> = Vec::new();
+        // Фоновые задачи: запуск мог быть задолго до показанной части ленты,
+        // поэтому при первом чтении транскрипт просматривается глубже.
+        let mut tasks = crate::tasks::Tracker::default();
+        let mut shown_tasks: Option<Vec<BgTask>> = None;
         let mut queue = Queue::default();
         loop {
             if path.is_none() {
@@ -510,6 +525,9 @@ impl Claude {
                         offset = start + consumed;
                         ask = crate::ask::Tracker::default();
                         scan_ask(p, start, offset, start > 0, &mut ask);
+                        tasks = crate::tasks::Tracker::default();
+                        let from = offset.saturating_sub(TASKS_BYTES);
+                        scan_tasks(p, from, offset, from > 0, &mut tasks);
                         first = false;
                         let _ = out.send(AgentMsg::History {
                             session: key.clone(),
@@ -523,6 +541,7 @@ impl Claude {
                         let (items, drop, consumed, _) =
                             read_feed(p, offset, len.min(offset + MAX_CHUNK), false, usize::MAX, Some(&mut queue));
                         scan_ask(p, offset, offset + consumed, false, &mut ask);
+                        scan_tasks(p, offset, offset + consumed, false, &mut tasks);
                         offset += consumed;
                         if !items.is_empty() || !drop.is_empty() {
                             let _ = out.send(AgentMsg::History {
@@ -553,6 +572,12 @@ impl Claude {
             if prompts != shown {
                 shown = prompts;
                 let _ = out.send(AgentMsg::Prompts { session: key.clone(), prompts: shown.clone() });
+            }
+            // Задачи живут в процессе Claude Code: закрыта сессия — их нет.
+            let now_tasks = if self.is_running(&sid) { tasks.running(now_ms()) } else { Vec::new() };
+            if shown_tasks.as_ref() != Some(&now_tasks) {
+                let _ = out.send(AgentMsg::Tasks { session: key.clone(), tasks: now_tasks.clone() });
+                shown_tasks = Some(now_tasks);
             }
             tokio::time::sleep(Duration::from_millis(700)).await;
         }

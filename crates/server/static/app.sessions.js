@@ -449,6 +449,7 @@ function select(agent, session) {
   setFavoritesMenu(false);
   applyFavorites();
   clearPrompts();
+  clearTasks();
   resetHistoryNav();
   clearTimeout(copyIdTimer);
   $('copy-id').classList.remove('copied');
@@ -477,6 +478,7 @@ function closeView() {
   setFavoritesMenu(false);
   applyFavorites();
   clearPrompts();
+  clearTasks();
   resetPin();
   resetOlder();
   send({ t: 'unwatch' });

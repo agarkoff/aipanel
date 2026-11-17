@@ -56,6 +56,7 @@ pub(crate) const SCRIPTS: &[(&str, &str)] = &[
     ("/app.favorites.js", include_str!("../static/app.favorites.js")),
     ("/app.paging.js", include_str!("../static/app.paging.js")),
     ("/app.prompts.js", include_str!("../static/app.prompts.js")),
+    ("/app.tasks.js", include_str!("../static/app.tasks.js")),
     ("/app.launch-tree.js", include_str!("../static/app.launch-tree.js")),
     ("/app.launch.js", include_str!("../static/app.launch.js")),
     ("/app.commands.js", include_str!("../static/app.commands.js")),

@@ -234,6 +234,27 @@ pub struct Prompt {
     pub save: Vec<String>,
 }
 
+/// Фоновая задача сессии Claude Code: команда, агент или монитор, которые
+/// работают, пока сессия занята другим или ждёт.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BgTask {
+    /// Идентификатор задачи в Claude Code (`bpn8xp4ds`, id агента).
+    pub id: String,
+    /// `bash`, `agent` или `monitor`.
+    pub kind: String,
+    /// Описание из вызова или сама команда.
+    pub title: String,
+    /// Время запуска, мс с эпохи Unix; 0 — неизвестно.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub started_at: i64,
+    /// Когда монитор закончится сам, мс с эпохи Unix; 0 — срока нет.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ends_at: i64,
+}
+
+/// Сколько фоновых задач сессии показывает панель.
+pub const MAX_TASKS: usize = 50;
+
 /// Сообщения от агента серверу.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -283,6 +304,13 @@ pub enum AgentMsg {
         session: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         prompts: Vec<Prompt>,
+    },
+    /// Фоновые задачи сессии, которые ещё работают. Полный список, в том числе
+    /// пустой: клиент заменяет им показанный ранее.
+    Tasks {
+        session: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tasks: Vec<BgTask>,
     },
     /// Избранные сообщения сессии. Полный список: клиент заменяет им показанный
     /// ранее. Хранится у агента, поэтому его видят все браузеры и устройства.
@@ -556,6 +584,23 @@ mod push_tests {
         let mut bad = sub("https://fcm.googleapis.com/x");
         bad.auth = b64url::encode(&[1u8; 8]);
         assert!(!bad.valid());
+    }
+}
+
+#[cfg(test)]
+mod tasks_tests {
+    use super::*;
+
+    #[test]
+    fn tasks_round_trip() {
+        let msg = AgentMsg::Tasks {
+            session: "claude:x".into(),
+            tasks: vec![BgTask { id: "b1".into(), kind: "bash".into(), title: "Сборка".into(), started_at: 5, ends_at: 0 }],
+        };
+        let text = serde_json::to_string(&msg).unwrap();
+        assert!(text.starts_with("{\"t\":\"tasks\""), "{text}");
+        let back: AgentMsg = serde_json::from_str(&text).unwrap();
+        assert!(matches!(back, AgentMsg::Tasks { tasks, .. } if tasks.len() == 1 && tasks[0].ends_at == 0));
     }
 }
 
