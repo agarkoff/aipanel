@@ -116,7 +116,27 @@ mod tests {
     }
 
     fn fav(id: &str, text: &str) -> Favorite {
-        Favorite { id: id.into(), ts: 1, role: "assistant".into(), text: text.into() }
+        Favorite { id: id.into(), ts: 1, role: "assistant".into(), text: text.into(), of: String::new() }
+    }
+
+    #[test]
+    fn keeps_fragments_next_to_their_message() {
+        let path = tmp("frag");
+        let mut store = Store::at(path.clone());
+        store.set("s", fav("m1", "целиком"), true).unwrap();
+        let mut part = fav("q:1", "кусок ответа");
+        part.of = "m1".into();
+        store.set("s", part, true).unwrap();
+        // Фрагмент переживает перезапуск и помнит, из какого он сообщения.
+        let again = Store::at(path.clone());
+        let list = again.list("s");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].of, "");
+        assert_eq!((list[1].id.as_str(), list[1].of.as_str()), ("q:1", "m1"));
+        // У сообщения целиком поле `of` в файл не пишется.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("\"of\"").count(), 1, "{text}");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

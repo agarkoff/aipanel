@@ -516,6 +516,7 @@ mod tests {
                     ts: 5,
                     role: "assistant".into(),
                     text: "ответ в избранном".into(),
+                    of: String::new(),
                 }],
             },
         );
@@ -550,10 +551,27 @@ mod tests {
             ts: -5,
             role: role.into(),
             text: text.into(),
+            of: String::new(),
         };
         // Служебная строка ленты в избранное не попадает: агенту ничего не уходит.
         on_browser_msg(&app, 1, toggle("tool_use", "вызов"));
         assert!(agent_rx.try_recv().is_err(), "служебное сообщение ушло агенту");
+        // Фрагмент со ссылкой на сообщение с управляющими символами — тоже нет.
+        let mut part = toggle("user", "кусок");
+        if let BrowserMsg::Favorite { of, .. } = &mut part {
+            *of = "m\n1".into();
+        }
+        on_browser_msg(&app, 1, part);
+        assert!(agent_rx.try_recv().is_err(), "фрагмент с плохой ссылкой ушёл агенту");
+        let mut part = toggle("assistant", "кусок");
+        if let BrowserMsg::Favorite { of, .. } = &mut part {
+            *of = "m1".into();
+        }
+        on_browser_msg(&app, 1, part);
+        match agent_rx.try_recv().unwrap() {
+            ServerMsg::Favorite { of, text, .. } => assert_eq!((of.as_str(), text.as_str()), ("m1", "кусок")),
+            other => panic!("агенту ушло не избранное: {other:?}"),
+        }
 
         on_browser_msg(&app, 1, toggle("user", &"я".repeat(MAX_FAVORITE_TEXT + 50)));
         match agent_rx.try_recv().unwrap() {

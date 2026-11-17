@@ -128,16 +128,16 @@ impl Agent {
                 let items = self.favorites.lock().unwrap().list(&session);
                 let _ = self.out.send(AgentMsg::Favorites { session, items });
             }
-            ServerMsg::Favorite { session, item, on, ts, role, text } => {
+            ServerMsg::Favorite { session, item, on, ts, role, text, of } => {
                 // В избранном — только сообщения переписки: вызовы инструментов
                 // и служебные строки туда не попадают.
-                if !valid_favorite(&item, &role) {
+                if !valid_favorite(&item, &role) || !(of.is_empty() || valid_favorite(&of, &role)) {
                     util::log(&format!("favorite: некорректное сообщение «{item}» ({role})"));
                     return;
                 }
                 let (items, error) = {
                     let mut store = self.favorites.lock().unwrap();
-                    let error = store.set(&session, Favorite { id: item, ts, role, text }, on).err();
+                    let error = store.set(&session, Favorite { id: item, ts, role, text, of }, on).err();
                     (store.list(&session), error)
                 };
                 if let Some(e) = error {

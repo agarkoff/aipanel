@@ -434,6 +434,8 @@ function askText(text) {
 function buildItem(item, call) {
   const node = el('div', `item ${item.role} ${item.kind}`);
   node.dataset.id = item.id;
+  // Время нужно фрагменту в избранном: выделенный кусок берёт его у сообщения.
+  if (item.ts) node.dataset.ts = String(item.ts);
   if (item.kind === 'text') {
     const body = el('div', 'body md');
     body.append(renderMarkdown(item.text, mdOptions()));

@@ -104,6 +104,9 @@ pub(crate) enum BrowserMsg {
         role: String,
         #[serde(default)]
         text: String,
+        /// Фрагмент: из какого сообщения выделен текст.
+        #[serde(default)]
+        of: String,
     },
 }
 
@@ -347,15 +350,12 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             // Список общий для всех, кто смотрит сессию: ответ агент рассылает.
             inner.to_agent(&owner, &agent, ServerMsg::Favorites { session });
         }
-        BrowserMsg::Favorite { agent, session, item, on, ts, role, text } => {
+        BrowserMsg::Favorite { agent, session, item, on, ts, role, text, of } => {
             if !inner.browser_owns(browser, &agent) {
                 return;
             }
-            if item.is_empty()
-                || item.chars().count() > MAX_ITEM_ID
-                || item.chars().any(char::is_control)
-                || !matches!(role.as_str(), "user" | "assistant")
-            {
+            let bad_id = |id: &str| id.is_empty() || id.chars().count() > MAX_ITEM_ID || id.chars().any(char::is_control);
+            if bad_id(&item) || (!of.is_empty() && bad_id(&of)) || !matches!(role.as_str(), "user" | "assistant") {
                 return;
             }
             let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
@@ -365,7 +365,7 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             inner.to_agent(
                 &owner,
                 &agent,
-                ServerMsg::Favorite { session, item, on, ts: ts.max(0), role, text },
+                ServerMsg::Favorite { session, item, on, ts: ts.max(0), role, text, of },
             );
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {

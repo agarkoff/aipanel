@@ -206,7 +206,7 @@ const stub = `
       } else if (msg.t === 'favorite') {
         window.__favRequests.push(msg);
         window.__favs = msg.on
-          ? [...window.__favs.filter((f) => f.id !== msg.item), { id: msg.item, ts: msg.ts, role: msg.role, text: msg.text }]
+          ? [...window.__favs.filter((f) => f.id !== msg.item), { id: msg.item, ts: msg.ts, role: msg.role, text: msg.text, ...(msg.of ? { of: msg.of } : {}) }]
           : window.__favs.filter((f) => f.id !== msg.item);
         setTimeout(() => this.emit({ t: 'favorites', agent: msg.agent, session: msg.session, items: window.__favs }), 0);
       }
@@ -651,6 +651,124 @@ try {
   })()`);
   check('повторное нажатие убирает сообщение из избранного', removeStar.on === false && removeStar.item === removeStar.id && !removeStar.lit && removeStar.count === 2, removeStar);
   check('счётчик уменьшается вместе со списком', removeStar.shown === '2', removeStar);
+
+  // Выделение куска ответа: под ним плашка «копировать / в избранное».
+  const selShow = await evaluate(`(async () => {
+    const feed = document.getElementById('feed');
+    const first = (n) => document.createTreeWalker(n.querySelector('.body'), NodeFilter.SHOW_TEXT).nextNode();
+    const node = [...feed.querySelectorAll('.item.text.assistant')].filter((n) => first(n).length > 40).at(-1);
+    node.scrollIntoView({ block: 'center' });
+    const t = first(node);
+    const range = document.createRange();
+    range.setStart(t, 6);
+    range.setEnd(t, 30);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    await new Promise((r) => setTimeout(r, 300));
+    const bar = document.querySelector('.sel-bar');
+    const box = bar.getBoundingClientRect();
+    const sel = range.getBoundingClientRect();
+    return {
+      hidden: bar.hidden,
+      favShown: !bar.querySelector('.sel-fav').hidden,
+      below: box.top >= sel.bottom,
+      inView: box.left >= 0 && box.right <= innerWidth && box.bottom <= innerHeight,
+      text: range.toString(),
+      id: node.dataset.id,
+    };
+  })()`);
+  check('выделение в сообщении показывает плашку под ним', !selShow.hidden && selShow.favShown && selShow.below && selShow.inView, selShow);
+
+  const selCopied = await evaluate(`(async () => {
+    const real = copyToClipboard;
+    let got = null;
+    copyToClipboard = async (t) => { got = t; return true; };
+    document.querySelector('.sel-bar .sel-copy').click();
+    await new Promise((r) => setTimeout(r, 60));
+    copyToClipboard = real;
+    return { got, done: document.querySelector('.sel-bar').classList.contains('done') };
+  })()`);
+  check('«Копировать» на плашке копирует выделенное', selCopied.got === selShow.text.trim() && selCopied.done, { selCopied, selShow });
+
+  const selFaved = await evaluate(`(async () => {
+    document.querySelector('.sel-bar .sel-fav').click();
+    await new Promise((r) => setTimeout(r, 150));
+    const req = window.__favRequests.at(-1);
+    return {
+      req,
+      hidden: document.querySelector('.sel-bar').hidden,
+      collapsed: getSelection().isCollapsed,
+      count: document.getElementById('favorites-count').textContent,
+    };
+  })()`);
+  check(
+    'звезда на плашке кладёт фрагмент в избранное со ссылкой на сообщение',
+    selFaved.req.on && selFaved.req.of === selShow.id && selFaved.req.item.startsWith('q:') &&
+      selFaved.req.text === selShow.text.trim() && selFaved.req.role === 'assistant',
+    selFaved,
+  );
+  check('после добавления плашка и выделение пропадают', selFaved.hidden && selFaved.collapsed && selFaved.count === '3', selFaved);
+
+  // В списке фрагмент помечен и ведёт к своему сообщению с подсветкой куска.
+  const fragJump = await evaluate(`(async () => {
+    const feed = document.getElementById('feed');
+    feed.scrollTop = 0;
+    feed.dispatchEvent(new Event('scroll'));
+    document.getElementById('favorites').click();
+    await new Promise((r) => setTimeout(r, 60));
+    const item = document.querySelector('#favorites-menu .fav-item.part');
+    if (!item) return { missing: true };
+    const tag = item.querySelector('.fav-part') ? item.querySelector('.fav-part').textContent : '';
+    item.querySelector('.fav-row').click();
+    await new Promise((r) => setTimeout(r, 600));
+    const flash = document.querySelector('#feed .item.flash');
+    const hl = window.CSS && CSS.highlights ? CSS.highlights.get('fav-part') : null;
+    let marked = '';
+    if (hl) for (const r of hl) marked = r.toString();
+    return { tag, flash: flash ? flash.dataset.id : '', marked, supported: !!(window.CSS && CSS.highlights) };
+  })()`);
+  check(
+    'фрагмент в списке ведёт к сообщению и подсвечивает кусок',
+    !fragJump.missing && fragJump.tag === 'фрагмент' && fragJump.flash === selShow.id &&
+      (!fragJump.supported || fragJump.marked === selShow.text.trim()),
+    fragJump,
+  );
+
+  // Крестик в списке убирает фрагмент и не закрывает плашку.
+  const fragRemove = await evaluate(`(async () => {
+    document.getElementById('favorites').click();
+    await new Promise((r) => setTimeout(r, 60));
+    const item = document.querySelector('#favorites-menu .fav-item.part');
+    item.querySelector('.fav-remove').click();
+    await new Promise((r) => setTimeout(r, 150));
+    const req = window.__favRequests.at(-1);
+    const open = !document.getElementById('favorites-menu').hidden;
+    const left = document.querySelectorAll('#favorites-menu .fav-item.part').length;
+    document.getElementById('favorites').click();
+    return { on: req.on, of: req.of, open, left, count: window.__favs.length };
+  })()`);
+  check('крестик убирает фрагмент, список остаётся открытым', fragRemove.on === false && fragRemove.open && fragRemove.left === 0 && fragRemove.count === 2, fragRemove);
+
+  // Выделение через два сообщения: скопировать можно, в избранное — нет.
+  const selCross = await evaluate(`(async () => {
+    const list = [...document.querySelectorAll('#feed .item.text.assistant')];
+    const a = list.at(-2).querySelector('.body');
+    const b = list.at(-1).querySelector('.body');
+    const range = document.createRange();
+    range.setStart(document.createTreeWalker(a, NodeFilter.SHOW_TEXT).nextNode(), 3);
+    range.setEnd(document.createTreeWalker(b, NodeFilter.SHOW_TEXT).nextNode(), 5);
+    getSelection().removeAllRanges();
+    getSelection().addRange(range);
+    await new Promise((r) => setTimeout(r, 300));
+    const bar = document.querySelector('.sel-bar');
+    const res = { hidden: bar.hidden, favHidden: bar.querySelector('.sel-fav').hidden };
+    getSelection().removeAllRanges();
+    await new Promise((r) => setTimeout(r, 300));
+    res.afterClear = bar.hidden;
+    return res;
+  })()`);
+  check('выделение через два сообщения: только копирование', !selCross.hidden && selCross.favHidden, selCross);
+  check('снятое выделение убирает плашку', selCross.afterClear, selCross);
 
   // Нажатия на закреп: переход к сообщению и переключение на предыдущее своё.
   const pinState = async () => evaluate(`(() => {
