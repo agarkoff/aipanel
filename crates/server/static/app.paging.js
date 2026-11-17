@@ -5,6 +5,11 @@
 
 // ------------------------------------------------------------ ранние сообщения
 
+// Сколько страниц подряд нажатие на закреп просит, пока не дойдёт до
+// предыдущего своего сообщения. Обычно хватает одной; предел — страховка от
+// бесконечной догрузки, если своих сообщений в ранних нет вовсе.
+const PIN_OLDER_MAX = 20;
+
 // Кнопка догрузки живёт первой строкой ленты: очистка ленты выбрасывает её из
 // DOM, поэтому возвращаем на место перед каждым новым элементом.
 function mountOlder() {
@@ -21,15 +26,21 @@ function updateOlder() {
 function resetOlder() {
   clearTimeout(olderTimer);
   olderPending = false;
+  pinOlderFrom = null;
+  pinOlderPages = 0;
   // Пока агент не сказал, что перед лентой что-то есть, кнопки не показываем.
   olderMore = false;
   mountOlder();
   updateOlder();
 }
 
+// `true` — запрос ушёл (или ответ на такой же уже ждём); `false` — грузить
+// нечего или соединения нет. По этому ответу нажатие закрепа понимает,
+// дождётся ли оно догрузки, или идти обычным путём.
 function askOlder() {
-  if (!selected || olderPending || !olderMore || !nodes.size) return;
-  if (!send({ t: 'older', agent: selected.agent, session: selected.session })) return;
+  if (!selected || !olderMore || !nodes.size) return false;
+  if (olderPending) return true;
+  if (!send({ t: 'older', agent: selected.agent, session: selected.session })) return false;
   olderPending = true;
   updateOlder();
   // Старая версия агента команду не знает и ответа не пришлёт: не оставляем
@@ -37,9 +48,12 @@ function askOlder() {
   clearTimeout(olderTimer);
   olderTimer = setTimeout(() => {
     olderPending = false;
+    // Ждать догрузку больше некому: нажатие на закреп идёт обычным путём.
+    pinOlderFrom = null;
     updateOlder();
     setHint('Ранние сообщения не загрузились: агент не ответил.', true);
   }, 10_000);
+  return true;
 }
 
 // Прокрутка до верхней кромки сама просит более ранние сообщения: доводить до
@@ -59,6 +73,7 @@ function applyOlder(msg) {
   clearTimeout(olderTimer);
   olderPending = false;
   if (msg.error) {
+    pinOlderFrom = null;
     updateOlder();
     setHint(`Ранние сообщения не загрузились: ${msg.error}`, true);
     return;
@@ -96,6 +111,36 @@ function applyOlder(msg) {
   updateOlder();
   syncPin();
   updateToEnd();
+  // Продолжение нажатия на самый старый закреп: догруженное могло принести
+  // предыдущее своё сообщение.
+  if (pinOlderFrom) continuePinOlder(list);
+}
+
+// Нажатие на самый старый закреп догружает ранние сообщения до предыдущего
+// своего и везёт к нему ленту. Страницы без своих сообщений (одни ответы)
+// пропускаем и просим следующую.
+function continuePinOlder(list) {
+  const at = list.indexOf(pinOlderFrom);
+  if (at > 0) {
+    pinOlderFrom = null;
+    pinOlderPages = 0;
+    // Дальше закреп, как и при обычном нажатии, показывает следующее своё —
+    // но если раньше него в догруженном ничего нет, остаётся на том, к
+    // которому едем: следующего ещё нет в ленте, и его текст показать неоткуда.
+    pinIdx = Math.max(0, at - 2);
+    renderPin(list);
+    jumpToNode(list[at - 1]);
+    holdPinJump();
+    return;
+  }
+  if (at === 0 && pinOlderPages < PIN_OLDER_MAX && askOlder()) {
+    pinOlderPages += 1;
+    return;
+  }
+  // Раньше своих сообщений нет: нажатие идёт обычным путём — к самому старому
+  // и по кругу к последнему.
+  pinOlderFrom = null;
+  jumpToPin();
 }
 
 // ------------------------------------------------------------ закреп и конец ленты
@@ -149,6 +194,8 @@ function resetPin() {
   $('to-end').hidden = true;
   pinIdx = -1;
   pinNewestId = '';
+  pinOlderFrom = null;
+  pinOlderPages = 0;
 }
 
 function clearFlash() {
@@ -174,23 +221,47 @@ function jumpToNode(node) {
   flashTimer = setTimeout(clearFlash, 1600);
 }
 
-$('pin').addEventListener('click', () => {
-  const list = myMessages();
-  if (!list.length) return;
-  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
-  const node = list[pinIdx];
-  jumpToNode(node);
-  // Следующее нажатие ведёт к более старому своему сообщению, а после самого
-  // старого закреп возвращается к последнему.
-  pinIdx = pinIdx === 0 ? list.length - 1 : pinIdx - 1;
-  renderPin(list);
-  // Пока лента едет к сообщению, закреп не пересчитываем по положению: он уже
-  // показывает следующее. Следующая ручная прокрутка снова включит следование.
+// Пока лента едет к сообщению, закреп не пересчитываем по положению: он уже
+// показывает следующее. Следующая ручная прокрутка снова включит следование.
+function holdPinJump() {
   pinJumping = true;
   clearTimeout(pinJumpTimer);
   pinJumpTimer = setTimeout(() => {
     pinJumping = false;
   }, 1500);
+}
+
+// Переход по закрепу: к сообщению, на котором он стоит, и закреп — на
+// предыдущее своё (после самого старого — по кругу к последнему).
+function jumpToPin() {
+  const list = myMessages();
+  if (!list.length) return;
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  const node = list[pinIdx];
+  jumpToNode(node);
+  pinIdx = pinIdx === 0 ? list.length - 1 : pinIdx - 1;
+  renderPin(list);
+  holdPinJump();
+}
+
+$('pin').addEventListener('click', () => {
+  // Прошлое нажатие ещё ждёт ранние сообщения: повторное ничего не добавляет,
+  // ответ вот-вот придёт.
+  if (pinOlderFrom) return;
+  const list = myMessages();
+  if (!list.length) return;
+  if (pinIdx < 0 || pinIdx >= list.length) pinIdx = list.length - 1;
+  // На самом старом закрепе за лентой может быть ещё что-то: нажатие сначала
+  // догружает ранние сообщения до предыдущего своего и везёт к нему, а не
+  // перескакивает к последнему. Переход продолжит applyOlder, когда страница
+  // придёт.
+  if (pinIdx === 0 && olderMore) {
+    pinOlderFrom = list[0];
+    pinOlderPages = 0;
+    if (askOlder()) return;
+    pinOlderFrom = null;
+  }
+  jumpToPin();
 });
 
 function nearEnd() {

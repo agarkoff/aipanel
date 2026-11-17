@@ -980,6 +980,70 @@ try {
   check('закреп теперь считает и ранние', olderAfter.count.endsWith('/ 4'), olderAfter);
   check('кнопка скрылась: ранних больше нет', olderAfter.hidden, olderAfter);
 
+  // ------------------------------------------------------------ закреп и ранние
+  // Нажатие на самый старый закреп догружает ранние сообщения до предыдущего
+  // своего и везёт к нему, а не перескакивает к последнему. Страницу без своих
+  // сообщений панель пропускает и просит следующую.
+
+  const earlyAnswer = [
+    { id: 'o3', ts: now - 198000, role: 'assistant', kind: 'text', text: 'Ранний ответ без вопроса' },
+  ];
+  const earlyQuestion = [
+    { id: 'o4', ts: now - 197000, role: 'user', kind: 'text', text: 'Совсем ранний вопрос' },
+    { id: 'o5', ts: now - 196000, role: 'assistant', kind: 'text', text: 'Ответ рядом' },
+  ];
+
+  await evaluate(`window.__more = true; window.__olderPages = [
+    { items: ${JSON.stringify(earlyAnswer)}, more: true },
+    { items: ${JSON.stringify(earlyQuestion)}, more: false },
+  ]`);
+  await evaluate(`document.getElementById('back').click()`);
+  await waitFor(`!document.getElementById('app').classList.contains('viewing')`);
+  await evaluate(`document.querySelector('#sessions .session').click()`);
+  if (!(await waitFor(`document.querySelectorAll('#feed .item').length === ${items.length}`))) {
+    throw new Error('сессия не открылась заново');
+  }
+
+  // Закреп с последнего своего на первое: 3/3 → 2/3 → 1/3.
+  await evaluate(`document.getElementById('pin').click()`);
+  await sleep(300);
+  await evaluate(`document.getElementById('pin').click()`);
+  await sleep(300);
+  await settleScroll();
+  let earlyPin = await pinState();
+  check('перед догрузкой закреп стоит на самом старом своём', earlyPin.preview === 'Первый вопрос' && earlyPin.count === '1 / 3', earlyPin);
+
+  const askedBefore = await evaluate(`window.__older.length`);
+  await evaluate(`document.getElementById('pin').click()`);
+  const earlyLoaded = await waitFor(
+    `document.querySelectorAll('#feed .item').length === ${items.length + earlyAnswer.length + earlyQuestion.length}`,
+    4000,
+  );
+  const askedAfter = await evaluate(`window.__older.length`);
+  earlyPin = await pinState();
+  check('нажатие на самый старый закреп догрузило ранние', earlyLoaded && askedAfter - askedBefore === 2, { earlyLoaded, askedBefore, askedAfter });
+  check('лента поехала к предыдущему своему сообщению', earlyPin.flash.startsWith('Совсем ранний вопрос'), earlyPin);
+  check('закреп встал на него и считает по-новому', earlyPin.preview === 'Совсем ранний вопрос' && earlyPin.count === '1 / 4', earlyPin);
+
+  await settleScroll();
+  const earlyShown = await evaluate(`(() => {
+    const feed = document.getElementById('feed');
+    const box = feed.getBoundingClientRect();
+    const node = [...feed.querySelectorAll('.item.user')].find((n) => n.textContent.includes('Совсем ранний вопрос'));
+    return {
+      top: node ? Math.round(node.getBoundingClientRect().top) : -1,
+      feedTop: Math.round(box.top),
+      feedBottom: Math.round(box.bottom),
+    };
+  })()`);
+  check('предыдущее своё сообщение в видимой части ленты', earlyShown.top >= earlyShown.feedTop - 1 && earlyShown.top <= earlyShown.feedBottom, earlyShown);
+
+  // Раньше своих больше нет: нажатие снова идёт по кругу к последнему.
+  await evaluate(`document.getElementById('pin').click()`);
+  await sleep(300);
+  earlyPin = await pinState();
+  check('после самого старого закреп снова уходит к последнему', earlyPin.preview === 'Последний вопрос' && earlyPin.count === '4 / 4', earlyPin);
+
   // ------------------------------------------------------------ слэш-команды
   // Список команд в поле ввода: «/» открывает его, ввод фильтрует, стрелки и
   // Enter подставляют команду, а Enter без выбора отправляет набранное.

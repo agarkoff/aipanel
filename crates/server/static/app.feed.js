@@ -576,6 +576,9 @@ function applyHistory(msg) {
     toolCalls.clear();
     resultCalls.clear();
     pendingCalls = [];
+    // Лента собрана заново: ждать догрузку ради нажатия на старый закреп
+    // больше не для чего.
+    pinOlderFrom = null;
     // Агент сказал, есть ли перед этой лентой более ранние сообщения: если их
     // нет, кнопки догрузки не будет вовсе.
     olderMore = msg.more === true;
