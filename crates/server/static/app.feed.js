@@ -452,7 +452,8 @@ function buildItem(item, call) {
     const own = item.id.startsWith('queue:');
     label.append(el('span', '', own ? 'В очереди — ждёт завершения текущего ответа' : 'В очереди — модель прочтёт после текущего шага'));
     if (own) {
-      const cancel = el('button', 'queue-cancel', '×');
+      const cancel = el('button', 'queue-cancel');
+      cancel.append(icon(['M5 5l6 6', 'M11 5l-6 6']));
       cancel.type = 'button';
       cancel.title = 'Убрать из очереди';
       cancel.setAttribute('aria-label', 'Убрать сообщение из очереди');

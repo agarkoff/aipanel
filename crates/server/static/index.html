@@ -30,7 +30,12 @@
       </button>
       <strong>AiPanel</strong>
       <span id="conn" class="conn" title="Соединение с сервером"></span>
-      <button id="new-session" class="new-session" type="button" title="Новая сессия" aria-label="Новая сессия">+</button>
+      <button id="new-session" class="new-session" type="button" title="Новая сессия" aria-label="Новая сессия">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+          <path d="M8 5v6"></path>
+          <path d="M5 8h6"></path>
+        </svg>
+      </button>
       <span id="user" class="who" hidden></span>
       <button id="logout" class="link" type="button">Выйти</button>
     </header>
@@ -218,12 +223,25 @@
     <span id="shot-label" class="shot-label"></span>
     <span id="shot-dots" class="shot-dots"></span>
     <button id="shot-refresh" class="shot-btn" type="button" title="Снять экран заново">Обновить</button>
-    <button id="shot-close" class="shot-btn shot-x" type="button" aria-label="Закрыть снимок" title="Закрыть">×</button>
+    <button id="shot-close" class="shot-btn shot-x" type="button" aria-label="Закрыть снимок" title="Закрыть">
+      <svg viewBox="0 0 16 16" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+        <path d="M5 5l6 6"></path>
+        <path d="M11 5l-6 6"></path>
+      </svg>
+    </button>
   </div>
   <div id="shot-stage" class="shot-stage">
     <div id="shot-strip" class="shot-strip"></div>
-    <button id="shot-prev" class="shot-nav prev" type="button" aria-label="Предыдущий экран" title="Предыдущий экран" hidden>‹</button>
-    <button id="shot-next" class="shot-nav next" type="button" aria-label="Следующий экран" title="Следующий экран" hidden>›</button>
+    <button id="shot-prev" class="shot-nav prev" type="button" aria-label="Предыдущий экран" title="Предыдущий экран" hidden>
+      <svg viewBox="0 0 16 16" width="24" height="24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M10.25 3.5 5.75 8l4.5 4.5"></path>
+      </svg>
+    </button>
+    <button id="shot-next" class="shot-nav next" type="button" aria-label="Следующий экран" title="Следующий экран" hidden>
+      <svg viewBox="0 0 16 16" width="24" height="24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M5.75 3.5 10.25 8l-4.5 4.5"></path>
+      </svg>
+    </button>
   </div>
   <p id="shot-hint" class="shot-hint"></p>
 </dialog>

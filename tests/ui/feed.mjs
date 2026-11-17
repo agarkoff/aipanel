@@ -382,6 +382,44 @@ function check(name, ok, details) {
   if (!ok) failures.push(name);
 }
 
+// Где стоит рисунок значка относительно центра кнопки. Значок обязан быть SVG:
+// текстовый символ («+», «×») ставится по метрикам шрифта, а не по центру, и на
+// другом шрифте съезжает иначе — по одному шрифту эту разницу и не поймать.
+async function iconOffsets(selectors) {
+  return evaluate(`(() => {
+    const out = {};
+    for (const sel of ${JSON.stringify(selectors)}) {
+      const el = document.querySelector(sel);
+      const svg = el && el.querySelector('svg');
+      if (!svg) {
+        out[sel] = el ? { text: el.textContent.trim() } : null;
+        continue;
+      }
+      const box = el.getBoundingClientRect();
+      const b = svg.getBBox();
+      const m = svg.getScreenCTM();
+      out[sel] = {
+        cx: box.left + box.width / 2,
+        cy: box.top + box.height / 2,
+        x: m.a * (b.x + b.width / 2) + m.e,
+        y: m.d * (b.y + b.height / 2) + m.f,
+      };
+    }
+    return out;
+  })()`);
+}
+
+function checkIcons(offsets) {
+  for (const [sel, m] of Object.entries(offsets)) {
+    if (!m) check(`значок ${sel} нарисован`, false, 'кнопки нет');
+    else if (m.text !== undefined) check(`значок ${sel} нарисован, а не набран шрифтом`, false, m);
+    else {
+      const off = { x: +(m.x - m.cx).toFixed(2), y: +(m.y - m.cy).toFixed(2) };
+      check(`значок ${sel} стоит по центру кнопки`, Math.abs(off.x) <= 0.5 && Math.abs(off.y) <= 0.5, off);
+    }
+  }
+}
+
 try {
   await send('Page.enable');
   await send('Runtime.enable');
@@ -396,6 +434,9 @@ try {
   if (!(await waitFor(`document.querySelectorAll('#sessions .session').length === 1`))) {
     throw new Error('сессия не появилась в списке');
   }
+  // Регрессия: «+», «×» закрытия консоли и «×» удаления раньше были текстовыми
+  // символами и висели ниже центра кружка на 1–2 px (на телефоне — иначе).
+  checkIcons(await iconOffsets(['#new-session', '.session-close', '.session-delete']));
   // Раньше этих сообщений в сессии ничего нет: агент пришлёт ленту без more.
   await evaluate(`window.__more = false`);
   await evaluate(`document.querySelector('#sessions .session').click()`);
@@ -1801,6 +1842,7 @@ try {
     shotFlow.second.label === 'Экран 2 · 2560×1440' && !shotFlow.second.prev && shotFlow.second.next &&
       shotFlow.second.active === 1 && shotFlow.second.shift === 'translateX(-100%)', shotFlow.second);
   check('значок: стрелка влево с клавиатуры возвращает назад', shotFlow.back === shotFlow.first.label, shotFlow);
+  checkIcons(await iconOffsets(['#shot-close', '#shot-next']));
 
   // Свайп влево по снимку — следующий экран.
   const stageBox = await evaluate(`(() => {
@@ -1816,6 +1858,7 @@ try {
   await sleep(80);
   const swipeLabel = await evaluate(`document.getElementById('shot-label').textContent`);
   check('значок: свайп влево листает экраны', swipeLabel === 'Экран 2 · 2560×1440', swipeLabel);
+  checkIcons(await iconOffsets(['#shot-prev']));
 
   // Щипок двумя пальцами приближает снимок, приближённый кадр двигается одним
   // пальцем, а соседний экран снова показывается целиком. Картинка нужна
@@ -1934,6 +1977,20 @@ try {
   check('значок: без сессии и двух компьютерах — выбор компьютера',
     shotPicker.open && shotPicker.names.includes('ui-test') && shotPicker.names.includes('laptop'), shotPicker);
   check('значок: выбранный компьютер снимает экран', shotPicker.asked === 'ui-test' && shotPicker.shotOpen, shotPicker);
+
+  // Сообщение в очереди: открываем сессию и показываем его, чтобы проверить
+  // крестик снятия (до этого тест работал со списком сессий).
+  await evaluate(`document.querySelector('#sessions .session').click()`);
+  if (!(await waitFor(`document.querySelectorAll('#feed .item').length === ${items.length}`))) {
+    throw new Error(`в ленте не ${items.length} элементов`);
+  }
+  await evaluate(`window.__sock.emit({ t: 'history', agent: 'ui-test', session: ${JSON.stringify(session.key)}, reset: true,
+    items: [{ id: 'queue:1', ts: Date.now(), role: 'assistant', kind: 'queued', text: 'ждёт ответа' }] })`);
+  if (await waitFor(`document.querySelectorAll('.queue-cancel').length === 1`)) {
+    checkIcons(await iconOffsets(['.queue-cancel']));
+  } else {
+    check('очередь: сообщение в очереди показано', false);
+  }
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

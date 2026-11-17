@@ -91,7 +91,8 @@ function renderSessions() {
       });
 
       // На компьютере сессия удаляется крестиком, на телефоне — смахиванием влево.
-      const del = el('button', 'session-delete', '×');
+      const del = el('button', 'session-delete');
+      del.append(icon(['M5 5l6 6', 'M11 5l-6 6']));
       del.type = 'button';
       del.title = 'Удалить сессию';
       del.setAttribute('aria-label', 'Удалить сессию');
