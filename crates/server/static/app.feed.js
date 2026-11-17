@@ -338,9 +338,12 @@ function diffDetails(text) {
 function mdOptions() {
   const cur = selected;
   if (!cur) return {};
+  const agent = agents.find((a) => a.name === cur.agent);
   return {
     localImage: (path) =>
       `/api/image?${new URLSearchParams({ agent: cur.agent, session: cur.session, path })}`,
+    // На Windows путь с ведущим `/` (`/icon.svg`) — это путь сайта, а не файла.
+    windows: !!agent && agent.os === 'windows',
   };
 }
 

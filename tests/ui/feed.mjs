@@ -1636,6 +1636,35 @@ try {
   );
   check('без картинок под инструментом ничего не добавляется', tool.none, tool);
 
+  // Строже на Windows: `/icon.svg` — путь сайта, а не файла; имя без каталога в
+  // листинге — не ссылка. Путь целиком (JSON-аргумент) и путь с каталогом — ссылки.
+  const strict = await evaluate(`(() => {
+    const localImage = (p) => '/api/image?' + new URLSearchParams({ agent: 'ui-test', session: 's1', path: p });
+    const opts = { windows: true, localImage };
+    const paths = (box) => box ? [...box.querySelectorAll('a.img-link')].map((a) =>
+      new URL(a.href).searchParams.get('path')) : null;
+    const prose = document.createElement('div');
+    prose.append(renderMarkdown('Сайт: /icon.svg, файл: docs/screen-feed.png, имя: shot.png.', opts));
+    const listing = renderMarkdown.imageLinks(
+      'docs:\\nscreen-feed.png\\nicon.svg\\nC:\\\\tmp\\\\shot.png', opts);
+    const arg = renderMarkdown.imageLinks(JSON.stringify({ file_path: 'aipanel-sessions.png' }), opts);
+    const linux = document.createElement('div');
+    linux.append(renderMarkdown('/icon.svg', { localImage }));
+    return { prose: paths(prose), listing: paths(listing), arg: paths(arg), linux: paths(linux) };
+  })()`);
+  check(
+    'на Windows сайтовый путь и имя без каталога не ссылки',
+    JSON.stringify(strict.prose) === JSON.stringify(['docs/screen-feed.png']),
+    strict,
+  );
+  check(
+    'в листинге ссылка только на путь с каталогом',
+    JSON.stringify(strict.listing) === JSON.stringify(['C:\\tmp\\shot.png']),
+    strict,
+  );
+  check('путь целиком из аргумента инструмента — ссылка', JSON.stringify(strict.arg) === JSON.stringify(['aipanel-sessions.png']), strict);
+  check('на Linux путь с ведущим / по-прежнему ссылка', JSON.stringify(strict.linux) === JSON.stringify(['/icon.svg']), strict);
+
   const toolItem = await evaluate(`(() => {
     const node = buildItem({ id: 'img-tool', ts: 0, role: 'assistant', kind: 'tool_use', tool: 'Read',
       text: JSON.stringify({ file_path: 'D:\\\\tmp\\\\shot.png' }) }, null);

@@ -42,11 +42,20 @@ const renderMarkdown = (() => {
 
   // Адрес картинки с машины агента; задаётся на время одного вызова renderMarkdown.
   let localImage = null;
+  // Агент на Windows: путь с одним ведущим `/` (`/icon.svg`) — это путь сайта,
+  // а не файла на машине. Абсолютные пути там начинаются с буквы диска.
+  let windowsAgent = false;
   // С пробелами — только явный путь (`C:\My Pictures\a.png`), иначе
   // `convert a.png b.png` из команды стал бы одним «путём».
   const RE_EXPLICIT_PATH = /^(?:file:\/\/\/?)?(?:[A-Za-z]:[\\/]|\/|~[\\/]|\.{1,2}[\\/])/;
+  const RE_WEB_ROOT = /^\/(?![A-Za-z]\/)/;
   const isLocalPath = (s) => !!localImage && !/^[a-z][a-z0-9+.-]+:\/\//i.test(s.replace(/^file:/i, '')) &&
-    RE_LOCAL_PATH.test(s) && (!/\s/.test(s) || RE_EXPLICIT_PATH.test(s));
+    RE_LOCAL_PATH.test(s) && (!/\s/.test(s) || RE_EXPLICIT_PATH.test(s)) &&
+    !(windowsAgent && RE_WEB_ROOT.test(s));
+  // Путь с каталогом. Имя без каталога — не ссылка: иначе каждая строка
+  // листинга (`ls`, `git status`) и вывод сборки становятся ссылкой в никуда.
+  // Исключение — явная ссылка или путь целиком, их проверяют отдельно.
+  const isPathWithDir = (s) => RE_EXPLICIT_PATH.test(s) || /[\\/]/.test(s);
 
   // Путь к картинке становится ссылкой-переключателем на /api/image.
   function localLink(content, path) {
@@ -167,7 +176,7 @@ const renderMarkdown = (() => {
       else if (m[9] !== undefined) parent.append(link(m[9], m[10]));
       else if (m[11] !== undefined) parent.append(link(m[11], m[11]));
       else if (m[13] !== undefined) parent.append(imageLink(m[12], m[13]));
-      else if (m[14] !== undefined) parent.append(localImage ? localLink(m[14], m[14]) : m[14]);
+      else if (m[14] !== undefined) parent.append(isLocalPath(m[14]) && isPathWithDir(m[14]) ? localLink(m[14], m[14]) : m[14]);
     }
     if (last < text.length) parent.append(text.slice(last));
   }
@@ -346,10 +355,12 @@ const renderMarkdown = (() => {
   const render = (text, opts = {}) => {
     const root = document.createDocumentFragment();
     localImage = typeof opts.localImage === 'function' ? opts.localImage : null;
+    windowsAgent = !!opts.windows;
     try {
       blocks(text.replace(/\r\n?/g, '\n').split('\n'), root);
     } finally {
       localImage = null;
+      windowsAgent = false;
     }
     return root;
   };
@@ -381,6 +392,7 @@ const renderMarkdown = (() => {
   render.imageLinks = (text, opts = {}) => {
     if (!text || !/\.(png|jpe?g|gif|webp|avif|bmp|svg|ico)\b/i.test(text)) return null;
     localImage = typeof opts.localImage === 'function' ? opts.localImage : null;
+    windowsAgent = !!opts.windows;
     try {
       const found = new Map(); // путь или адрес -> 'url' | 'path'
       for (const s of toolStrings(text)) {
@@ -391,7 +403,7 @@ const renderMarkdown = (() => {
         }
         for (const m of s.matchAll(FIND_IMAGES)) {
           if (m[1] !== undefined && isImageUrl(m[1])) found.set(m[1], 'url');
-          else if (m[2] !== undefined && localImage) found.set(m[2], 'path');
+          else if (m[2] !== undefined && isLocalPath(m[2]) && isPathWithDir(m[2])) found.set(m[2], 'path');
           if (found.size >= MAX_TOOL_IMAGES) break;
         }
         if (found.size >= MAX_TOOL_IMAGES) break;
@@ -408,6 +420,7 @@ const renderMarkdown = (() => {
       return box;
     } finally {
       localImage = null;
+      windowsAgent = false;
     }
   };
 
