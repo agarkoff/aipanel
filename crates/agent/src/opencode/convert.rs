@@ -366,6 +366,13 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
             push("0".into(), "assistant", "tool_use", m["command"].as_str().unwrap_or_default().to_owned(), Some("shell".into()));
             push("0:r".into(), "tool", "tool_result", truncate(&content_text(&m["output"]), RESULT_LIMIT), None);
         }
+        // Сессия переехала в другой каталог (обычно — в созданный ею worktree):
+        // opencode меняет её `location.directory`, и без отметки в ленте панель
+        // просто начинает показывать другой путь.
+        Some("location-switched") => {
+            let to = m["location"]["directory"].as_str().unwrap_or_default();
+            push("0".into(), "system", "cwd", to.to_owned(), None);
+        }
         // Сообщение типа idle повторяет ошибку предыдущего ответа, поэтому не показывается.
         _ => {}
     }

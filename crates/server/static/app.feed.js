@@ -54,6 +54,7 @@ function renderHeader() {
     titleEl.tabIndex = -1;
     $('rename').hidden = true;
     $('subtitle').textContent = '';
+    $('subtitle').removeAttribute('title');
     $('session-id').hidden = true;
     $('copy-id').hidden = true;
     badge.hidden = true;
@@ -78,7 +79,8 @@ function renderHeader() {
   // сети правка не отправится, поэтому кнопка неактивна.
   $('rename').hidden = Boolean(editing);
   $('rename').disabled = !agent.online;
-  $('subtitle').textContent = `${agent.name} · ${session.tool} · ${session.cwd}`;
+  $('subtitle').textContent = `${agent.name} · ${session.tool} · ${placeFull(session)}`;
+  $('subtitle').title = placeHint(session);
   $('session-id').hidden = false;
   $('session-id').textContent = sessionId(session.key);
   $('copy-id').hidden = false;
@@ -476,6 +478,13 @@ function buildItem(item, call) {
     details.append(el('summary', noticeFailed(item.text) ? 'failed' : '', noticeLabel(item.text)), body);
     highlightOnOpen(details, body, () => Highlight.fragment(item.text, 'xml'));
     node.append(details);
+  } else if (item.kind === 'cwd') {
+    // Сессия сменила каталог (вошла в worktree или вышла из него): с этого
+    // места команды выполняются уже там.
+    const line = el('div', 'cwd-switch');
+    line.append(el('span', 'cwd-label', 'Каталог сменился →'), el('code', 'cwd-path', item.text));
+    line.title = item.text;
+    node.append(line);
   } else if (item.kind === 'diff') {
     node.append(diffDetails(item.text));
   } else {

@@ -12,6 +12,7 @@ mod image;
 mod install;
 mod opencode;
 mod platform;
+mod repo;
 mod screen;
 mod status;
 mod util;
@@ -449,6 +450,9 @@ async fn scanner(agent: Arc<Agent>) {
                 if backend.enabled() {
                     list.extend(backend.scan().await);
                 }
+            }
+            for s in &mut list {
+                s.repo = repo::info(&s.cwd);
             }
             list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             agent.sessions.store(list.len(), Ordering::Relaxed);

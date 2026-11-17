@@ -26,6 +26,30 @@ pub struct SessionInfo {
     /// Токены текущего хода по данным транскрипта; нет, если их нечем подтвердить.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<TurnUsage>,
+    /// Git-репозиторий, в котором лежит `cwd`; нет — обычный каталог.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<RepoInfo>,
+}
+
+/// Репозиторий каталога сессии. Панель показывает его вместо пути: worktree
+/// (`.claude/worktrees/…`, `~/.local/share/opencode/worktree/…`) иначе выглядит
+/// как посторонний каталог.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct RepoInfo {
+    /// Короткое имя: последний сегмент адреса `origin`, без него — имя основного каталога.
+    pub name: String,
+    /// Адрес `origin` без схемы, логина и `.git`: `git.example.ru/owner/repo`. Пусто, если удалённого нет.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Ветка; у отсоединённого HEAD — короткий хеш.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+    /// Каталог — дополнительный worktree, а не основная рабочая копия.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub worktree: bool,
+    /// Основная рабочая копия репозитория.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub root: String,
 }
 
 /// Что транскрипт сообщает о текущем ходе: от последнего запроса пользователя
@@ -55,7 +79,8 @@ pub struct Item {
     pub ts: i64,
     /// `user`, `assistant`, `system`.
     pub role: String,
-    /// `text`, `thinking`, `tool_use`, `tool_result`, `diff`, `error`.
+    /// `text`, `thinking`, `tool_use`, `tool_result`, `diff`, `error`;
+    /// `cwd` — сессия перешла в другой каталог (`text` — новый путь).
     pub kind: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

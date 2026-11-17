@@ -36,6 +36,35 @@ const icon = (paths) => {
   return svg;
 };
 
+// Где работает сессия. Путь сам по себе путает: агент может перевести сессию в
+// worktree (`.claude/worktrees/…`, `~/.local/share/opencode/worktree/…`), и она
+// выглядит как чужой каталог. Поэтому для git-каталога показываем репозиторий
+// и ветку, а путь — в подсказке; для обычного каталога — его имя.
+const baseName = (path) => String(path || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(path || '');
+
+// Коротко, для списка сессий: `ai-panel ⎇ refactor-master` или `Баланс`.
+function placeLabel(s) {
+  const r = s.repo;
+  if (!r) return baseName(s.cwd);
+  return r.branch ? `${r.name} ⎇ ${r.branch}` : r.name;
+}
+
+// Полностью, для шапки сессии: адрес репозитория вместо имени.
+function placeFull(s) {
+  const r = s.repo;
+  if (!r) return s.cwd || '';
+  const where = r.url || r.root || r.name;
+  return r.branch ? `${where} ⎇ ${r.branch}` : where;
+}
+
+// Подсказка: настоящий каталог и, для worktree, основная копия.
+function placeHint(s) {
+  const r = s.repo;
+  const lines = [s.cwd || ''];
+  if (r && r.worktree) lines.push(`worktree репозитория ${r.root || r.name}`);
+  return lines.filter(Boolean).join('\n');
+}
+
 const STATUS = {
   busy: 'работает',
   idle: 'ждёт ввода',

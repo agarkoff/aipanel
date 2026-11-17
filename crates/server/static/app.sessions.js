@@ -38,7 +38,11 @@ function renderSessions() {
     const head = el('div', 'agent');
     head.append(el('span', a.online ? 'dot idle' : 'dot'), el('span', '', `${a.name}${a.online ? '' : ' — не в сети'}`));
     box.append(head);
-    const list = a.sessions.filter((s) => !q || `${s.title} ${s.cwd}`.toLowerCase().includes(q));
+    const list = a.sessions.filter((s) => {
+      if (!q) return true;
+      const r = s.repo || {};
+      return `${s.title} ${s.cwd} ${r.name || ''} ${r.url || ''} ${r.branch || ''}`.toLowerCase().includes(q);
+    });
     if (!list.length) box.append(el('div', 'empty', 'Сессий нет.'));
     for (const s of list) {
       const row = el('div', 'session-row');
@@ -61,11 +65,13 @@ function renderSessions() {
           startRename('list', a, s, row);
         });
       }
+      const meta = el('span', 'meta', `${s.tool} · ${placeLabel(s)}`);
+      meta.title = placeHint(s);
       btn.append(
         el('span', dotClass(s, a.online)),
         name,
         el('span', 'when', ago(s.updated_at)),
-        el('span', 'meta', `${s.tool} · ${s.cwd}`),
+        meta,
       );
       btn.addEventListener('click', () => select(a.name, s.key));
 

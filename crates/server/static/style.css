@@ -647,6 +647,18 @@ input, textarea, select {
 /* Задача завершилась неуспешно (failed, killed): строка красная. */
 .item.notice summary.failed { color: var(--wait); }
 .item.pending .body { opacity: .6; }
+/* Смена каталога сессии: разделитель с путём, длинный путь переносится. */
+.cwd-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+  padding: 4px 10px;
+  border-left: 3px solid var(--muted);
+  color: var(--muted);
+  font-size: 13px;
+}
+.cwd-switch .cwd-path { color: var(--text); overflow-wrap: anywhere; }
 .item details {
   background: var(--tool);
   border-radius: 6px;

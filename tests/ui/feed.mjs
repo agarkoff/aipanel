@@ -1707,6 +1707,34 @@ try {
   check('строка хода: нет данных агента — строки нет', turnLine.noData === null, turnLine);
   check('строка хода: сессия не работает — строки нет', turnLine.idle === null, turnLine);
 
+  // Каталог сессии: для git — репозиторий и ветка, путь — в подсказке.
+  const place = await evaluate(`(() => {
+    const load = (patch) => window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test',
+      sessions: [{ ...window.__session, ...patch }] }] });
+    const meta = () => document.querySelector('#sessions .session .meta');
+    load({ cwd: 'C:\\\\wt\\\\refactor-split', repo: { name: 'ai-panel', url: 'git.example.ru/root/ai-panel', branch: 'refactor-master', worktree: true, root: 'D:\\\\Projects\\\\demo' } });
+    document.querySelector('#sessions .session').click();
+    const out = {
+      list: meta().textContent,
+      listTip: meta().title,
+      sub: document.getElementById('subtitle').textContent,
+      subTip: document.getElementById('subtitle').title,
+    };
+    load({ cwd: 'D:\\\\Записная книжка\\\\Баланс' });
+    out.plain = meta().textContent;
+    const node = buildItem({ id: 'x:cwd', ts: 1, role: 'system', kind: 'cwd', text: 'C:\\\\wt\\\\refactor-split' }, null);
+    out.mark = node.textContent;
+    out.markClass = node.querySelector('.cwd-switch') !== null;
+    load({});
+    return out;
+  })()`);
+  check('каталог: в списке репозиторий и ветка', place.list === 'opencode · ai-panel ⎇ refactor-master', place);
+  check('каталог: путь и основная копия — в подсказке',
+    place.listTip.includes('C:\\wt\\refactor-split') && place.listTip.includes('worktree репозитория D:\\Projects\\demo'), place);
+  check('каталог: в шапке адрес репозитория', place.sub.endsWith('git.example.ru/root/ai-panel ⎇ refactor-master') && place.subTip.includes('refactor-split'), place);
+  check('каталог: без git — имя папки', place.plain === 'opencode · Баланс', place);
+  check('лента: отметка о смене каталога', place.markClass && place.mark.includes('Каталог сменился') && place.mark.includes('refactor-split'), place);
+
   // Значок панели в шапке: снимок экрана машины агента поверх панели. Агент
   // отдаёт два экрана — панель показывает первый, остальные листаются.
   const shotPng =

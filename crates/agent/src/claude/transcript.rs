@@ -550,6 +550,32 @@ pub(super) fn parse_line(line: &str, out: &mut Vec<Item>) {
         }
         _ => {}
     }
+    if role == "user" {
+        push_cwd_switch(&v, uuid, ts, out);
+    }
+}
+
+/// Отметка о смене каталога сессии: EnterWorktree переводит Claude Code в
+/// `<репозиторий>/.claude/worktrees/<имя>`, ExitWorktree возвращает обратно.
+/// Сам вызов в ленте и так виден, но строкой инструмента; отметка — явная.
+///
+/// Результат EnterWorktree: `toolUseResult` с `worktreePath` (проверено на
+/// транскриптах). Результат ExitWorktree узнаём по `originalCwd` — куда вернулись.
+pub(super) fn push_cwd_switch(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item>) {
+    let r = &v["toolUseResult"];
+    let to = match (r["originalCwd"].as_str(), r["worktreePath"].as_str()) {
+        (Some(back), _) if !back.is_empty() => back,
+        (None, Some(wt)) if !wt.is_empty() => wt,
+        _ => return,
+    };
+    out.push(Item {
+        id: format!("{uuid}:cwd"),
+        ts,
+        role: "system".into(),
+        kind: "cwd".into(),
+        text: to.to_owned(),
+        tool: None,
+    });
 }
 
 /// Сообщение из очереди, вставленное Claude Code в текущий ход. Отдельной строки

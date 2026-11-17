@@ -406,6 +406,7 @@ impl OpenCode {
                 delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
                 model: session_model(&s["model"]),
                 turn,
+                repo: None,
             });
         }
         out
@@ -1341,6 +1342,19 @@ mod tests {
         assert_eq!(session_model(&json!({"id":"m","providerID":"p","variant":"default"})), "p/m");
         assert_eq!(session_model(&json!({"id":"m"})), "m");
         assert_eq!(session_model(&Value::Null), "");
+    }
+
+    #[test]
+    fn location_switch_becomes_cwd_mark() {
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m9","type":"location-switched","time":{"created":9},
+                "location":{"directory":"C:\\wt\\refactor-split"},
+                "previous":{"location":{"directory":"D:\\Projects\\demo"}}}),
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.role.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(got, [("m9:0", "system", "cwd", "C:\\wt\\refactor-split")]);
     }
 
     #[test]

@@ -276,7 +276,7 @@ impl Claude {
                         }
                     }
                 }
-                let cwd = v["cwd"].as_str().unwrap_or_default().to_owned();
+                let cwd = live_cwd(v["cwd"].as_str().unwrap_or_default(), meta.cwd.as_deref());
                 let name = v["name"].as_str().unwrap_or(sid);
                 out.push(SessionInfo {
                     key: format!("claude:{sid}"),
@@ -289,6 +289,7 @@ impl Claude {
                     delivery: if cfg!(windows) { "console" } else { "none" }.into(),
                     model: meta.model.unwrap_or_default(),
                     turn,
+                    repo: None,
                 });
                 known.insert(sid.to_owned(), Known { pid: Some(pid), cwd, path: transcript, status });
             }
@@ -343,6 +344,7 @@ impl Claude {
                 .into(),
                 model: meta.model.unwrap_or_default(),
                 turn,
+                repo: None,
             });
             known.insert(sid, Known { pid: None, cwd, path: Some(path), status: String::new() });
         }
@@ -949,6 +951,15 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("version", "Print the version this session is running"),
 ];
 
+/// Каталог, в котором открытая сессия работает сейчас. В файле процесса
+/// (`~/.claude/sessions/<pid>.json`) — каталог запуска, а после EnterWorktree
+/// сессия работает в worktree, и это знает только транскрипт (последний `cwd`).
+/// Тот же каталог показывается в панели и берётся для «Передать сессию»;
+/// каталог запуска — только если в транскрипте каталога ещё нет.
+fn live_cwd(process: &str, transcript: Option<&str>) -> String {
+    transcript.filter(|c| !c.is_empty()).unwrap_or(process).to_owned()
+}
+
 /// Команды для сессии в каталоге `cwd`: встроенные, пользовательские из
 /// `~/.claude/commands` и `<cwd>/.claude/commands`, затем навыки из `skills`.
 fn commands_for(home: &Path, cwd: &str) -> Vec<Command> {
@@ -1314,6 +1325,40 @@ mod tests {
         assert_eq!(names, sorted);
         assert_eq!(names.iter().filter(|n| *n == "review").count(), 1);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn live_session_uses_current_cwd() {
+        // Вошла в worktree: и показ, и передача — из worktree.
+        assert_eq!(live_cwd("D:\\p", Some("D:\\p\\.claude\\worktrees\\opt")), "D:\\p\\.claude\\worktrees\\opt");
+        // Транскрипта ещё нет или в нём нет каталога — каталог запуска.
+        assert_eq!(live_cwd("D:\\p", None), "D:\\p");
+        assert_eq!(live_cwd("D:\\p", Some("")), "D:\\p");
+    }
+
+    #[test]
+    fn enter_worktree_result_marks_cwd_switch() {
+        let mut items = Vec::new();
+        // Строка из настоящего транскрипта (сокращена): результат EnterWorktree.
+        parse_line(
+            r#"{"parentUuid":"p","isSidechain":false,"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"Created worktree at D:\\p\\.claude\\worktrees\\opt","tool_use_id":"t1"}]},"uuid":"u1","timestamp":"2026-10-28T22:06:20.000Z","toolUseResult":{"worktreePath":"D:\\p\\.claude\\worktrees\\opt","worktreeBranch":"worktree-opt","message":"Created worktree"},"cwd":"D:\\p"}"#,
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str())).collect();
+        assert_eq!(got.last(), Some(&("u1:cwd", "cwd", "D:\\p\\.claude\\worktrees\\opt")));
+        items.clear();
+        parse_line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok","tool_use_id":"t2"}]},"uuid":"u2","timestamp":"2026-10-28T23:00:00.000Z","toolUseResult":{"originalCwd":"D:\\p","worktreePath":"D:\\p\\.claude\\worktrees\\opt"}}"#,
+            &mut items,
+        );
+        assert_eq!(items.last().map(|i| (i.kind.as_str(), i.text.as_str())), Some(("cwd", "D:\\p")));
+        items.clear();
+        // Обычный результат инструмента отметки не даёт.
+        parse_line(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x","tool_use_id":"t3"}]},"uuid":"u3","toolUseResult":{"stdout":"x"}}"#,
+            &mut items,
+        );
+        assert!(items.iter().all(|i| i.kind != "cwd"));
     }
 
     #[test]
