@@ -1,0 +1,439 @@
+//! Подключение браузера: команды панели уходят агенту, ответы агента
+//! возвращаются тому браузеру, который их ждёт.
+
+use std::{sync::Arc, time::Instant};
+
+use aipanel_proto::{ServerMsg, MAX_FAVORITE_TEXT, MAX_ITEM_ID};
+use axum::{
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
+use serde_json::json;
+use tokio::sync::mpsc;
+
+use crate::{
+    auth::origin_ok,
+    ws_agent::safe_id,
+    App, BrowserEntry, Inner, Pending, DEAD_AFTER, PING_EVERY,
+};
+
+pub(crate) const MAX_TEXT: usize = 200_000;
+pub(crate) const MAX_PROMPTS: usize = 50;
+pub(crate) const MAX_COMMANDS: usize = 200;
+pub(crate) const MAX_MODELS: usize = 600;
+pub(crate) const MAX_DIRS: usize = 2000;
+pub(crate) const MAX_ANSWER: usize = 64_000;
+// ---------------------------------------------------------------- браузер
+
+#[derive(Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub(crate) enum BrowserMsg {
+    Watch { agent: String, session: String },
+    Unwatch,
+    /// Догрузить более ранние сообщения ленты: агент ответит `older`.
+    Older { agent: String, session: String },
+    Send { id: String, agent: String, session: String, text: String },
+    Interrupt { id: String, agent: String, session: String },
+    Start {
+        id: String,
+        agent: String,
+        tool: String,
+        cwd: String,
+        #[serde(default)]
+        model: String,
+        /// Разрешение создать каталог, которого ещё нет на машине агента.
+        #[serde(default)]
+        create: bool,
+    },
+    Handoff { id: String, agent: String, session: String, tool: String },
+    CancelQueued { id: String, agent: String, session: String, queue: String },
+    Delete {
+        id: String,
+        agent: String,
+        session: String,
+        #[serde(default)]
+        close: bool,
+    },
+    /// Закрыть окно консоли сессии, ничего не удаляя.
+    Close { id: String, agent: String, session: String },
+    /// Переименовать сессию: имя меняется у самого инструмента, а не только в панели.
+    Rename { id: String, agent: String, session: String, title: String },
+    /// Попросить у агента команды сессии для списка, который открывается по `/`.
+    Commands { agent: String, session: String },
+    /// Попросить у агента модели для окна «Новая сессия».
+    ToolModels { id: String, agent: String, tool: String, cwd: String },
+    /// Попросить у агента содержимое каталога для окна «Новая сессия».
+    /// Пустой `path` — корни дерева.
+    Dirs { id: String, agent: String, path: String },
+    /// Попросить у агента модели сессии для окна выбора в `/models`.
+    Models { agent: String, session: String },
+    /// Переключить сессию на модель `provider`/`model`.
+    SetModel { id: String, agent: String, session: String, provider: String, model: String },
+    PromptReply {
+        id: String,
+        agent: String,
+        session: String,
+        prompt: String,
+        kind: String,
+        #[serde(default)]
+        decision: String,
+        #[serde(default)]
+        answer: serde_json::Value,
+        #[serde(default)]
+        message: String,
+        #[serde(default)]
+        cancel: bool,
+    },
+    /// Снять экраны машины агента: в ответ придут `screen` на каждый экран и
+    /// `screens` в конце.
+    Screens { id: String, agent: String },
+    /// Попросить у агента избранные сообщения сессии: они хранятся у него.
+    Favorites { agent: String, session: String },
+    /// Добавить сообщение `item` в избранное сессии (`on`) или убрать оттуда.
+    Favorite {
+        agent: String,
+        session: String,
+        item: String,
+        on: bool,
+        #[serde(default)]
+        ts: i64,
+        role: String,
+        #[serde(default)]
+        text: String,
+    },
+}
+
+pub(crate) async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
+    let Some(owner) = app.authed(&headers) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if !origin_ok(&headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    ws.max_message_size(1 << 20)
+        .on_upgrade(move |socket| browser_conn(app, owner, socket))
+}
+
+pub(crate) async fn browser_conn(app: Arc<App>, owner: String, socket: WebSocket) {
+    let (mut sink, mut stream) = socket.split();
+    let (tx, mut rx) = mpsc::channel::<String>(512);
+    let id = {
+        let mut inner = app.lock();
+        let id = inner.id();
+        let _ = tx.try_send(inner.agents_json(&owner));
+        inner.browsers.insert(id, BrowserEntry { tx, owner, watching: None });
+        id
+    };
+
+    let mut ping = tokio::time::interval(PING_EVERY);
+    let mut last_rx = Instant::now();
+    loop {
+        tokio::select! {
+            m = stream.next() => match m {
+                Some(Ok(Message::Text(t))) => {
+                    last_rx = Instant::now();
+                    if let Ok(msg) = serde_json::from_str::<BrowserMsg>(t.as_str()) {
+                        on_browser_msg(&app, id, msg);
+                    }
+                }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                Some(Ok(_)) => last_rx = Instant::now(),
+            },
+            m = rx.recv() => match m {
+                Some(text) => {
+                    if sink.send(Message::Text(text.into())).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            _ = ping.tick() => {
+                if last_rx.elapsed() > DEAD_AFTER || sink.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut inner = app.lock();
+    inner.unwatch(id);
+    inner.browsers.remove(&id);
+    inner.pending.retain(|_, p| p.browser != id);
+}
+
+pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
+    let mut inner = app.lock();
+    match msg {
+        BrowserMsg::Watch { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            inner.unwatch(browser);
+            if let Some(b) = inner.browsers.get_mut(&browser) {
+                b.watching = Some((agent.clone(), session.clone()));
+            }
+            // Отправляем всегда: агент в ответ пришлёт свежую ленту целиком.
+            inner.to_agent(&owner, &agent, ServerMsg::Watch { session });
+        }
+        BrowserMsg::Unwatch => inner.unwatch(browser),
+        BrowserMsg::Older { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Старые сообщения одинаковы для всех, кто смотрит сессию: ответ
+            // агента уходит всем наблюдателям, как и лента.
+            inner.to_agent(&owner, &agent, ServerMsg::Older { session });
+        }
+        BrowserMsg::Commands { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Ответ агент присылает всем, кто смотрит эту сессию: список общий.
+            inner.to_agent(&owner, &agent, ServerMsg::Commands { session });
+        }
+        BrowserMsg::Models { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            inner.to_agent(&owner, &agent, ServerMsg::Models { session });
+        }
+        BrowserMsg::SetModel { id, agent, session, provider, model } => {
+            let provider = provider.trim().to_owned();
+            let model = model.trim().to_owned();
+            if provider.is_empty() || model.is_empty() || provider.len() > 200 || model.len() > 200 {
+                reply(&inner, browser, &id, "некорректная модель");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::SetModel { id: cmd, session, provider, model },
+            );
+        }
+        BrowserMsg::Send { id, agent, session, text } => {
+            if text.trim().is_empty() || text.len() > MAX_TEXT {
+                reply(&inner, browser, &id, "пустое или слишком длинное сообщение");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Send { id: cmd, session, text });
+        }
+        BrowserMsg::Interrupt { id, agent, session } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Interrupt { id: cmd, session });
+        }
+        BrowserMsg::Start { id, agent, tool, cwd, model, create } => {
+            let cwd = cwd.trim().to_owned();
+            if !matches!(tool.as_str(), "claude" | "opencode") {
+                reply(&inner, browser, &id, "неизвестный тип сессии");
+                return;
+            }
+            if cwd.is_empty() || cwd.len() > 4096 || cwd.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректный каталог");
+                return;
+            }
+            let model = model.trim().to_owned();
+            if model.len() > 200 || model.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректная модель");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::Start { id: cmd, tool, cwd, model, create },
+            );
+        }
+        BrowserMsg::ToolModels { id, agent, tool, cwd } => {
+            if !matches!(tool.as_str(), "claude" | "opencode") {
+                reply(&inner, browser, &id, "неизвестный тип сессии");
+                return;
+            }
+            let cwd = cwd.trim().to_owned();
+            if cwd.len() > 4096 || cwd.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректный каталог");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::ToolModels { id: cmd, tool, cwd });
+        }
+        BrowserMsg::Dirs { id, agent, path } => {
+            let path = path.trim().to_owned();
+            if path.len() > 4096 || path.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректный каталог");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Dirs { id: cmd, path });
+        }
+        BrowserMsg::Handoff { id, agent, session, tool } => {
+            if !matches!(tool.as_str(), "claude" | "opencode") {
+                reply(&inner, browser, &id, "неизвестный тип сессии");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Handoff { id: cmd, session, tool });
+        }
+        BrowserMsg::CancelQueued { id, agent, session, queue } => {
+            if !safe_id(&queue) {
+                reply(&inner, browser, &id, "некорректный идентификатор очереди");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::CancelQueued { id: cmd, session, queue },
+            );
+        }
+        BrowserMsg::Delete { id, agent, session, close } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Delete { id: cmd, session, close });
+        }
+        BrowserMsg::Close { id, agent, session } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Close { id: cmd, session });
+        }
+        BrowserMsg::Rename { id, agent, session, title } => {
+            let title = title.trim().to_owned();
+            if title.is_empty() || title.chars().count() > aipanel_proto::MAX_TITLE {
+                reply(&inner, browser, &id, "название сессии пустое или слишком длинное");
+                return;
+            }
+            if title.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "в названии есть управляющие символы");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Rename { id: cmd, session, title });
+        }
+        BrowserMsg::Screens { id, agent } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Screens { id: cmd });
+        }
+        BrowserMsg::Favorites { agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Список общий для всех, кто смотрит сессию: ответ агент рассылает.
+            inner.to_agent(&owner, &agent, ServerMsg::Favorites { session });
+        }
+        BrowserMsg::Favorite { agent, session, item, on, ts, role, text } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            if item.is_empty()
+                || item.chars().count() > MAX_ITEM_ID
+                || item.chars().any(char::is_control)
+                || !matches!(role.as_str(), "user" | "assistant")
+            {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            let text = truncate(text, MAX_FAVORITE_TEXT);
+            inner.to_agent(
+                &owner,
+                &agent,
+                ServerMsg::Favorite { session, item, on, ts: ts.max(0), role, text },
+            );
+        }
+        BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
+            if !safe_id(&prompt) {
+                reply(&inner, browser, &id, "некорректный идентификатор запроса");
+                return;
+            }
+            if !matches!(kind.as_str(), "permission" | "form") {
+                reply(&inner, browser, &id, "неизвестный тип запроса");
+                return;
+            }
+            if kind == "permission" && !matches!(decision.as_str(), "once" | "always" | "reject") {
+                reply(&inner, browser, &id, "неизвестный ответ на разрешение");
+                return;
+            }
+            if kind == "form" && !cancel && !answer.is_object() {
+                reply(&inner, browser, &id, "ответ формы должен быть объектом");
+                return;
+            }
+            if serde_json::to_string(&answer).map(|s| s.len()).unwrap_or(0) > MAX_ANSWER {
+                reply(&inner, browser, &id, "слишком большой ответ формы");
+                return;
+            }
+            if message.chars().count() > 4000 {
+                reply(&inner, browser, &id, "слишком длинное сообщение к запросу");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(
+                &mut inner,
+                browser,
+                id,
+                &agent,
+                cmd.clone(),
+                ServerMsg::PromptReply { id: cmd, session, prompt, kind, decision, answer, message, cancel },
+            );
+        }
+    }
+}
+
+pub(crate) fn command(inner: &mut Inner, browser: u64, orig_id: String, agent: &str, cmd: String, msg: ServerMsg) {
+    if !inner.browser_owns(browser, agent) {
+        reply(inner, browser, &orig_id, "нет доступа к этому агенту");
+        return;
+    }
+    let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+        reply(inner, browser, &orig_id, "соединение с браузером потеряно");
+        return;
+    };
+    if inner.to_agent(&owner, agent, msg) {
+        inner.pending.insert(cmd, Pending { browser, id: orig_id, owner, agent: agent.to_owned() });
+    } else {
+        reply(inner, browser, &orig_id, "агент не в сети");
+    }
+}
+
+pub(crate) fn reply(inner: &Inner, browser: u64, id: &str, error: &str) {
+    if let Some(b) = inner.browsers.get(&browser) {
+        let _ = b.tx.try_send(json!({ "t": "result", "id": id, "ok": false, "error": error }).to_string());
+    }
+}
+
+/// Строка от агента не должна занимать сообщение целиком: подпись экрана
+/// обрезается по числу символов, а не байтов, чтобы не разрезать UTF-8.
+pub(crate) fn truncate(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        text
+    } else {
+        text.chars().take(max).collect()
+    }
+}
