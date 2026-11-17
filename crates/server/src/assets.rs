@@ -29,6 +29,9 @@ pub(crate) fn router() -> Router<Arc<App>> {
         .route("/icon-192.png", get(|| async { asset_bytes("image/png", ICON_192) }))
         .route("/icon-512.png", get(|| async { asset_bytes("image/png", ICON_512) }))
         .route("/icon-maskable-512.png", get(|| async { asset_bytes("image/png", ICON_MASKABLE_512) }))
+        // Значок уведомления для строки состояния Android: там картинка рисуется
+        // силуэтом по альфе, поэтому нужен прозрачный фон без цветной плитки.
+        .route("/badge.png", get(|| async { asset_bytes("image/png", BADGE) }))
         .route("/app.webmanifest", get(|| async { asset("application/manifest+json", MANIFEST) }));
     // Части панели — из таблицы: добавить файл значит дописать одну строку.
     for &(path, body) in SCRIPTS {
@@ -69,6 +72,7 @@ pub(crate) const APPLE_TOUCH_ICON: &[u8] = include_bytes!("../static/apple-touch
 pub(crate) const ICON_192: &[u8] = include_bytes!("../static/icon-192.png");
 pub(crate) const ICON_512: &[u8] = include_bytes!("../static/icon-512.png");
 pub(crate) const ICON_MASKABLE_512: &[u8] = include_bytes!("../static/icon-maskable-512.png");
+pub(crate) const BADGE: &[u8] = include_bytes!("../static/badge.png");
 pub(crate) fn asset(content_type: &'static str, body: &'static str) -> Response {
     asset_bytes(content_type, body.as_bytes())
 }
@@ -90,4 +94,26 @@ pub(crate) fn asset_bytes(content_type: &'static str, body: &'static [u8]) -> Re
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Значок строки состояния Android рисуется силуэтом по альфе: если у
+    /// картинки пропадёт прозрачность (её перерисуют на непрозрачном фоне),
+    /// в панели состояния получится сплошной квадрат. Отсюда проверка на
+    /// PNG с альфа-каналом и на то, что service worker ссылается на этот файл.
+    #[test]
+    fn notification_badge_has_alpha_and_is_used() {
+        assert_eq!(&BADGE[..8], b"\x89PNG\r\n\x1a\n", "badge.png не PNG");
+        // IHDR: сигнатура, длина, тип, ширина, высота, глубина, тип цвета.
+        assert_eq!(BADGE[24], 8, "badge.png не 8 бит на канал");
+        assert!(
+            matches!(BADGE[25], 4 | 6),
+            "у badge.png нет альфа-канала (тип цвета {})",
+            BADGE[25]
+        );
+        assert!(SW_JS.contains("badge: '/badge.png'"), "service worker не использует /badge.png");
+    }
 }
