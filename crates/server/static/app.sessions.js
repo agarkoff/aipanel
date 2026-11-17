@@ -439,6 +439,8 @@ function sessionId(key) {
 }
 
 function select(agent, session) {
+  // Сессию открыли — её уведомление в строке состояния больше не нужно.
+  closeNotice(agent, session);
   dropRename();
   selected = { agent, session };
   lastViewed = selected;

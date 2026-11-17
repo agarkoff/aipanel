@@ -143,11 +143,12 @@ const stub = `
   // Уведомления: браузерное разрешение выдано, а сами уведомления записываются,
   // чтобы тест мог проверить, о чём панель сообщает.
   window.__notices = [];
+  window.__closed = [];
   class FakeNotification {
     static permission = 'granted';
     static requestPermission() { return Promise.resolve('granted'); }
-    constructor(title, opts) { window.__notices.push({ title, ...opts }); }
-    close() {}
+    constructor(title, opts) { this.tag = opts.tag; window.__notices.push({ title, ...opts }); }
+    close() { window.__closed.push(this.tag); }
   }
   window.Notification = FakeNotification;
   window.__sock = null;
@@ -1734,6 +1735,35 @@ try {
   check('ожидание выбора — красный кружок, не жёлтый', notices.waitingDot === 'dot waiting', notices);
   check('ожидание выбора — уведомление браузера', notices.waiting.length === 1 && notices.waiting[0].includes('ждёт ответа'), notices);
   check('от ответа на выбор уведомления нет', notices.afterAnswer === 0, notices);
+
+  // Открытие сессии гасит её уведомление в строке состояния: и страничное, и
+  // push, который показал service worker. Чужие уведомления при этом остаются.
+  const closedNotices = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const pushed = [
+      { tag: 'aipanel:ui-test:opencode:notice', closed: false, close() { this.closed = true; } },
+      { tag: 'aipanel:ui-test:opencode:other', closed: false, close() { this.closed = true; } },
+    ];
+    Object.defineProperty(navigator, 'serviceWorker', {
+      configurable: true,
+      value: { ready: Promise.resolve({ getNotifications: () => Promise.resolve(pushed) }) },
+    });
+    const before = window.__notices.length;
+    showNotice({ name: 'ui-test' }, { key: 'opencode:notice', title: 'Уведомления' }, 'done');
+    window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test',
+      sessions: [{ ...window.__session, key: 'opencode:notice', title: 'Уведомления', status: 'idle' }] }] });
+    const shown = window.__notices.length - before;
+    document.querySelector('#sessions .session').click();
+    await wait(20);
+    const result = { shown, closed: window.__closed.slice(), mine: pushed[0].closed, other: pushed[1].closed };
+    closeView();
+    window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test', sessions: [window.__session] }] });
+    return result;
+  })()`);
+  check('открытие сессии убирает её уведомление',
+    closedNotices.shown === 1 && closedNotices.closed.includes('aipanel:ui-test:opencode:notice')
+      && closedNotices.mine, closedNotices);
+  check('уведомление другой сессии остаётся', !closedNotices.other, closedNotices);
 
   // Шапка: после версии панели через слеш — версия агентов в сети (major.minor).
   const whoLine = await evaluate(`(() => {

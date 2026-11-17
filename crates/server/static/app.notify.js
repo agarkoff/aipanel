@@ -18,6 +18,31 @@ function notifySupported() {
   return typeof Notification !== 'undefined';
 }
 
+// Уведомления страницы по тегу: созданные объекты перечислить нельзя, а
+// закрыть уведомление открытой сессии нужно именно по ссылке.
+const pageNotices = new Map(); // tag -> Notification
+
+const noticeTag = (agent, session) => `aipanel:${agent}:${session}`;
+
+// Убирает уведомления сессии из строки состояния: открывать её человек может
+// и из списка, не нажимая на плашку. Push-уведомления живут у service worker
+// (sw.js) и закрываются только через его регистрацию.
+function closeNotice(agent, session) {
+  const tag = noticeTag(agent, session);
+  const own = pageNotices.get(tag);
+  if (own) {
+    own.close();
+    pageNotices.delete(tag);
+  }
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.ready
+    .then((reg) => reg.getNotifications())
+    // Тег фильтруем сами: не все браузеры принимают его в параметрах.
+    .then((list) => list.filter((n) => n.tag === tag).forEach((n) => n.close()))
+    // Уведомлений нет или браузер не умеет их искать — гасить нечего.
+    .catch(() => {});
+}
+
 // Разрешение на уведомления спрашивает только колокольчик в шапке
 // (app.push.js): Safari разрешает спросить лишь по явному действию.
 function showNotice(agent, session, kind) {
@@ -27,22 +52,25 @@ function showNotice(agent, session, kind) {
   // Пользователь смотрит именно эту сессию — уведомление ему не нужно.
   const open = selected && selected.agent === agent.name && selected.session === session.key;
   if (open && document.visibilityState === 'visible') return;
+  const tag = noticeTag(agent.name, session.key);
   let n;
   try {
     n = new Notification(session.title || session.key, {
       body: kind === 'waiting' ? `${agent.name} · сессия ждёт ответа` : `${agent.name} · ход завершён`,
       // Одно уведомление на сессию: новое заменяет прежнее, а не копится стопкой.
-      tag: `aipanel:${agent.name}:${session.key}`,
+      tag,
       icon: '/icon-192.png',
     });
   } catch {
     // На телефоне уведомление строит только service worker: без него молчим.
     return;
   }
+  pageNotices.set(tag, n);
   n.onclick = () => {
     window.focus();
     select(agent.name, session.key);
     n.close();
+    pageNotices.delete(tag);
   };
 }
 
