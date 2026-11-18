@@ -9,12 +9,27 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use aipanel_proto::MAX_AUDIO_BYTES;
 use gigastt_core::{
-    inference::Engine,
+    inference::{Engine, TranscribeRequest, TranscribeSource},
     model::{self, ModelVariant},
 };
 use tokio::sync::Mutex;
 
 use crate::util;
+
+/// Частота сэмплов декодера: `decode_audio_bytes` всегда отдаёт моно 16 кГц.
+const SAMPLE_RATE: usize = 16_000;
+/// Пик, ниже которого запись считается тишиной (−40 dBFS от полной шкалы).
+/// Модель на тишине выдаёт правдоподобные, но выдуманные слова, поэтому такую
+/// запись лучше не распознавать вовсе.
+const VOICE_MIN_PEAK: f32 = 0.01;
+/// Сколько в записи должно быть звука выше порога, чтобы её стоило слушать.
+const VOICE_MIN_SPEECH_S: f64 = 0.15;
+/// Какая доля записи должна быть речью. Телефон иногда отдаёт микрофон,
+/// который замолкает через полсекунды: в записи секунды тишины и двести
+/// миллисекунд голоса, и модель на таком обрезке выдаёт одно-два выдуманных
+/// слова. Живая диктовка с паузами даёт заметно больше, поэтому порог низкий:
+/// он отделяет «звука почти нет» от «человек сказал одно слово».
+const VOICE_MIN_SPEECH_RATIO: f64 = 0.08;
 
 pub struct Voice {
     enabled: bool,
@@ -71,8 +86,36 @@ impl Voice {
         // Распознавание считает процессор и занимает секунды: цикл сообщений
         // агента не должен ждать его, поэтому работа уходит в отдельный поток.
         let text = tokio::task::spawn_blocking(move || {
+            // Запись декодируется один раз: по готовым сэмплам видно, есть ли в
+            // них звук, и они же уходят в модель. Телефон иногда присылает файл,
+            // в котором речи нет вовсе (микрофон замолчал): модель на тишине
+            // выдаёт правдоподобные, но выдуманные слова, и человек принимает их
+            // за ошибку распознавания. Честнее сказать, что звука нет. Панель
+            // отсекает такое сама, но старый её кэш и чужие клиенты — нет.
+            let samples = gigastt_core::inference::audio::decode_audio_bytes(&bytes)
+                .map_err(|e| format!("запись не декодировалась: {e}"))?;
+            let level = level_of(&samples);
+            let secs = samples.len() as f64 / SAMPLE_RATE as f64;
+            util::log(&format!(
+                "voice: {}, {secs:.2} с, пик {:.4}, речи {:.2} с",
+                format_name(&bytes),
+                level.peak,
+                level.secs
+            ));
+            if level.peak < VOICE_MIN_PEAK {
+                return Err("в записи тишина — микрофон молчит".to_string());
+            }
+            if level.secs < VOICE_MIN_SPEECH_S {
+                return Err("в записи почти нет речи — слишком тихо".to_string());
+            }
+            // Микрофон, замолчавший через полсекунды, оставляет от фразы
+            // обрезок: распознавать его — значит выдать выдуманные слова.
+            if secs >= 1.0 && level.secs < secs * VOICE_MIN_SPEECH_RATIO {
+                return Err("микрофон почти всю запись молчал — нечего распознавать".to_string());
+            }
             let mut guard = engine.pool.checkout_blocking().map_err(|e| format!("движок занят: {e}"))?;
-            let result = engine.transcribe_bytes(&bytes, &mut guard).map_err(|e| e.to_string())?;
+            let request = TranscribeRequest::new(TranscribeSource::Samples(&samples));
+            let result = engine.transcribe_request(request, &mut guard).map_err(|e| e.to_string())?;
             Ok::<String, String>(result.text)
         })
         .await
@@ -134,6 +177,44 @@ impl Voice {
     }
 }
 
+/// Насколько громкая запись: пик и сколько в ней звука выше порога. По этим
+/// числам в логе видно, почему модель не расслышала слова — тишина в записи,
+/// обрезанный фрагмент или слишком тихая речь.
+struct Level {
+    peak: f32,
+    secs: f64,
+}
+
+fn level_of(samples: &[f32]) -> Level {
+    let mut peak = 0.0f32;
+    let mut loud = 0usize;
+    for sample in samples {
+        let level = sample.abs();
+        if level > peak {
+            peak = level;
+        }
+        if level >= VOICE_MIN_PEAK {
+            loud += 1;
+        }
+    }
+    Level { peak, secs: loud as f64 / SAMPLE_RATE as f64 }
+}
+
+/// Контейнер записи по первым байтам — только для лога.
+fn format_name(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        "webm"
+    } else if bytes.starts_with(b"OggS") {
+        "ogg"
+    } else if bytes.len() > 8 && &bytes[4..8] == b"ftyp" {
+        "mp4"
+    } else if bytes.starts_with(b"RIFF") {
+        "wav"
+    } else {
+        "неизвестный контейнер"
+    }
+}
+
 fn variant_name(variant: ModelVariant) -> &'static str {
     match variant {
         ModelVariant::Rnnt => "GigaAM v3 rnnt",
@@ -188,6 +269,53 @@ mod tests {
     #[test]
     fn ignores_empty_pattern() {
         assert_eq!(replace_ignore_case("текст", "", "x"), "текст");
+    }
+
+    /// Запись, в которой речи нет вовсе: пик нулевой, модель слушать нечего.
+    #[test]
+    fn level_of_silence_is_zero() {
+        let level = level_of(&vec![0.0; SAMPLE_RATE]);
+        assert_eq!(level.peak, 0.0);
+        assert_eq!(level.secs, 0.0);
+    }
+
+    /// Полсекунды речи в двух секундах записи: пик по самому громкому сэмплу,
+    /// «речи» — сколько звука выше порога тишины.
+    #[test]
+    fn level_of_counts_speech_above_threshold() {
+        let mut samples = vec![0.0f32; SAMPLE_RATE * 2];
+        for sample in samples.iter_mut().take(SAMPLE_RATE / 2) {
+            *sample = 0.3;
+        }
+        let level = level_of(&samples);
+        assert!((level.peak - 0.3).abs() < 1e-6);
+        assert!((level.secs - 0.5).abs() < 0.01);
+    }
+
+    /// Запись с телефона, у которого микрофон замолчал через полсекунды: пик
+    /// громкий (первый слог дошёл), а речи — десятая доля секунды из двух с
+    /// половиной. Именно такую запись нельзя отдавать модели: она ответит
+    /// «Про» или другим выдуманным словом.
+    #[test]
+    fn dead_microphone_is_caught_by_speech_ratio() {
+        let secs = 2.5;
+        let mut samples = vec![0.0f32; (SAMPLE_RATE as f64 * secs) as usize];
+        for sample in samples.iter_mut().take(SAMPLE_RATE / 10) {
+            *sample = 0.4;
+        }
+        let level = level_of(&samples);
+        assert!(level.peak > VOICE_MIN_PEAK);
+        assert!(level.secs < VOICE_MIN_SPEECH_S);
+        assert!(level.secs < secs * VOICE_MIN_SPEECH_RATIO);
+    }
+
+    #[test]
+    fn format_name_sniffs_container() {
+        assert_eq!(format_name(&[0x1a, 0x45, 0xdf, 0xa3, 0x01]), "webm");
+        assert_eq!(format_name(b"OggS...."), "ogg");
+        assert_eq!(format_name(b"\0\0\0\x20ftypisom"), "mp4");
+        assert_eq!(format_name(b"RIFF...."), "wav");
+        assert_eq!(format_name(b"\x01\x02"), "неизвестный контейнер");
     }
 
     #[test]
