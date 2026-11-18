@@ -4,8 +4,8 @@
 use std::{sync::Arc, time::Instant};
 
 use aipanel_proto::{
-    PushSub, ServerMsg, MAX_AUDIO_BYTES, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PROJECT_KEY,
-    MAX_PUSH_SUBS,
+    PushSub, ScrollPos, ServerMsg, MAX_AUDIO_BYTES, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID,
+    MAX_PROJECT_KEY, MAX_PUSH_SUBS,
 };
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -127,6 +127,15 @@ pub(crate) enum BrowserMsg {
     /// Сохранить недописанный текст сессии: он живёт у агента, поэтому черновик
     /// один на все устройства. Пустой `text` — черновика нет.
     Draft { agent: String, session: String, text: String },
+    /// Прислать сохранённое место чтения ленты сессии: оно хранится у агента,
+    /// чтобы по ссылке открывалось то место, где её читали.
+    Scroll { id: String, agent: String, session: String },
+    /// Запомнить место чтения ленты сессии на машине агента.
+    ScrollSet { agent: String, session: String, pos: ScrollPos },
+    /// Запомнить место прокрутки списка сессий. Списка нет ни у одной сессии,
+    /// поэтому сообщение уходит всем агентам пользователя: последнее место
+    /// должно пережить перезапуск сервера, а диск есть только у них.
+    ListScroll { pos: ScrollPos },
     /// Закрепить сессию (`on`) или открепить её. Список хранится у агента.
     PinSession { agent: String, session: String, on: bool },
     /// Свернуть проект (`on`) или раскрыть его. Ключ проекта считает панель:
@@ -477,6 +486,46 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             };
             inner.to_agent(&owner, &agent, ServerMsg::Draft { session, text });
         }
+        BrowserMsg::Scroll { id, agent, session } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            if !valid_session(&session) {
+                reply(&inner, browser, &id, "некорректный ключ сессии");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Scrolls { id: cmd, session });
+        }
+        BrowserMsg::ScrollSet { agent, session, pos } => {
+            if !inner.browser_owns(browser, &agent) || !valid_session(&session) {
+                return;
+            }
+            let Some(pos) = pos.clean() else {
+                return;
+            };
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            inner.to_agent(&owner, &agent, ServerMsg::ScrollSet { session, pos });
+        }
+        BrowserMsg::ListScroll { pos } => {
+            let Some(pos) = pos.clean() else {
+                return;
+            };
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Время ставит сервер: часы телефона и компьютера могут расходиться,
+            // а сравнивать места будут и он, и агенты.
+            let now = crate::unix_ms();
+            let ts = match inner.list_scroll.get(&owner) {
+                Some((was, _)) => now.max(was + 1),
+                None => now,
+            };
+            inner.list_scroll.insert(owner.clone(), (ts, pos.clone()));
+            inner.to_all_agents(&owner, ServerMsg::ListScroll { pos, ts });
+        }
         BrowserMsg::PinSession { agent, session, on } => {
             if !inner.browser_owns(browser, &agent) {
                 return;
@@ -630,6 +679,18 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             reply_ok(&inner, browser, &id);
         }
     }
+}
+
+/// Ключ сессии — `tool:id`: он попадает в файл состояния агента, поэтому
+/// длина и управляющие символы проверяются и здесь, до отправки агенту.
+pub(crate) fn valid_session(session: &str) -> bool {
+    let mut parts = session.splitn(2, ':');
+    let tool = parts.next().unwrap_or("");
+    let id = parts.next().unwrap_or("");
+    matches!(tool, "claude" | "opencode")
+        && !id.is_empty()
+        && id.len() <= 128
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn reply_ok(inner: &Inner, browser: u64, id: &str) {

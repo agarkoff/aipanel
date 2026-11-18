@@ -92,6 +92,8 @@ const stub = `
       const msg = JSON.parse(text);
       if (msg.t === 'watch') {
         setTimeout(() => this.emit({ t: 'history', agent: msg.agent, session: msg.session, reset: true, items: [], more: false }), 0);
+      } else if (msg.t === 'scroll') {
+        setTimeout(() => this.emit({ t: 'scroll', id: msg.id, agent: msg.agent, session: msg.session, pos: null }), 0);
       } else if (msg.t === 'rename') {
         window.__renames.push(msg);
         const fail = window.__renameFail;

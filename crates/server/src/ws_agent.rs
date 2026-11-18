@@ -286,6 +286,40 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                 }
             }
         }
+        AgentMsg::Scroll { id, session, pos } => {
+            // Ответ на конкретный запрос браузера: место нужно тому, кто открыл
+            // сессию, а не всем, кто её смотрит.
+            let allowed = inner
+                .pending
+                .get(&id)
+                .is_some_and(|p| p.owner == owner && p.agent == agent);
+            if !allowed {
+                return None;
+            }
+            if let Some(p) = inner.pending.remove(&id) {
+                if let Some(b) = inner.browsers.get(&p.browser) {
+                    let _ = b.tx.try_send(
+                        json!({
+                            "t": "scroll", "id": p.id, "agent": agent, "session": session, "pos": pos,
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+        }
+        AgentMsg::ListScroll { pos, ts } => {
+            // Место списка приходит от агента после `Hello`: сервер не хранит
+            // диск и после перезапуска узнаёт его отсюда. Более старое место от
+            // агента, который был не в сети, ничего не меняет.
+            let Some(pos) = pos.clean() else {
+                return None;
+            };
+            if inner.list_scroll.get(owner).is_some_and(|(was, _)| *was >= ts) {
+                return None;
+            }
+            inner.list_scroll.insert(owner.to_owned(), (ts, pos));
+            inner.broadcast_agents();
+        }
         AgentMsg::Prompts { session, mut prompts } => {
             prompts.truncate(MAX_PROMPTS);
             let text = json!({

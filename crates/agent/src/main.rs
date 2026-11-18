@@ -17,6 +17,7 @@ mod platform;
 mod push;
 mod repo;
 mod screen;
+mod scroll;
 mod status;
 mod tasks;
 mod util;
@@ -74,6 +75,9 @@ struct Agent {
     liststate: Mutex<liststate::Store>,
     /// Подписки устройств на push-уведомления: файл `push.json` в каталоге агента.
     push: Mutex<push::Store>,
+    /// Место чтения: положение прокрутки списка сессий и ленты каждой сессии.
+    /// Файл `scroll.json` в каталоге агента. Тоже общее для всех устройств.
+    scroll: Mutex<scroll::Store>,
     /// Голосовой ввод: распознавание записи на этой машине.
     voice: voice::Voice,
     // Состояние для команды `status` (см. status.rs).
@@ -219,6 +223,36 @@ impl Agent {
                 // Текст уходит обратно всем наблюдателям, включая отправителя:
                 // так все устройства показывают один и тот же черновик.
                 let _ = self.out.send(AgentMsg::Draft { session, text });
+            }
+            ServerMsg::Scrolls { id, session } => {
+                // Файл маленький и уже прочитан при запуске: отвечаем сразу,
+                // чтобы место чтения пришло раньше самой ленты.
+                let pos = self.scroll.lock().unwrap().session(&session);
+                let _ = self.out.send(AgentMsg::Scroll { id, session, pos });
+            }
+            ServerMsg::ScrollSet { session, pos } => {
+                // Ключ сессии попадает в файл: принимаются только известные
+                // инструменты и безопасные идентификаторы.
+                if split_key(&session).is_err() {
+                    util::log(&format!("scroll: некорректный ключ сессии {session}"));
+                    return;
+                }
+                let Some(pos) = pos.clean() else {
+                    util::log(&format!("scroll: некорректное место чтения сессии {session}"));
+                    return;
+                };
+                if let Err(e) = self.scroll.lock().unwrap().set_session(&session, pos, util::now_ms()) {
+                    util::log(&format!("scroll: {e}"));
+                }
+            }
+            ServerMsg::ListScroll { pos, ts } => {
+                let Some(pos) = pos.clean() else {
+                    util::log("scroll: некорректное место списка сессий");
+                    return;
+                };
+                if let Err(e) = self.scroll.lock().unwrap().set_list(pos, ts) {
+                    util::log(&format!("scroll: {e}"));
+                }
             }
             ServerMsg::SessionList => {
                 let (pins, closed) = self.liststate.lock().unwrap().list();
@@ -389,6 +423,7 @@ impl Agent {
                         // Сессии больше нет: её избранное и черновик не к чему относить.
                         me.favorites.lock().unwrap().remove_session(&session);
                         me.drafts.lock().unwrap().remove_session(&session);
+                        me.scroll.lock().unwrap().remove_session(&session);
                     }
                     me.finish(id, result.map(|_| None));
                 });
@@ -747,6 +782,14 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
     if sink.send(text_msg(&AgentMsg::SessionList { pins, closed })).await.is_err() {
         return;
     }
+    // Место прокрутки списка сессий тоже живёт у агента: после перезапуска
+    // сервера он узнаёт его отсюда, а панель открывает список там же, где его
+    // оставили.
+    if let Some((pos, ts)) = agent.scroll.lock().unwrap().list() {
+        if sink.send(text_msg(&AgentMsg::ListScroll { pos, ts })).await.is_err() {
+            return;
+        }
+    }
     agent.force.store(true, Ordering::Relaxed);
     agent.force_limits.store(true, Ordering::Relaxed);
     agent.online.store(true, Ordering::Relaxed);
@@ -830,6 +873,7 @@ async fn run(cfg: Config) {
         drafts: Mutex::new(drafts::Store::open()),
         liststate: Mutex::new(liststate::Store::open()),
         push: Mutex::new(push::Store::open()),
+        scroll: Mutex::new(scroll::Store::open()),
         started: util::now_ms(),
         connected_since: AtomicI64::new(0),
         sessions: AtomicUsize::new(0),

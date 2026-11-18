@@ -152,6 +152,8 @@ function openSubTab(id) {
 // Переключение вкладки: подписка агента на ленту и сборка DOM из кэша.
 function switchFeed(id) {
   if (!selected || id === subTab) return;
+  // Уходим с основной ленты — её место сохраняем сейчас, пока оно ещё в DOM.
+  if (!subTab) flushFeedPlace();
   const feed = $('feed');
   tabScroll.set(subTab, feed.scrollTop);
   tabOpen.set(subTab, openItems());
@@ -176,7 +178,14 @@ function showTab(id) {
   renderFeed(key, Boolean(id) && !(cached && cached.size));
   restoreOpen(tabOpen.get(id));
   const saved = tabScroll.get(id);
-  feed.scrollTop = saved === undefined ? feed.scrollHeight : Math.min(saved, feed.scrollHeight);
+  if (!id && feedRestore) {
+    // Основную ленту ещё не поставили на сохранённое место (её собирали, пока
+    // была открыта вкладка подагента): место важнее того, что запомнила вкладка.
+    feedRestore.ready = true;
+    applyFeedRestore();
+  } else {
+    feed.scrollTop = saved === undefined ? feed.scrollHeight : Math.min(saved, feed.scrollHeight);
+  }
   // Закреп относится к основной ленте: у подагента его нет.
   if (!id) syncPin();
   renderSubagents();

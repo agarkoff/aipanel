@@ -559,6 +559,24 @@ enabled = false
     draftsText.slice(0, 200),
   );
 
+  // Место чтения: прокрутка ленты и списка тоже уходит агенту, в scroll.json —
+  // поэтому сессия открывается там, где её читали, и на другом устройстве.
+  await evaluate(`(() => {
+    const feed = document.getElementById('feed');
+    feed.dispatchEvent(new Event('scroll'));
+    document.getElementById('sessions').dispatchEvent(new Event('scroll'));
+    return true;
+  })()`);
+  const scrollFile = path.join(stateHome, 'scroll.json');
+  let scrollText = '';
+  for (let i = 0; i < 100; i++) {
+    scrollText = fs.existsSync(scrollFile) ? fs.readFileSync(scrollFile, 'utf8') : '';
+    if (scrollText.includes(SESSION_ID) && scrollText.includes('"list"')) break;
+    await sleep(100);
+  }
+  check('агент записал место чтения ленты', scrollText.includes(SESSION_ID), scrollText.slice(0, 200));
+  check('агент записал место списка сессий', scrollText.includes('"list"'), scrollText.slice(0, 200));
+
   // Второе устройство: отдельная вкладка с собственным WebSocket — как телефон.
   const phoneTarget = await send('Target.createTarget', { url: `${base}/` });
   const phone = (await send('Target.attachToTarget', { targetId: phoneTarget.targetId, flatten: true })).sessionId;

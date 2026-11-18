@@ -12,10 +12,10 @@ mod ws_browser;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use aipanel_proto::{Limits, PushSub, ServerMsg, SessionInfo};
+use aipanel_proto::{Limits, PushSub, ScrollPos, ServerMsg, SessionInfo};
 use axum::{
     http::HeaderMap,
     routing::{get, post},
@@ -30,6 +30,12 @@ use crate::auth::{
 
 const PING_EVERY: Duration = Duration::from_secs(25);
 const DEAD_AFTER: Duration = Duration::from_secs(90);
+
+/// Время в миллисекундах с эпохи Unix: по нему сравниваются место прокрутки
+/// списка, записанное разными устройствами и агентами.
+fn unix_ms() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
 
 struct AgentEntry {
     conn: u64,
@@ -86,6 +92,10 @@ struct Inner {
     /// Подписки устройств на push-уведомления по пользователям. Хранят их
     /// агенты, сервер собирает их при подключении агентов.
     push: HashMap<String, Vec<PushSub>>,
+    /// Место прокрутки списка сессий по пользователям: (время записи, положение).
+    /// Хранится у агентов; сервер помнит последнее, чтобы отдать его браузеру,
+    /// который только что открыл панель.
+    list_scroll: HashMap<String, (i64, ScrollPos)>,
     /// (пользователь, агент, сессия), о которых устройствам уже отправлено
     /// уведомление: когда сессию откроют, эти плашки нужно убрать.
     notified: HashSet<(String, String, String)>,
@@ -118,7 +128,10 @@ impl Inner {
                 })
             })
             .collect();
-        json!({ "t": "agents", "agents": agents }).to_string()
+        let scroll = self.list_scroll.get(owner).map(|(ts, pos)| {
+            json!({ "id": pos.id, "off": pos.off, "top": pos.top, "end": pos.end, "ts": ts })
+        });
+        json!({ "t": "agents", "agents": agents, "scroll": scroll }).to_string()
     }
 
     fn broadcast_agents(&self) {
@@ -168,6 +181,20 @@ impl Inner {
         {
             Some(tx) => tx.try_send(msg).is_ok(),
             None => false,
+        }
+    }
+
+    /// Разослать сообщение всем агентам пользователя в сети: состояние,
+    /// которое хранится у них (место прокрутки списка), должно быть у каждого.
+    fn to_all_agents(&self, owner: &str, msg: ServerMsg) {
+        let names: Vec<String> = self
+            .agents
+            .iter()
+            .filter(|((o, _), a)| o == owner && a.tx.is_some())
+            .map(|((_, name), _)| name.clone())
+            .collect();
+        for name in names {
+            self.to_agent(owner, &name, msg.clone());
         }
     }
 
@@ -786,6 +813,95 @@ mod tests {
         let msg = rx.try_recv().unwrap();
         assert!(msg.contains("\"t\":\"favorites\"") && msg.contains("ответ в избранном"), "{msg}");
         assert!(other_rx.try_recv().is_err(), "избранное ушло в чужую сессию");
+    }
+
+    #[test]
+    fn scroll_place_goes_only_to_the_browser_that_asked() {
+        let (agent_tx, mut agent_rx) = mpsc::channel::<ServerMsg>(4);
+        let (btx, mut brx) = mpsc::channel::<String>(4);
+        let (other, mut other_rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        let mut agent = entry();
+        agent.tx = Some(agent_tx);
+        inner.agents.insert(("alice".into(), "pc".into()), agent);
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx: btx,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
+            },
+        );
+        inner.browsers.insert(
+            2,
+            BrowserEntry {
+                tx: other,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::Scroll { id: "1".into(), agent: "pc".into(), session: "opencode:s1".into() },
+        );
+        let ServerMsg::Scrolls { id, session } = agent_rx.try_recv().unwrap() else {
+            panic!("агенту ушёл не запрос места чтения");
+        };
+        assert_eq!(session, "opencode:s1");
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Scroll {
+                id,
+                session,
+                pos: Some(ScrollPos { id: "m7".into(), off: -12.0, top: 640.0, end: false }),
+            },
+        );
+        let msg = brx.try_recv().unwrap();
+        assert!(msg.contains("\"t\":\"scroll\"") && msg.contains("\"id\":\"m7\""), "{msg}");
+        assert!(other_rx.try_recv().is_err(), "место чтения получил чужой браузер");
+    }
+
+    #[test]
+    fn list_scroll_is_kept_for_all_agents_of_the_owner() {
+        let (a1, mut r1) = mpsc::channel::<ServerMsg>(4);
+        let (a2, mut r2) = mpsc::channel::<ServerMsg>(4);
+        let (btx, _brx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        let mut first = entry();
+        first.tx = Some(a1);
+        let mut second = entry();
+        second.conn = 2;
+        second.tx = Some(a2);
+        inner.agents.insert(("alice".into(), "pc".into()), first);
+        inner.agents.insert(("alice".into(), "pc2".into()), second);
+        inner.browsers.insert(1, BrowserEntry { tx: btx, owner: "alice".into(), watching: None, sub: None });
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::ListScroll {
+                pos: ScrollPos { id: "row:pc\nopencode:s1".into(), off: 4.0, top: 900.0, end: false },
+            },
+        );
+        for rx in [&mut r1, &mut r2] {
+            let ServerMsg::ListScroll { pos, ts } = rx.try_recv().unwrap() else {
+                panic!("агенту ушло не место списка");
+            };
+            assert_eq!(pos.id, "row:pc\nopencode:s1");
+            assert!(ts > 0);
+        }
+        // Новый браузер получает место списка вместе со списком агентов.
+        let json: serde_json::Value = serde_json::from_str(&app.lock().agents_json("alice")).unwrap();
+        assert_eq!(json["scroll"]["id"], "row:pc\nopencode:s1");
+        assert_eq!(json["scroll"]["top"], 900.0);
     }
 
     #[test]

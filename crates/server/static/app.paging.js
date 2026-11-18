@@ -119,6 +119,9 @@ function applyOlder(msg) {
   // Продолжение нажатия на самый старый закреп: догруженное могло принести
   // предыдущее своё сообщение.
   if (pinOlderFrom) continuePinOlder(list);
+  // Прокрутка открытой сессии ждёт более ранние сообщения: без этого шага она
+  // осталась бы наверху, не дойдя до сохранённого места.
+  if (feedRestore) applyFeedRestore();
 }
 
 // Нажатие на самый старый закреп догружает ранние сообщения до предыдущего
@@ -307,6 +310,139 @@ $('to-end').addEventListener('click', () => {
   feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
 });
 
+// ------------------------------------------------------------ место чтения
+
+// Сколько пикселей от низа считается «в конце» при сохранении места: меньше
+// двух строк запаса, чтобы дрожь пальца и округление прокрутки не превращали
+// чтение середины в «я в конце».
+const PLACE_END = 24;
+
+function placeAtEnd() {
+  const feed = $('feed');
+  return feed.scrollHeight - feed.scrollTop - feed.clientHeight <= PLACE_END;
+}
+
+// Где остановилась прокрутка ленты: элемент у верхней кромки и его смещение.
+// В конец лента возвращается не пикселями, а признаком `end`: новый ответ
+// делает прежний низ уже не концом. Пиксели нужны запасным вариантом — если
+// сохранённого сообщения в загруженной части ленты уже нет.
+function feedPlace() {
+  const feed = $('feed');
+  if (!nodes.size) return null;
+  if (placeAtEnd()) return { end: true, id: '', off: 0, top: 0 };
+  const box = feed.getBoundingClientRect();
+  for (const node of feed.querySelectorAll('.item')) {
+    const b = node.getBoundingClientRect();
+    if (b.bottom > box.top + 1) {
+      return {
+        id: node.dataset.id || '',
+        off: +(b.top - box.top).toFixed(1),
+        top: Math.round(feed.scrollTop),
+        end: false,
+      };
+    }
+  }
+  return { id: '', off: 0, top: Math.round(feed.scrollTop), end: false };
+}
+
+// Ставит ленту на сохранённое место. Сообщение из сохранённого места может быть
+// в ещё не догруженной части: тогда встаём на то же место по пикселям, а
+// applyOlder попробует найти его после каждой страницы.
+function applyFeedPlace(pos) {
+  const feed = $('feed');
+  if (!pos || pos.end) {
+    feed.scrollTop = feed.scrollHeight;
+    return;
+  }
+  const node = pos.id ? nodes.get(pos.id) : null;
+  if (node) {
+    const box = feed.getBoundingClientRect();
+    const want = feed.scrollTop + node.getBoundingClientRect().top - box.top - (pos.off || 0);
+    feed.scrollTop = Math.max(0, want);
+    return;
+  }
+  if (pos.top > 0) {
+    feed.scrollTop = Math.min(pos.top, feed.scrollHeight);
+    return;
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+// Место пришло от агента: лента уже собрана — ставим сразу, ещё нет — применит
+// applyHistory, когда лента придёт. Ответа нет вовсе (старый агент) — через
+// полторы секунды открываем с конца, как раньше.
+function onFeedPlace(msg) {
+  const rest = feedRestore;
+  if (!rest || rest.key !== `${msg.agent}\n${msg.session}`) return;
+  clearTimeout(rest.timer);
+  rest.timer = null;
+  rest.pos = msg.pos || null;
+  applyFeedRestore();
+}
+
+function applyFeedRestore() {
+  const rest = feedRestore;
+  if (!rest || !rest.ready || rest.pos === undefined) return;
+  const pos = rest.pos;
+  const feed = $('feed');
+  // Сохранённое сообщение в загруженной части ленты отсутствует, а прокрутка
+  // была выше неё: значит, место в ещё не догруженных ранних сообщениях.
+  // Просим страницу за страницей, пока не дойдём или они не кончатся.
+  const max = Math.max(0, feed.scrollHeight - feed.clientHeight);
+  if (pos && !pos.end && !nodes.has(pos.id || '') && pos.top > max + 1 && olderMore && rest.tries < PIN_OLDER_MAX) {
+    rest.tries += 1;
+    if (askOlder()) return;
+  }
+  feedRestore = null;
+  applyFeedPlace(pos);
+  updateToEnd();
+}
+
+function askFeedPlace(agent, session) {
+  const rest = feedRestore;
+  if (!send({ t: 'scroll', id: String(++cmdSeq), agent, session })) {
+    // Соединения нет: сохранённое место не узнать, лента откроется с конца.
+    if (rest) rest.pos = null;
+    return;
+  }
+  if (!rest) return;
+  clearTimeout(rest.timer);
+  rest.timer = setTimeout(() => {
+    if (feedRestore !== rest || rest.pos !== undefined) return;
+    // Старая версия агента команду не знает и ответа не пришлёт.
+    rest.pos = null;
+    applyFeedRestore();
+  }, 1500);
+}
+
+// Прокрутку сохраняем после остановки, а не на каждое движение: агенту это
+// запись файла, и делать её на каждый пиксель незачем.
+function noteFeedPlace() {
+  if (!selected || subTab) return;
+  // Пока сохранённое место ещё не пришло, нынешняя (ещё не поставленная)
+  // прокрутка не должна его затереть.
+  if (feedRestore && feedRestore.pos === undefined) return;
+  clearTimeout(feedSaveTimer);
+  feedSaveTimer = setTimeout(sendFeedPlace, 700);
+}
+
+function flushFeedPlace() {
+  clearTimeout(feedSaveTimer);
+  feedSaveTimer = null;
+  sendFeedPlace();
+}
+
+function sendFeedPlace() {
+  if (!selected || subTab) return;
+  // Сохранённое место ещё не пришло: то, что видно сейчас, — ещё не чтение.
+  if (feedRestore && feedRestore.pos === undefined) return;
+  const pos = feedPlace();
+  if (!pos) return;
+  const sig = `${pos.end ? 1 : 0}|${pos.id}|${Math.round(pos.off)}|${Math.round(pos.top)}`;
+  if (sig === feedSentPlace) return;
+  if (send({ t: 'scroll_set', agent: selected.agent, session: selected.session, pos })) feedSentPlace = sig;
+}
+
 $('feed').addEventListener(
   'scroll',
   () => {
@@ -321,6 +457,14 @@ $('feed').addEventListener(
     }
     followPin();
     askOlderAtTop();
+    noteFeedPlace();
   },
   { passive: true },
 );
+
+// Место чтения сохраняем и тогда, когда страницу уводят в фон: на телефоне
+// вкладку могут закрыть, не дав сработать отложенной записи.
+window.addEventListener('pagehide', flushFeedPlace);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushFeedPlace();
+});

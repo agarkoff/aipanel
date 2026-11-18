@@ -822,7 +822,7 @@ function applyHistory(msg) {
   }
   if (subTab) return;
   const feed = $('feed');
-  const stick = Date.now() > scrollHoldUntil && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  const stick = Date.now() > scrollHoldUntil && !feedRestore && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
   if (msg.reset) {
     feed.replaceChildren();
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
@@ -851,6 +851,13 @@ function applyHistory(msg) {
   // высоту, и прокрутка, сделанная раньше, оставила бы низ последнего сообщения
   // скрытым — без единого следующего обновления, которое это исправило бы.
   syncPin();
-  if (msg.reset || stick) feed.scrollTop = feed.scrollHeight;
+  if (msg.reset && feedRestore) {
+    // Первая лента открытой сессии: место чтения уже пришло от агента или
+    // придёт следом — до этого лента стоит наверху, а не прыгает в конец.
+    feedRestore.ready = true;
+    applyFeedRestore();
+  } else if (msg.reset || stick) {
+    feed.scrollTop = feed.scrollHeight;
+  }
   updateToEnd();
 }

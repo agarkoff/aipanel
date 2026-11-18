@@ -480,6 +480,18 @@ pub enum AgentMsg {
         #[serde(default)]
         text: String,
     },
+    /// Место чтения ленты сессии `session` — ответ на `ServerMsg::Scrolls`.
+    /// `pos` нет — эту сессию ещё не читали.
+    Scroll {
+        id: String,
+        session: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pos: Option<ScrollPos>,
+    },
+    /// Место прокрутки списка сессий, сохранённое на машине агента. Приходит
+    /// после `Hello`: сервер не хранит диск, и после перезапуска узнаёт это
+    /// место от агента. `ts` — когда его записали.
+    ListScroll { pos: ScrollPos, ts: i64 },
 }
 
 /// Наибольшая длина черновика в символах. Черновик — это сообщение, которое
@@ -503,6 +515,83 @@ pub const MAX_AUDIO_BYTES: usize = 600_000;
 /// вырастает на треть, и сообщение WebSocket (8 МБ) должно остаться целым:
 /// агент уменьшает снимок, пока PNG не влезет в этот предел.
 pub const MAX_SCREEN_BYTES: usize = 4 << 20;
+
+/// Сколько сессий хранят своё место чтения. Давно не тронутые вытесняются: иначе
+/// файл рос бы вместе со всеми сессиями, которые когда-либо открывали.
+pub const MAX_SCROLLS: usize = 300;
+
+/// Наибольшая длина идентификатора элемента, к которому привязано место чтения.
+/// У строки списка он длиннее, чем у сообщения ленты, и содержит имя агента.
+pub const MAX_SCROLL_ID: usize = 256;
+
+/// Место чтения: где остановилась прокрутка. Хранится у агента (`scroll.json`),
+/// поэтому сессия открывается там, где её читали, — и с другого устройства, и
+/// после перезапуска панели.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ScrollPos {
+    /// Элемент у верхней кромки: id сообщения ленты или строки списка.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// Смещение этого элемента от верхней кромки, px. Может быть отрицательным:
+    /// элемент начался выше и виден не с начала.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub off: f64,
+    /// Прокрутка от верха, px: запасной вариант, если элемента уже нет.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub top: f64,
+    /// Прокрутка была в самом конце: там новое место чтения и остаётся.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub end: bool,
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
+}
+
+impl ScrollPos {
+    /// Проверяет положение, пришедшее из браузера: числа конечные, id безопасный.
+    /// Возвращает `None`, если этому верить нельзя, — такое положение не пишется
+    /// ни на диск агента, ни в состояние сервера.
+    pub fn clean(self) -> Option<Self> {
+        if !self.off.is_finite() || !self.top.is_finite() {
+            return None;
+        }
+        if self.id.chars().count() > MAX_SCROLL_ID {
+            return None;
+        }
+        // В id строки списка есть перевод строки: он разделяет имя агента и
+        // ключ сессии, поэтому разрешён, а остальные управляющие символы — нет.
+        if self.id.chars().any(|c| c != '\n' && c.is_control()) {
+            return None;
+        }
+        Some(Self {
+            id: self.id,
+            off: self.off.clamp(-1.0e6, 1.0e6),
+            top: self.top.clamp(0.0, 1.0e9),
+            end: self.end,
+        })
+    }
+}
+
+#[cfg(test)]
+mod scroll_tests {
+    use super::*;
+
+    #[test]
+    fn cleans_place_from_browser() {
+        let ok = ScrollPos { id: "row:pc\nopencode:s1".into(), off: -12.0, top: 340.0, end: false };
+        assert_eq!(ok.clone().clean(), Some(ok));
+        // Слишком длинный id и управляющие символы (кроме разделителя строки
+        // списка) — не место чтения.
+        assert!(ScrollPos { id: "m\t1".into(), ..Default::default() }.clean().is_none());
+        assert!(ScrollPos { id: "я".repeat(MAX_SCROLL_ID + 1), ..Default::default() }.clean().is_none());
+        // Бесконечность в JSON не выразить, но защита нужна и от неё.
+        assert!(ScrollPos { top: f64::NAN, ..Default::default() }.clean().is_none());
+        // Числа вне разумных пределов подрезаются, а не отбрасываются.
+        let big = ScrollPos { off: -1.0e9, top: 1.0e12, ..Default::default() }.clean().unwrap();
+        assert_eq!((big.off, big.top), (-1.0e6, 1.0e9));
+    }
+}
 
 /// Сколько экранов панель принимает за один снимок: защита от агента,
 /// который пришлёт бесконечную серию.
@@ -993,4 +1082,14 @@ pub enum ServerMsg {
     /// `AgentMsg::Draft` с сохранённым текстом: он уходит всем наблюдателям,
     /// поэтому недописанное сообщение видно и на других устройствах.
     Draft { session: String, text: String },
+    /// Прислать сохранённое место чтения ленты `session`: оно хранится у агента,
+    /// чтобы сессия открывалась там, где её читали, на любом устройстве.
+    /// Ответ — `AgentMsg::Scroll` для того браузера, который спросил.
+    Scrolls { id: String, session: String },
+    /// Запомнить место чтения ленты `session`. Ответа нет: место нужно тому, кто
+    /// откроет сессию позже, а не тому, кто сейчас прокручивает.
+    ScrollSet { session: String, pos: ScrollPos },
+    /// Запомнить место прокрутки списка сессий. `ts` — время записи (мс с эпохи
+    /// Unix): по нему агенты и сервер выбирают более свежее место.
+    ListScroll { pos: ScrollPos, ts: i64 },
 }

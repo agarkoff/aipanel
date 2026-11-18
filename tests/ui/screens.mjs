@@ -144,6 +144,8 @@ const stub = `
       const msg = JSON.parse(text);
       if (msg.t === 'watch') {
         setTimeout(() => this.emit({ t: 'history', agent: msg.agent, session: msg.session, reset: true, items }), 0);
+      } else if (msg.t === 'scroll') {
+        setTimeout(() => this.emit({ t: 'scroll', id: msg.id, agent: msg.agent, session: msg.session, pos: null }), 0);
       } else if (msg.t === 'commands') {
         setTimeout(() => this.emit({ t: 'commands', agent: msg.agent, session: msg.session, commands }), 0);
       }

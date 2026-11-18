@@ -122,8 +122,10 @@ function send(msg) {
 function onMessage(msg) {
   if (msg.t === 'agents') {
     agents = msg.agents;
+    noteListPlace(msg.scroll);
     noteSessions(agents);
     renderSessions();
+    restoreListPlace();
     renderHeader();
     renderWho();
     // Сессию могли удалить в другой вкладке: её ленты больше нет.
@@ -155,6 +157,8 @@ function onMessage(msg) {
     applyFavorites();
   } else if (msg.t === 'draft') {
     onRemoteDraft(msg.agent, msg.session, typeof msg.text === 'string' ? msg.text : '');
+  } else if (msg.t === 'scroll') {
+    onFeedPlace(msg);
   } else if (msg.t === 'commands') {
     const key = commandKey(msg.agent, msg.session);
     commandsAsked.delete(key);

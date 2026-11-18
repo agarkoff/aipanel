@@ -617,6 +617,91 @@ function renderSessions() {
 
 $('filter').addEventListener('input', renderSessions);
 
+// ------------------------------------------------------------ место списка
+
+// Место прокрутки списка хранится у агента вместе с местом чтения лент
+// (`scroll.json`): список открывается там же, где его оставили, — и на телефоне,
+// и после перезапуска панели. Живёт оно не у одной сессии, поэтому у агентов
+// оно одно на всех: последнее записанное.
+function noteListPlace(pos) {
+  if (!pos || typeof pos.ts !== 'number' || pos.ts <= listPlaceTs) return;
+  listPlaceTs = pos.ts;
+  listRestore = pos;
+}
+
+// Ставит список на сохранённое место. Скрытый список (на телефоне открыта
+// сессия) измерить нельзя: место применится, когда он снова появится.
+function restoreListPlace() {
+  const box = $('sessions');
+  if (!listRestore || !box.clientHeight) return;
+  const pos = listRestore;
+  listRestore = null;
+  listSentPlace = '';
+  const node = pos.id ? listNodes.get(pos.id) : null;
+  if (pos.end) {
+    box.scrollTop = box.scrollHeight;
+  } else if (node) {
+    const shift = node.node.getBoundingClientRect().top - box.getBoundingClientRect().top - (pos.off || 0);
+    box.scrollTop = Math.max(0, box.scrollTop + shift);
+  } else if (pos.top > 0) {
+    box.scrollTop = pos.top;
+  }
+}
+
+// Что сейчас у верхней кромки списка: строка и её смещение. В конец — признаком,
+// а не пикселями: список растёт, когда приходят новые сессии.
+function listPlaceOf(box) {
+  if (!box.children.length) return null;
+  if (box.scrollHeight - box.scrollTop - box.clientHeight <= 24) {
+    return { end: true, id: '', off: 0, top: 0 };
+  }
+  const top = box.getBoundingClientRect().top;
+  for (const node of box.children) {
+    const b = node.getBoundingClientRect();
+    if (b.bottom <= top + 1) continue;
+    return { id: listNodeId(node), off: +(b.top - top).toFixed(1), top: Math.round(box.scrollTop), end: false };
+  }
+  return { id: '', off: 0, top: Math.round(box.scrollTop), end: false };
+}
+
+// id узла списка по самому узлу: план отрисовки знает его, а DOM — нет.
+function listNodeId(node) {
+  for (const [id, entry] of listNodes) if (entry.node === node) return id;
+  return '';
+}
+
+function saveListPlace() {
+  const box = $('sessions');
+  // На телефоне список скрыт, пока открыта сессия: его положение не менялось.
+  if (!box.clientHeight) return;
+  const pos = listPlaceOf(box);
+  if (!pos) return;
+  const sig = `${pos.end ? 1 : 0}|${pos.id}|${Math.round(pos.off)}|${Math.round(pos.top)}`;
+  if (sig === listSentPlace) return;
+  if (send({ t: 'list_scroll', pos })) listSentPlace = sig;
+}
+
+$('sessions').addEventListener(
+  'scroll',
+  () => {
+    // Пока сохранённое место не применено, прокрутка — ещё не решение читателя.
+    if (listRestore) return;
+    clearTimeout(listSaveTimer);
+    listSaveTimer = setTimeout(saveListPlace, 700);
+  },
+  { passive: true },
+);
+const flushListPlace = () => {
+  clearTimeout(listSaveTimer);
+  listSaveTimer = null;
+  saveListPlace();
+};
+// На телефоне вкладку могут закрыть, не дав сработать отложенной записи.
+window.addEventListener('pagehide', flushListPlace);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushListPlace();
+});
+
 // Смахивание влево по строке сессии — жест телефона. Строка едет за пальцем
 // и показывает, что будет при отпускании: до порога — синяя «Закрыть»
 // (консоль сессии закрывается сразу, без подтверждения), дальше — красная
@@ -1263,6 +1348,8 @@ function select(agent, session, sub) {
   // он нужен раньше, чем поле покажет черновик другой сессии.
   saveDraft();
   flushDraft();
+  // Место чтения прежней сессии — тоже по её ключу.
+  flushFeedPlace();
   // Сессию открыли — её уведомление в строке состояния больше не нужно.
   closeNotice(agent, session);
   dropRename();
@@ -1293,6 +1380,12 @@ function select(agent, session, sub) {
   $('feed').replaceChildren(el('div', 'empty', 'Загрузка ленты…'));
   resetPin();
   resetOlder();
+  // Где человек остановился в этой сессии, знает агент: место приходит раньше
+  // ленты, поэтому сначала ждём его, а не открываем конец. Без ответа (старый
+  // агент) лента откроется с конца, как раньше.
+  feedRestore = { key: sessionTag(agent, session), pos: undefined, ready: false, tries: 0, timer: null };
+  feedSentPlace = '';
+  askFeedPlace(agent, session);
   setHint('');
   $('app').classList.add('viewing');
   // Адрес — ссылка на этот чат; вкладка подагента уже в нём, если её просили.
@@ -1312,6 +1405,11 @@ function closeView() {
   // за сессией до следующего её открытия — и здесь, и на других устройствах.
   saveDraft();
   flushDraft();
+  // Место чтения ленты — тоже до того, как сессия перестала быть открытой.
+  flushFeedPlace();
+  feedRestore = null;
+  clearTimeout(feedSaveTimer);
+  feedSaveTimer = null;
   dropRename();
   $('app').classList.remove('viewing');
   selected = null;
@@ -1336,6 +1434,9 @@ function closeView() {
   setHint('');
   renderSessions();
   renderHeader();
+  // Место списка, сохранённое на другом устройстве, применяем, когда он снова
+  // виден: пока была открыта сессия, измерить его было нельзя.
+  restoreListPlace();
   // На телефоне список был скрыт; прокручиваем к сессии, из которой вышли.
   const mark = document.querySelector('#sessions .session.active');
   if (mark) mark.scrollIntoView({ block: 'nearest' });
