@@ -578,13 +578,16 @@ impl OpenCode {
         let Ok(list) = self.get(&format!("/api/session?limit={}", self.cfg.max_sessions)).await else {
             return Vec::new();
         };
-        let active: HashSet<String> = self
+        // Пустой список активных — не то же самое, что неполученный: без него
+        // нельзя отличить принятую сессию от работающей, и ни одна не объявляется
+        // зависшей (см. `session_status`).
+        let active: Option<HashSet<String>> = self
             .get("/api/session/active")
             .await
             .ok()
-            .and_then(|v| v["data"].as_object().map(|o| o.keys().cloned().collect()))
-            .unwrap_or_default();
-        let waiting = self.waiting_sessions(&list, &active).await;
+            .and_then(|v| v["data"].as_object().map(|o| o.keys().cloned().collect()));
+        let active_ids = active.clone().unwrap_or_default();
+        let waiting = self.waiting_sessions(&list, &active_ids).await;
         let windowed = self.windowed_sessions();
         let mut out = Vec::new();
         for s in list["data"].as_array().into_iter().flatten() {
@@ -598,7 +601,7 @@ impl OpenCode {
             let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or_else(|| basename(cwd));
             let status = session_status(
                 waiting.contains(id),
-                active.contains(id) || self.recently_launched(id),
+                active.as_ref().map(|a| a.contains(id) || self.recently_launched(id)),
                 windowed.contains(id),
                 &s["time"],
             );
@@ -1359,12 +1362,17 @@ impl OpenCode {
 /// `stalled` — сообщение принято, но opencode ещё не выполняет ход: сессии нет
 /// в списке активных, а отметка занятости новее отметки простоя. Так выглядит
 /// «залипшее» окно: запрос уже в сессии, ответа нет, и обычный `busy` не виден.
-fn session_status(waiting: bool, active: bool, windowed: bool, time: &Value) -> &'static str {
+///
+/// `running` — что об этой сессии сказал `/api/session/active`; `None` — список
+/// не получен. Тогда принятую сессию нельзя назвать зависшей: она может
+/// работать, просто проверить нечем, — и она считается занятой.
+fn session_status(waiting: bool, running: Option<bool>, windowed: bool, time: &Value) -> &'static str {
+    let accepted = time["busy"].as_i64().unwrap_or(0) > time["idle"].as_i64().unwrap_or(0);
     if waiting {
         "waiting"
-    } else if active {
+    } else if running == Some(true) || (running.is_none() && accepted) {
         "busy"
-    } else if time["busy"].as_i64().unwrap_or(0) > time["idle"].as_i64().unwrap_or(0) {
+    } else if accepted {
         "stalled"
     } else if windowed {
         "idle"
@@ -1805,13 +1813,17 @@ mod tests {
     fn marks_accepted_but_not_running_session() {
         // Ход принят в 200, простой был в 100: сессия занята, но не выполняется.
         let accepted = serde_json::json!({"busy": 200, "idle": 100});
-        assert_eq!(session_status(false, false, true, &accepted), "stalled");
-        assert_eq!(session_status(false, true, true, &accepted), "busy");
-        assert_eq!(session_status(true, false, true, &accepted), "waiting");
+        assert_eq!(session_status(false, Some(false), true, &accepted), "stalled");
+        assert_eq!(session_status(false, Some(true), true, &accepted), "busy");
+        assert_eq!(session_status(true, Some(false), true, &accepted), "waiting");
+        // Списка активных сессий нет: принятая считается занятой, а не зависшей —
+        // она может работать, и объявлять её зависшей нечем.
+        assert_eq!(session_status(false, None, true, &accepted), "busy");
         // Ход завершён: простой новее занятости.
         let finished = serde_json::json!({"busy": 100, "idle": 200});
-        assert_eq!(session_status(false, false, true, &finished), "idle");
-        assert_eq!(session_status(false, false, false, &finished), "ready");
+        assert_eq!(session_status(false, Some(false), true, &finished), "idle");
+        assert_eq!(session_status(false, Some(false), false, &finished), "ready");
+        assert_eq!(session_status(false, None, false, &finished), "ready");
     }
 
     #[test]

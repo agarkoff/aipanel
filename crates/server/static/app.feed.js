@@ -12,12 +12,16 @@ function fmtTokens(n) {
   return `${(n / 1000).toFixed(n < 10000 ? 2 : 1).replace(/\.?0+$/, '')}k`;
 }
 
+// Длительность короче суток — часами, дальше днями: «500ч» не говорит ничего,
+// а «20д 21м» — это тот же срок, записанный так, как его читают.
 function fmtElapsed(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   if (s < 60) return `${s}с`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}м ${String(s % 60).padStart(2, '0')}с`;
-  return `${Math.floor(m / 60)}ч ${String(m % 60).padStart(2, '0')}м`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}ч ${String(m % 60).padStart(2, '0')}м`;
+  return `${Math.floor(h / 24)}д ${String(h % 24).padStart(2, '0')}ч`;
 }
 
 // Строка хода на вкладке подагента: только его собственные токены. Слева —
@@ -46,8 +50,8 @@ function renderSubTurn(box) {
 
 function renderTurn() {
   const box = $('turn');
+  box.classList.remove('done', 'stalled');
   if (subTab) return renderSubTurn(box);
-  box.classList.remove('done');
   const cur = current();
   const turn = cur && cur.agent.online && BUSY_STATUSES.has(cur.session.status) ? cur.session.turn : null;
   if (!turn) {
@@ -55,12 +59,28 @@ function renderTurn() {
     return;
   }
   const parts = [];
-  const mark = el('span', 'turn-mark', '✻');
-  parts.push(el('span', '', fmtElapsed(Date.now() - turn.started_at)));
+  // Зависшая сессия ход не ведёт, поэтому время с запроса у неё ничего не
+  // значит: у брошенной сессии это дни простоя, записанные как работа. Слева
+  // стоит возраст простоя — столько сессия молчит, по той же отметке последней
+  // активности, что и в списке сессий.
+  if (cur.session.status === 'stalled') {
+    const since = cur.session.updated_at || turn.started_at;
+    box.classList.add('stalled');
+    if (since) parts.push(el('span', '', `висит ${fmtElapsed(Date.now() - since)}`));
+    box.title =
+      'Сессия приняла запрос, но ничего не выполняет: время с последней активности и токены хода, ' +
+      '↑ контекст последнего ответа, ↓ выход за ход';
+  } else {
+    parts.push(el('span', '', fmtElapsed(Date.now() - turn.started_at)));
+    box.title = 'Время с запроса и токены, записанные в транскрипт: ↑ контекст последнего ответа, ↓ выход за ход';
+  }
   if (turn.input) parts.push(el('span', '', `↑ ${fmtTokens(turn.input)}`));
   if (turn.output) parts.push(el('span', '', `↓ ${fmtTokens(turn.output)}`));
-  box.replaceChildren(mark, ...parts);
-  box.title = 'Время с запроса и токены, записанные в транскрипт: ↑ контекст последнего ответа, ↓ выход за ход';
+  if (!parts.length) {
+    box.hidden = true;
+    return;
+  }
+  box.replaceChildren(el('span', 'turn-mark', '✻'), ...parts);
   box.hidden = false;
 }
 setInterval(() => {
@@ -453,10 +473,11 @@ function callDuration(id) {
 
 // Сессия сейчас работает. Вызов без результата считается идущим только тогда:
 // незакрытый вызов в простое — прерванный или ещё не разрешённый, и таймер
-// показывал бы не работу команды, а ожидание.
+// показывал бы не работу команды, а ожидание. Зависшая сессия тоже ничего не
+// выполняет: её команда стоит с того дня, и таймер у неё не идёт.
 function callBusy() {
   const cur = current();
-  return Boolean(cur && cur.agent.online && BUSY_STATUSES.has(cur.session.status));
+  return Boolean(cur && cur.agent.online && (cur.session.status === 'busy' || cur.session.status === 'shell'));
 }
 
 // Время на строке вызова: пока команда идёт — таймер под строкой, после конца —

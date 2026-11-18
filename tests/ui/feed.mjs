@@ -1971,6 +1971,13 @@ try {
       right: !!(tb && sb) && Math.abs(tb.right - node.getBoundingClientRect().right) < 12,
       timeHidden: time ? time.hidden : null,
     };
+    // Зависшая сессия команду не выполняет: таймера у вызова нет, хотя
+    // результата так и не пришло.
+    load({ status: 'stalled' });
+    applyHistory({ items: [call] });
+    await wait(30);
+    const stalledTimer = !!document.querySelector('#feed .item[data-id="t1"] .call-timer');
+    load({ status: 'shell' });
     // Результат пришёл: команда шла 45 секунд.
     applyHistory({ items: [{ ...call }, { id: 't1:r', ts: start + 45000, role: 'tool', kind: 'tool_result', text: 'готово' }] });
     await wait(30);
@@ -1986,11 +1993,12 @@ try {
     await wait(30);
     const ask = document.querySelector('#feed .item[data-id="q1"]');
     const askTimed = !!(ask.querySelector('.call-time') || ask.querySelector('.call-timer'));
-    return { running, done, askTimed };
+    return { running, done, askTimed, stalledTimer };
   })()`);
   check('идущая команда: таймер под строкой справа', toolTime.running.timer && toolTime.running.under && toolTime.running.right, toolTime.running);
   check('идущая команда: таймер считает её время', /^1[1-3]с$/.test(toolTime.running.text), toolTime.running);
   check('идущая команда: времени справа от строки ещё нет', toolTime.running.timeHidden, toolTime.running);
+  check('зависшая сессия: таймера у незакрытого вызова нет', !toolTime.stalledTimer, toolTime);
   check('команда закончилась: таймер пропал, время появилось', toolTime.done.timer && !toolTime.done.timeHidden && toolTime.done.time === '45с', toolTime.done);
   check('вопрос Claude временем не измеряется', !toolTime.askTimed, toolTime.askTimed);
 
@@ -2102,13 +2110,26 @@ try {
     const noData = read();
     load({ status: 'idle', turn: { started_at: Date.now() - 5000, input: 10, output: 10 } });
     const idle = read();
+    // Зависшая сессия: ход принят, но ничего не выполняется. Слева — возраст
+    // простоя по последней активности, а не время с запроса (оно бывает в дни).
+    load({
+      status: 'stalled',
+      turn: { started_at: Date.now() - 40 * 3600000, input: 59319, output: 1234 },
+      updated_at: Date.now() - 2 * 86400000,
+    });
+    const stalled = read();
+    const stalledClass = document.getElementById('turn').classList.contains('stalled');
     load({});
-    return { full, bare, noData, idle };
+    return { full, bare, noData, idle, stalled, stalledClass };
   })()`);
   check('строка хода: время и оба счётчика', /^✻3[3-6]с↑ 59\.3k↓ 1\.23k$/.test(turnLine.full || ''), turnLine);
   check('строка хода: до первого ответа токенов нет', /^✻[4-6]с$/.test(turnLine.bare || ''), turnLine);
-  const elapsed = await evaluate(`[fmtElapsed(5000), fmtElapsed(125000), fmtElapsed(3725000), fmtElapsed(61285000)]`);
-  check('строка хода: секунды, минуты и часы', elapsed.join('|') === '5с|2м 05с|1ч 02м|17ч 01м', elapsed);
+  check('строка хода: зависшая — возраст простоя, не время с запроса',
+    /^✻висит 2д 0[01]ч↑ 59\.3k↓ 1\.23k$/.test(turnLine.stalled || '') && turnLine.stalledClass, turnLine);
+  const elapsed = await evaluate(
+    `[fmtElapsed(5000), fmtElapsed(125000), fmtElapsed(3725000), fmtElapsed(61285000), fmtElapsed(200000000)]`);
+  check('строка хода: секунды, минуты, часы и дни',
+    elapsed.join('|') === '5с|2м 05с|1ч 02м|17ч 01м|2д 07ч', elapsed);
   check('строка хода: нет данных агента — строки нет', turnLine.noData === null, turnLine);
   check('строка хода: сессия не работает — строки нет', turnLine.idle === null, turnLine);
 

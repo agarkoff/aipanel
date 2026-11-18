@@ -1203,8 +1203,9 @@ input, textarea, select {
 }
 .turn[hidden] { display: none; }
 .turn .turn-mark { color: var(--busy); animation: turn-pulse 1.6s ease-in-out infinite; }
-/* У завершённого подагента идти уже нечему: точка не пульсирует. */
-.turn.done .turn-mark { color: var(--muted); animation: none; }
+/* У завершённого подагента и у зависшей сессии идти нечему: точка не пульсирует. */
+.turn.done .turn-mark,
+.turn.stalled .turn-mark { color: var(--muted); animation: none; }
 @keyframes turn-pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .turn .turn-mark { animation: none; } }
 
