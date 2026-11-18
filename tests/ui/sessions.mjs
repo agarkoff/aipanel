@@ -409,20 +409,25 @@ try {
   const stillCollapsed = await evaluate(view);
   check('свёрнутый проект остаётся свёрнутым', stillCollapsed.projects[1].expanded === 'false', stillCollapsed.projects);
 
-  // Закрепление в раскрытом проекте: строка остаётся на своём месте и только
-  // помечается кнопкой — наверху её нет, иначе она была бы в списке дважды.
+  // Закрепление: строка уходит из проекта в блок «Закреплённые» наверху, чтобы
+  // её было видно всегда, в том числе когда проект свёрнут.
   await evaluate(`(() => {
     const row = [...document.querySelectorAll('#sessions .session-row')]
       .find((r) => r.querySelector('.name').textContent === 'Спит');
     row.querySelector('.session-pin').click();
   })()`);
   await sleep(80);
-  const pinnedInPlace = await evaluate(view);
-  const docsProject = pinnedInPlace.projects.find((p) => p.name === 'docs');
+  const pinnedState = await evaluate(view);
+  const docsPinned = pinnedState.projects.find((p) => p.name === 'docs');
   check(
-    'закреплённая сессия остаётся в своём проекте',
-    pinnedInPlace.pinned.length === 0 && docsProject.rows.includes('Спит') && docsProject.count === '3',
-    pinnedInPlace,
+    'закреплённая сессия уходит наверх и не повторяется в проекте',
+    JSON.stringify(pinnedState.pinned) === JSON.stringify(['Спит']) && !docsPinned.rows.includes('Спит'),
+    pinnedState,
+  );
+  check(
+    'счётчик проекта считает и закреплённую сессию',
+    docsPinned.count === '3',
+    docsPinned,
   );
   check(
     'кнопка закрепа помечает сессию',
@@ -430,32 +435,32 @@ try {
   );
   check('закреп сохранён у агента', await evaluate(`window.__state.pins.includes('claude:i')`));
 
-  // Сворачиваем проект с закреплённой: теперь она поднимается наверх, чтобы
-  // не пропасть за плюсиком.
+  // Сворачиваем проект с закреплённой: наверху она остаётся, строки проекта прячутся.
   await evaluate(`(() => {
     [...document.querySelectorAll('#sessions .project')]
       .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
   })()`);
   await sleep(80);
-  const lifted = await evaluate(view);
+  const collapsedDocs = await evaluate(view);
   check(
-    'в свёрнутом проекте закреплённая уходит наверх',
-    lifted.projects.every((p) => p.rows.length === 0) &&
-      JSON.stringify(lifted.pinned) === JSON.stringify(['Спит']),
-    lifted,
+    'в свёрнутом проекте закреплённая тоже видна',
+    collapsedDocs.projects.find((p) => p.name === 'docs').expanded === 'false' &&
+      JSON.stringify(collapsedDocs.pinned) === JSON.stringify(['Спит']),
+    collapsedDocs,
   );
 
-  // Раскрываем обратно: строка возвращается в проект, наверху её больше нет.
+  // Раскрываем обратно: закреплённая остаётся наверху, в проекте её нет.
   await evaluate(`(() => {
     [...document.querySelectorAll('#sessions .project')]
       .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
   })()`);
   await sleep(80);
-  const back = await evaluate(view);
+  const expandedDocs = await evaluate(view);
   check(
-    'после раскрытия проекта строка возвращается на место',
-    back.pinned.length === 0 && back.projects.find((p) => p.name === 'docs').rows.includes('Спит'),
-    back,
+    'после раскрытия проекта закреплённая остаётся наверху',
+    JSON.stringify(expandedDocs.pinned) === JSON.stringify(['Спит']) &&
+      !expandedDocs.projects.find((p) => p.name === 'docs').rows.includes('Спит'),
+    expandedDocs,
   );
 
   // Сессия начинает ждать ответа — её свёрнутый проект раскрывается сам.
@@ -474,6 +479,13 @@ try {
 
   // Свежая загрузка без адреса открытой сессии: в адресе (`#agent=…`) она бы
   // снова открылась и раскрыла свой проект — это не про состояние списка.
+  // Перед ней сворачиваем проект, в котором уже есть ждущая сессия: при загрузке
+  // он не должен раскрыться сам.
+  await evaluate(`(() => {
+    [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
+  })()`);
+  await sleep(120);
   await send('Page.navigate', { url: pageUrl });
   await waitFor(`!!window.__socket && !!document.getElementById('sessions')`, 8000);
   await sendList(sessions());
@@ -481,13 +493,24 @@ try {
   const reloaded = await evaluate(view);
   check(
     'закреп и свёрнутый проект приходят после перезагрузки',
-    reloaded.pinned.length === 0 &&
-      reloaded.projects.find((p) => p.name === 'docs').rows.includes('Спит') &&
+    JSON.stringify(reloaded.pinned) === JSON.stringify(['Спит']) &&
       reloaded.projects.find((p) => p.name === 'api').expanded === 'false',
     reloaded,
   );
+  check(
+    'уже ждущая сессия не раскрывает свёрнутый проект при загрузке',
+    reloaded.projects.find((p) => p.name === 'docs').expanded === 'false',
+    reloaded.projects,
+  );
 
-  // Открепление: строка пропадает и из проекта, и сверху.
+  // Раскрываем проект, чтобы после открепления строка вернулась на видное место.
+  await evaluate(`(() => {
+    [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
+  })()`);
+  await sleep(120);
+
+  // Открепление: строка возвращается в свой проект.
   await evaluate(`(() => {
     const row = [...document.querySelectorAll('#sessions .session-row')]
       .find((r) => r.querySelector('.name').textContent === 'Спит');
@@ -495,7 +518,12 @@ try {
   })()`);
   await sleep(80);
   const unpinned = await evaluate(view);
-  check('после открепления строка больше не поднимается наверх', unpinned.pinned.length === 0, unpinned);
+  check(
+    'после открепления строка вернулась в проект',
+    unpinned.pinned.length === 0 &&
+      unpinned.projects.find((p) => p.name === 'docs').rows.includes('Спит'),
+    unpinned,
+  );
   check(
     'закреп убран из хранилища агента',
     await evaluate(`window.__state.pins.length === 0`),
@@ -637,20 +665,44 @@ try {
     };
   })()`);
   await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
-  const touch = (type, x, y) =>
+  const touchAt = (type, x, y) =>
     send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] });
-  await touch('touchStart', touchBox.x1, touchBox.y1);
+  await touchAt('touchStart', touchBox.x1, touchBox.y1);
   await sleep(600);
   const holding = await evaluate(`!!document.querySelector('.drag-ghost')`);
-  await touch('touchMove', touchBox.x2, touchBox.y2);
+  await touchAt('touchMove', touchBox.x2, touchBox.y2);
   await sleep(60);
-  await touch('touchEnd', touchBox.x2, touchBox.y2);
+  await touchAt('touchEnd', touchBox.x2, touchBox.y2);
   await sleep(250);
   const touchMoves = await evaluate(`window.__moves`);
   check('долгое нажатие пальцем тоже переносит сессию', holding && touchMoves.length === 2, {
     holding,
     moves: touchMoves,
   });
+
+  // Телефон: зона нажатия закрепа должна быть под палец, а не 24 точки.
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  await sleep(250);
+  const touch = await evaluate(`(() => {
+    const row = document.querySelector('#sessions .session-row');
+    const pin = row.querySelector('.session-pin').getBoundingClientRect();
+    const when = row.querySelector('.when').getBoundingClientRect();
+    return {
+      width: Math.round(pin.width),
+      height: Math.round(pin.height),
+      pinLeft: Math.round(pin.left),
+      whenRight: Math.round(when.right),
+      viewport: window.innerWidth,
+    };
+  })()`);
+  check(
+    'на телефоне в кнопку закрепа легко попасть',
+    touch.width >= 40 && touch.height >= 40 && touch.pinLeft >= touch.whenRight,
+    touch,
+  );
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false, maxTouchPoints: 1 });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
