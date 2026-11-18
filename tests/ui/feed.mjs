@@ -2292,17 +2292,18 @@ try {
   check('push: отказ сервера снимает подписку и объясняет причину',
     push.refused && push.refusedHint.includes('нет агента в сети'), push);
 
-  // Нажатие на уведомление открывает сессию: адрес `#agent=…&session=…`.
+  // Нажатие на уведомление открывает сессию по ссылке `#agent=…&session=…`.
   const opened = await evaluate(`(async () => {
+    const link = '#' + new URLSearchParams({ agent: 'ui-test', session: window.__session.key });
     closeView();
-    location.hash = new URLSearchParams({ agent: 'ui-test', session: window.__session.key }).toString();
+    history.replaceState(null, '', link);
     takeOpenFromHash();
     tryPendingOpen();
     await new Promise((r) => setTimeout(r, 20));
-    return { selected: selected && selected.session, hash: location.hash };
+    return { selected: selected && selected.session, hash: location.hash, link };
   })()`);
-  check('push: сессия из уведомления открывается, адрес очищается',
-    opened.selected === session.key && opened.hash === '', opened);
+  check('ссылка: сессия из уведомления открывается, адрес становится её ссылкой',
+    opened.selected === session.key && opened.hash === opened.link, opened);
 
   // Подагенты: их вызовы в ленте не показываются, а список над счётчиком хода
   // открывает ленту подагента вкладкой в блоке ленты.
@@ -2363,6 +2364,44 @@ try {
     subs.backItems === subs.mainBefore && subs.mainBefore > 0 && subs.unwatched, subs);
   check('подагенты: закрытая вкладка убирает полосу вкладок',
     subs.tabsAfter === 0 && subs.tabsHidden, subs);
+
+  // Ссылка на чат: открытая сессия и лента подагента видны в адресе, ссылка
+  // открывается заново, а возврат к списку убирает её.
+  const links = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const base = '#' + new URLSearchParams({ agent: 'ui-test', session: window.__session.key });
+    closeView();
+    select('ui-test', window.__session.key);
+    await wait(20);
+    const opened = location.hash;
+    window.__sock.emit({ t: 'subagents', agent: 'ui-test', session: window.__session.key, subagents: [
+      { id: 'a1', title: 'Найти причину', agent: 'explore', running: false, started_at: 1 },
+      { id: 'a2', title: 'Написать отчёт', agent: 'general-purpose', running: false, started_at: 2 },
+    ] });
+    await wait(20);
+    // В списке подагентов второй — a2: у его ленты должен быть свой адрес.
+    document.querySelectorAll('#subagents .subagent')[1].click();
+    await wait(20);
+    const subHash = location.hash;
+    document.querySelector('#feed-tabs .feed-tab-btn').click();
+    await wait(20);
+    const mainHash = location.hash;
+    // Так адрес приходит при открытии ссылки: без события hashchange.
+    history.replaceState(history.state, '', base + '&sub=a2');
+    syncFromHash();
+    await wait(20);
+    const linked = { subTab, hash: location.hash };
+    closeView();
+    const closed = location.hash;
+    return { base, opened, subHash, mainHash, linked, closed };
+  })()`);
+  check('ссылка: открытая сессия записана в адрес',
+    links.opened === links.base && links.mainHash === links.base, links);
+  check('ссылка: у ленты подагента свой адрес',
+    links.subHash === links.base + '&sub=a2', links);
+  check('ссылка: адрес с подагентом открывает его ленту',
+    links.linked.subTab === 'a2' && links.linked.hash === links.base + '&sub=a2', links);
+  check('ссылка: возврат к списку убирает адрес сессии', links.closed === '', links);
 
   // Вывод инструментов приходит из терминала с управляющими последовательностями
   // ANSI: в ленте они не нужны, а у прогресс-строк остаётся итоговое состояние.

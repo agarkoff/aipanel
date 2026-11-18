@@ -155,26 +155,28 @@ function onPushResult(msg) {
   return true;
 }
 
-// Сессия, которую нужно открыть по нажатию на уведомление: из адреса
-// (`#agent=…&session=…`, панель была закрыта) или от service worker.
+// Чат, который нужно открыть по ссылке из адреса (`#agent=…&session=…&sub=…`):
+// панель открыли по закладке, ссылке или нажатием на уведомление. `sub` —
+// лента подагента, если ссылка ведёт в неё.
 let pendingOpen = null;
 
 function takeOpenFromHash() {
-  const params = new URLSearchParams(location.hash.slice(1));
-  const agent = params.get('agent');
-  const session = params.get('session');
-  if (!agent || !session) return;
-  pendingOpen = { agent, session };
+  const target = hashTarget();
+  if (!target) return;
+  // Запись истории остаётся списком сессий, а ссылку на чат восстановит select:
+  // иначе системная кнопка «Назад» из открытого по ссылке чата уводила бы
+  // со страницы, а не возвращала к списку.
   history.replaceState(history.state, '', location.pathname + location.search);
+  pendingOpen = target;
 }
 
 function tryPendingOpen() {
   if (!pendingOpen) return;
   const a = agents.find((x) => x.name === pendingOpen.agent);
   if (!a || !a.sessions.some((s) => s.key === pendingOpen.session)) return;
-  const { agent, session } = pendingOpen;
+  const { agent, session, sub } = pendingOpen;
   pendingOpen = null;
-  select(agent, session);
+  select(agent, session, sub);
 }
 
 if ('serviceWorker' in navigator) {

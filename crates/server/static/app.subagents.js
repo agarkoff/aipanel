@@ -8,6 +8,7 @@
 // Полный список подагентов от агента: он заменяет показанный.
 function applySubagents(list) {
   subagents = Array.isArray(list) ? list : [];
+  subagentsKnown = true;
   // Сессию могли перезапустить: вкладку, которой больше нет в списке, открыть
   // заново нечем.
   const known = new Set(subagents.map((s) => s.id));
@@ -16,6 +17,8 @@ function applySubagents(list) {
   }
   renderSubagents();
   renderSubagentTabs();
+  // Ссылка вела на подагента: теперь видно, есть ли он в этой сессии.
+  tryPendingSub();
 }
 
 function subagentById(id) {
@@ -106,6 +109,35 @@ function renderSubagentTabs() {
   );
 }
 
+// Открывает ленту подагента из ссылки. Список подагентов приходит от агента
+// позже самой сессии, поэтому здесь запоминается, что открыть, когда он придёт.
+function openLinkedSub(id) {
+  if (!id || !selected || subTab === id) return;
+  pendingSub = id;
+  tryPendingSub();
+}
+
+function tryPendingSub() {
+  if (!pendingSub || !selected) return;
+  const id = pendingSub;
+  if (!subagentById(id)) {
+    // Список уже пришёл, а подагента в нём нет: ссылка устарела. Остаёмся
+    // в основной ленте и убираем `sub` из адреса.
+    if (subagentsKnown) {
+      pendingSub = '';
+      updateSessionUrl();
+    }
+    return;
+  }
+  pendingSub = '';
+  if (subTab === id) {
+    renderSubagents();
+    renderSubagentTabs();
+    return;
+  }
+  switchFeed(id);
+}
+
 // Открывает ленту подагента вкладкой (или переключается на уже открытую).
 function openSubTab(id) {
   if (!selected || !subagentById(id)) return;
@@ -136,6 +168,8 @@ function switchFeed(id) {
 // Показывает вкладку `id` из кэша. Подписку на ленту переключает вызывающий.
 function showTab(id) {
   subTab = id;
+  // Адрес показывает открытую ленту: у подагента своя ссылка с `sub`.
+  updateSessionUrl();
   const feed = $('feed');
   const key = tabKey(id);
   const cached = feedItems.get(key);
@@ -198,6 +232,8 @@ function applySubHistory(msg) {
 // Сессию закрыли или открыли другую: подагенты и их вкладки к ней не относятся.
 function resetSubagentView() {
   subagents = [];
+  subagentsKnown = false;
+  pendingSub = '';
   subTabs = [];
   subTab = '';
   cacheReset('');

@@ -441,7 +441,70 @@ function sessionId(key) {
   return colon < 0 ? key : key.slice(colon + 1);
 }
 
-function select(agent, session) {
+// Адрес открытого чата: `#agent=…&session=…`, у ленты подагента — ещё `&sub=…`.
+// По нему чат открывается заново после перезагрузки, и у каждого есть своя ссылка.
+function sessionHash(agent, session, sub) {
+  const params = new URLSearchParams({ agent, session });
+  if (sub) params.set('sub', sub);
+  return `#${params}`;
+}
+
+// Сессия (и подагент), которую просит адрес; null — адрес не про сессию.
+function hashTarget() {
+  const params = new URLSearchParams(location.hash.slice(1));
+  const agent = params.get('agent');
+  const session = params.get('session');
+  if (!agent || !session) return null;
+  return { agent, session, sub: params.get('sub') || '' };
+}
+
+// Приводит открытый чат в соответствие с адресом: сюда приходят кнопки
+// «Назад»/«Вперёд», ручная правка адреса и ссылка из уведомления.
+function syncFromHash() {
+  const target = hashTarget();
+  if (!target) {
+    if (selected) closeView();
+    return;
+  }
+  const sameSession = selected && selected.agent === target.agent && selected.session === target.session;
+  if (sameSession) {
+    // Ссылка на другую вкладку той же сессии: основная лента или подагент.
+    if (target.sub !== subTab) {
+      if (target.sub) openLinkedSub(target.sub);
+      else switchFeed('');
+    }
+    return;
+  }
+  const agent = agents.find((a) => a.name === target.agent);
+  if (!agent || !agent.sessions.some((s) => s.key === target.session)) {
+    // Список ещё не пришёл (или агент не в сети): чат откроет `tryPendingOpen`.
+    pendingOpen = target;
+    return;
+  }
+  select(target.agent, target.session, target.sub);
+}
+
+// Ссылка на только что открытую сессию. Запись в истории нужна, чтобы системная
+// кнопка «Назад» возвращала к списку, а не уводила со страницы. Адрес уже
+// совпал (перешли по своей же ссылке) — новую запись не добавляем.
+function setSessionUrl(agent, session, sub) {
+  const hash = sessionHash(agent, session, sub);
+  if (location.hash === hash || (history.state && history.state.viewing)) {
+    history.replaceState({ viewing: true }, '', hash);
+  } else {
+    history.pushState({ viewing: true }, '', hash);
+  }
+}
+
+// Переключение вкладки не создаёт запись истории: «Назад» по-прежнему ведёт
+// к списку сессий, а адрес показывает открытую ленту.
+function updateSessionUrl() {
+  if (!selected) return;
+  const hash = sessionHash(selected.agent, selected.session, subTab);
+  if (location.hash !== hash) history.replaceState(history.state, '', hash);
+}
+
+function select(agent, session, sub) {
   // Недописанное в прежней сессии сохраняем до смены selected — ключ берётся
   // по ней, иначе черновик ушёл бы не той сессии. Отправляем сразу: агенту
   // он нужен раньше, чем поле покажет черновик другой сессии.
@@ -462,6 +525,8 @@ function select(agent, session) {
   clearTasks();
   // Вкладки и подагенты относятся к прежней сессии.
   resetSubagentView();
+  // Ссылка могла вести на ленту подагента: откроем её, когда придёт список.
+  if (sub) openLinkedSub(sub);
   // В поле — черновик открытой сессии, а не текст предыдущей.
   loadDraft();
   clearTimeout(copyIdTimer);
@@ -472,9 +537,8 @@ function select(agent, session) {
   resetOlder();
   setHint('');
   $('app').classList.add('viewing');
-  // Запись в истории нужна, чтобы системная кнопка «Назад» на телефоне
-  // возвращала к списку сессий, а не уводила со страницы.
-  if (!(history.state && history.state.viewing)) history.pushState({ viewing: true }, '');
+  // Адрес — ссылка на этот чат; вкладка подагента уже в нём, если её просили.
+  setSessionUrl(agent, session, sub);
   send({ t: 'watch', agent, session });
   // Список избранного приходит от агента: у него он и хранится.
   send({ t: 'favorites', agent, session });
@@ -505,10 +569,11 @@ function closeView() {
   resetPin();
   resetOlder();
   send({ t: 'unwatch' });
-  // Если сессию закрыли не кнопкой «Назад», текущая запись истории всё ещё
-  // помечена как просмотр: без этого следующая сессия не добавила бы новую,
-  // и системная кнопка «Назад» увела бы со страницы.
-  if (history.state && history.state.viewing) history.replaceState(null, '');
+  // У закрытой сессии своей ссылки больше нет: возвращаем адрес списка. Если
+  // сессию закрыли не кнопкой «Назад», текущая запись истории всё ещё помечена
+  // как просмотр — снимаем пометку, иначе следующая сессия не добавила бы новую.
+  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+  else if (history.state && history.state.viewing) history.replaceState(null, '');
   // Подсказка относилась к открытой сессии; в списке её копия была бы уже не к месту.
   setHint('');
   renderSessions();
@@ -522,9 +587,9 @@ $('back').addEventListener('click', () => {
   if (history.state && history.state.viewing) history.back();
   else closeView();
 });
-window.addEventListener('popstate', () => {
-  if (selected) closeView();
-});
+// «Назад»/«Вперёд» и ручная правка адреса открывают то, что написано в ссылке.
+window.addEventListener('popstate', syncFromHash);
+window.addEventListener('hashchange', syncFromHash);
 // ------------------------------------------------------------ панель сессии (телефон)
 
 function setSessionMenu(open) {
