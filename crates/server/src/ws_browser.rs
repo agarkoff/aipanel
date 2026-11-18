@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use aipanel_proto::{PushSub, ServerMsg, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PUSH_SUBS};
+use aipanel_proto::{PushSub, ServerMsg, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PUSH_SUBS};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
@@ -117,6 +117,9 @@ pub(crate) enum BrowserMsg {
     PushSubscribe { id: String, sub: PushSub },
     /// Отписать устройство с адресом подписки `endpoint`.
     PushUnsubscribe { id: String, endpoint: String },
+    /// Сохранить недописанный текст сессии: он живёт у агента, поэтому черновик
+    /// один на все устройства. Пустой `text` — черновика нет.
+    Draft { agent: String, session: String, text: String },
 }
 
 pub(crate) async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -196,7 +199,10 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 b.watching = Some((agent.clone(), session.clone()));
             }
             // Отправляем всегда: агент в ответ пришлёт свежую ленту целиком.
-            inner.to_agent(&owner, &agent, ServerMsg::Watch { session });
+            inner.to_agent(&owner, &agent, ServerMsg::Watch { session: session.clone() });
+            // Черновик хранится у агента: при открытии сессии он приходит оттуда,
+            // поэтому набранное на другом устройстве видно сразу.
+            inner.to_agent(&owner, &agent, ServerMsg::Drafts { session });
         }
         BrowserMsg::Unwatch => inner.unwatch(browser),
         BrowserMsg::Older { agent, session } => {
@@ -427,6 +433,18 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 &agent,
                 ServerMsg::Favorite { session, item, on, ts: ts.max(0), role, text, of },
             );
+        }
+        BrowserMsg::Draft { agent, session, text } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            // Черновик не больше самого сообщения; обрезаем до отправки агенту,
+            // чтобы длинный текст не раздувал его файл.
+            let text = truncate(text, MAX_DRAFT_TEXT);
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            inner.to_agent(&owner, &agent, ServerMsg::Draft { session, text });
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
             if !safe_id(&prompt) {

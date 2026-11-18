@@ -83,6 +83,9 @@ pub(crate) async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) 
             // Панель могла открыть сессию, пока агент был не в сети: избранное
             // она тогда не получила, поэтому список берём при подключении.
             let _ = tx.try_send(ServerMsg::Favorites { session: session.clone() });
+            // Черновик тоже живёт у агента: без него поле осталось бы пустым,
+            // хотя на другом устройстве текст уже набран.
+            let _ = tx.try_send(ServerMsg::Drafts { session: session.clone() });
             let _ = tx.try_send(ServerMsg::Watch { session });
         }
         // Открытые вкладки подагентов: их лента тоже должна прийти заново.
@@ -243,6 +246,20 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
             items.truncate(MAX_FAVORITES);
             let text = json!({
                 "t": "favorites", "agent": agent, "session": session, "items": items,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
+        AgentMsg::Draft { session, text } => {
+            // Черновик нужен всем, у кого открыта эта сессия: он общий, как лента.
+            let text = json!({
+                "t": "draft", "agent": agent, "session": session, "text": text,
             })
             .to_string();
             for b in inner.browsers.values() {

@@ -34,6 +34,10 @@ const SUB_ID = 'aabbccdd11223344';
 const SUB_ASK = 'найди причину';
 const SUB_REPLY = 'причина в кэше';
 const SUB_TOOL_ID = 'toolu_sub1';
+// Черновик: набранный в поле текст хранится у агента, поэтому его видит второе
+// устройство — как в мессенджере.
+const DRAFT_TEXT = 'черновик с компьютера';
+const DRAFT_PHONE = 'продолжение с телефона';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -339,22 +343,23 @@ enabled = false
       msg.error ? p.reject(new Error(JSON.stringify(msg.error))) : p.resolve(msg.result);
     }
   };
-  const send = (method, params = {}) =>
+  const send = (method, params = {}, sessionId) =>
     new Promise((resolve, reject) => {
       const id = ++seq;
       pending.set(id, { resolve, reject });
-      ws.send(JSON.stringify({ id, method, params }));
+      ws.send(JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params }));
     });
-  const evaluate = async (expression) => {
-    const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+  const evaluateIn = async (sessionId, expression) => {
+    const r = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId);
     if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails));
     return r.result.value;
   };
-  const waitFor = async (expression, ms = 10000) => {
+  const evaluate = async (expression) => evaluateIn(undefined, expression);
+  const waitFor = async (expression, ms = 10000, sessionId) => {
     const until = Date.now() + ms;
     while (Date.now() < until) {
       try {
-        if (await evaluate(expression)) return true;
+        if (await evaluateIn(sessionId, expression)) return true;
       } catch {}
       await sleep(50);
     }
@@ -462,6 +467,51 @@ enabled = false
     favoritesText.includes(SESSION_ID) && favoritesText.includes(USER_TEXT),
     favoritesText.slice(0, 200),
   );
+
+  // Черновик: браузер -> агент -> файл drafts.json, затем второе устройство
+  // (своя вкладка со своим соединением) видит тот же недописанный текст.
+  await evaluate(`(() => {
+    const area = document.querySelector('#text');
+    area.focus();
+    area.value = ${JSON.stringify(DRAFT_TEXT)};
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  const draftsFile = path.join(stateHome, 'drafts.json');
+  let draftsText = '';
+  for (let i = 0; i < 100 && !draftsText; i++) {
+    if (fs.existsSync(draftsFile)) draftsText = fs.readFileSync(draftsFile, 'utf8');
+    if (!draftsText) await sleep(100);
+  }
+  check(
+    'агент сохранил черновик в своём каталоге',
+    draftsText.includes(SESSION_ID) && draftsText.includes(DRAFT_TEXT),
+    draftsText.slice(0, 200),
+  );
+
+  // Второе устройство: отдельная вкладка с собственным WebSocket — как телефон.
+  const phoneTarget = await send('Target.createTarget', { url: `${base}/` });
+  const phone = (await send('Target.attachToTarget', { targetId: phoneTarget.targetId, flatten: true })).sessionId;
+  check('телефон: панель открылась', await waitFor(`!!document.querySelector('.session-row')`, 20000, phone));
+  await evaluateIn(phone, `(() => { document.querySelector('.session-row .session').click(); return true; })()`);
+  check(
+    'телефон: черновик с компьютера пришёл в поле',
+    await waitFor(`document.querySelector('#text').value === ${JSON.stringify(DRAFT_TEXT)}`, 15000, phone),
+    await evaluateIn(phone, `document.querySelector('#text').value`),
+  );
+  // И обратно: набранное на «телефоне» подхватывает открытая сессия на компьютере.
+  await evaluateIn(phone, `(() => {
+    const area = document.querySelector('#text');
+    area.value = ${JSON.stringify(DRAFT_PHONE)};
+    area.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  check(
+    'компьютер: текст, набранный на телефоне, появился в поле',
+    await waitFor(`document.querySelector('#text').value === ${JSON.stringify(DRAFT_PHONE)}`, 15000),
+    await evaluate(`document.querySelector('#text').value`),
+  );
+  await send('Target.closeTarget', { targetId: phoneTarget.targetId });
 
   // Переименование: браузер -> агент -> строка custom-title в транскрипте.
   await evaluate(`(() => { document.querySelector('#rename').click(); return true; })()`);

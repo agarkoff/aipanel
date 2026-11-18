@@ -6,6 +6,7 @@ mod backend;
 mod claude;
 mod config;
 mod dirs;
+mod drafts;
 mod favorites;
 mod handoff;
 mod image;
@@ -29,7 +30,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Favorite, Limits, ServerMsg, SessionInfo, MAX_ITEM_ID};
+use aipanel_proto::{AgentMsg, Favorite, Limits, ServerMsg, SessionInfo, MAX_DRAFT_TEXT, MAX_ITEM_ID};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::TcpStream,
@@ -63,6 +64,9 @@ struct Agent {
     cwds: Mutex<HashMap<String, String>>,
     /// Избранные сообщения сессий: файл `favorites.json` в каталоге агента.
     favorites: Mutex<favorites::Store>,
+    /// Недописанные сообщения сессий: файл `drafts.json` в каталоге агента.
+    /// Хранятся у агента, поэтому черновик общий для всех устройств.
+    drafts: Mutex<drafts::Store>,
     /// Подписки устройств на push-уведомления: файл `push.json` в каталоге агента.
     push: Mutex<push::Store>,
     // Состояние для команды `status` (см. status.rs).
@@ -184,6 +188,30 @@ impl Agent {
                 // Список уходит и при ошибке записи: в памяти он уже изменён, а
                 // расходиться с показанными звёздами панели ему нельзя.
                 let _ = self.out.send(AgentMsg::Favorites { session, items });
+            }
+            ServerMsg::Drafts { session } => {
+                let text = self.drafts.lock().unwrap().get(&session);
+                let _ = self.out.send(AgentMsg::Draft { session, text });
+            }
+            ServerMsg::Draft { session, text } => {
+                // Ключ сессии попадает в файл черновиков: принимаются только
+                // известные инструменты и безопасные идентификаторы.
+                if split_key(&session).is_err() {
+                    util::log(&format!("draft: некорректный ключ сессии {session}"));
+                    return;
+                }
+                let text = if text.chars().count() > MAX_DRAFT_TEXT {
+                    text.chars().take(MAX_DRAFT_TEXT).collect()
+                } else {
+                    text
+                };
+                let error = self.drafts.lock().unwrap().set(&session, text.clone(), util::now_ms()).err();
+                if let Some(e) = error {
+                    util::log(&format!("draft: {e}"));
+                }
+                // Текст уходит обратно всем наблюдателям, включая отправителя:
+                // так все устройства показывают один и тот же черновик.
+                let _ = self.out.send(AgentMsg::Draft { session, text });
             }
             ServerMsg::Send { id, session, text } => {
                 let me = Arc::clone(self);
@@ -318,8 +346,9 @@ impl Agent {
                         Err(e) => Err(e),
                     };
                     if result.is_ok() {
-                        // Сессии больше нет: её избранное не к чему относить.
+                        // Сессии больше нет: её избранное и черновик не к чему относить.
                         me.favorites.lock().unwrap().remove_session(&session);
+                        me.drafts.lock().unwrap().remove_session(&session);
                     }
                     me.finish(id, result.map(|_| None));
                 });
@@ -720,6 +749,7 @@ async fn run(cfg: Config) {
         sub_watchers: Mutex::new(HashMap::new()),
         cwds: Mutex::new(HashMap::new()),
         favorites: Mutex::new(favorites::Store::open()),
+        drafts: Mutex::new(drafts::Store::open()),
         push: Mutex::new(push::Store::open()),
         started: util::now_ms(),
         connected_since: AtomicI64::new(0),

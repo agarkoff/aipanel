@@ -420,6 +420,9 @@ function onDeleteResult(msg) {
   // Убираем строку сразу, не дожидаясь следующего списка от агента.
   const agent = agents.find((a) => a.name === req.agent);
   if (agent) agent.sessions = agent.sessions.filter((s) => s.key !== req.session);
+  // Удалённой сессии больше не к чему возвращать черновик.
+  drafts.delete(`${req.agent}\n${req.session}`);
+  draftSaved.delete(`${req.agent}\n${req.session}`);
   if (selected && selected.agent === req.agent && selected.session === req.session) closeView();
   else renderSessions();
   setHint('Сессия удалена.');
@@ -439,6 +442,11 @@ function sessionId(key) {
 }
 
 function select(agent, session) {
+  // Недописанное в прежней сессии сохраняем до смены selected — ключ берётся
+  // по ней, иначе черновик ушёл бы не той сессии. Отправляем сразу: агенту
+  // он нужен раньше, чем поле покажет черновик другой сессии.
+  saveDraft();
+  flushDraft();
   // Сессию открыли — её уведомление в строке состояния больше не нужно.
   closeNotice(agent, session);
   dropRename();
@@ -454,7 +462,8 @@ function select(agent, session) {
   clearTasks();
   // Вкладки и подагенты относятся к прежней сессии.
   resetSubagentView();
-  resetHistoryNav();
+  // В поле — черновик открытой сессии, а не текст предыдущей.
+  loadDraft();
   clearTimeout(copyIdTimer);
   $('copy-id').classList.remove('copied');
   $('sm-id').classList.remove('copied');
@@ -474,9 +483,15 @@ function select(agent, session) {
 }
 
 function closeView() {
+  // Возврат к списку не должен терять недописанный текст: он останется
+  // за сессией до следующего её открытия — и здесь, и на других устройствах.
+  saveDraft();
+  flushDraft();
   dropRename();
   $('app').classList.remove('viewing');
   selected = null;
+  // Поля ввода в списке нет; пустое значение сбрасывает и просмотр истории.
+  loadDraft();
   favorites = [];
   favButtons.clear();
   setFavoritesMenu(false);

@@ -20,6 +20,74 @@ function resetHistoryNav() {
   histDraft = $('text').value;
 }
 
+// ------------------------------------------------------------ черновики сессий
+
+// Черновик живёт у агента (как избранное), поэтому он один на все устройства:
+// набрали на компьютере — открыли на телефоне и продолжили. Здесь — кэш
+// последнего известного текста и отложенная отправка правок агенту.
+//
+// Пока листается история стрелками, в поле лежит чужой запрос, а черновик
+// сессии — тот, что был до листания (histDraft): сохранять нужно именно его.
+
+const DRAFT_DELAY = 400; // мс без нажатий — и черновик уходит агенту
+let draftTimer = 0;
+let draftQueued = null; // { key, agent, session, text } — последнее, что нужно отправить
+
+function draftKeyOf(agent, session) {
+  return `${agent}\n${session}`;
+}
+
+// Правка в поле или уход из сессии: запоминаем локально и просим агента сохранить.
+function saveDraft() {
+  if (!selected) return;
+  const key = historyKey();
+  const text = histPos ? histDraft : $('text').value;
+  if (text) drafts.set(key, text);
+  else drafts.delete(key);
+  queueDraft(selected.agent, selected.session, text);
+}
+
+// Отправка откладывается: агенту незачем получать сообщение на каждую букву.
+function queueDraft(agent, session, text) {
+  draftQueued = { key: draftKeyOf(agent, session), agent, session, text };
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(flushDraft, DRAFT_DELAY);
+}
+
+function flushDraft() {
+  clearTimeout(draftTimer);
+  const queued = draftQueued;
+  draftQueued = null;
+  if (!queued) return;
+  // Уже сохранено (например, это наше же эхо) — повторять не нужно.
+  if (draftSaved.get(queued.key) === queued.text) return;
+  if (send({ t: 'draft', agent: queued.agent, session: queued.session, text: queued.text })) {
+    draftSaved.set(queued.key, queued.text);
+  }
+}
+
+// Черновик пришёл от агента: его сохранило это или другое устройство.
+function onRemoteDraft(agent, session, text) {
+  const key = draftKeyOf(agent, session);
+  draftSaved.set(key, text);
+  // Пока в поле печатают, чужой текст не подставляем: он сотрёт набранное.
+  // Своё эхо тоже не мешает — там тот же текст, что уже в поле.
+  if (draftQueued && draftQueued.key === key) return;
+  const open = selected && selected.agent === agent && selected.session === session;
+  if (!open) return;
+  if ($('text').value === text) return;
+  $('text').value = text;
+  resetHistoryNav();
+  autoGrow();
+}
+
+function loadDraft() {
+  const area = $('text');
+  area.value = selected ? drafts.get(historyKey()) || '' : '';
+  resetHistoryNav();
+  autoGrow();
+}
+
 // Отправленный запрос — в историю, пока он не пришёл в ленту. Имя не должно
 // совпадать с `rememberRequest` ленты: второе объявление функции затирает первое.
 function rememberSent(text) {
@@ -78,6 +146,10 @@ $('composer').addEventListener('submit', (e) => {
     rememberSent(text);
     $('text').value = '';
     resetHistoryNav();
+    // Отправленный текст черновиком больше не считается: агент стирает его у
+    // себя, и на других устройствах поле тоже очищается.
+    saveDraft();
+    flushDraft();
     autoGrow();
     setHint('Отправляется…');
   } else {
@@ -96,6 +168,16 @@ $('text').addEventListener('input', () => {
   // черновиком, и следующая стрелка вверх начинает с последнего запроса.
   resetHistoryNav();
   autoGrow();
+  // Недописанное уходит агенту с небольшой задержкой: черновик общий для всех
+  // устройств, поэтому его видно и на телефоне.
+  if (selected) queueDraft(selected.agent, selected.session, $('text').value);
+});
+// Ушли из поля — черновик сохраняем сразу, не дожидаясь паузы: иначе
+// последние буквы могли бы не дойти до агента.
+$('text').addEventListener('blur', () => {
+  if (!selected) return;
+  saveDraft();
+  flushDraft();
 });
 // На компьютере Enter отправляет, Shift+Enter переносит строку (как в Claude Code и opencode).
 // На телефоне Enter переносит строку, а отправляет кнопка рядом с полем.
