@@ -187,20 +187,28 @@ function openProject(agentName, session) {
 // Сессия только что начала ждать ответа — раскрываем её проект, чтобы вопрос не
 // остался за свёрнутым заголовком. Свёрнутый вручную проект с уже известным
 // вопросом обратно не раскрывается: решение человека сильнее.
+//
+// Что уже ждало ответа к моменту открытия панели — не повод раскрывать проекты:
+// иначе после каждой перезагрузки (и на телефоне после каждого пробуждения)
+// свёрнутые проекты раскрывались бы сами и стирали сохранённое состояние.
 const lastWaiting = new Set();
+let waitingKnown = false;
 
 function revealWaiting() {
-  const waiting = new Set();
+  const waiting = [];
   for (const a of agents) {
     for (const s of a.sessions) {
-      if (s.status !== 'waiting') continue;
-      const tag = sessionTag(a.name, s.key);
-      waiting.add(tag);
-      if (!lastWaiting.has(tag)) openProject(a.name, s);
+      if (s.status === 'waiting') waiting.push({ agent: a.name, session: s, tag: sessionTag(a.name, s.key) });
     }
   }
+  if (waitingKnown) {
+    for (const w of waiting) {
+      if (!lastWaiting.has(w.tag)) openProject(w.agent, w.session);
+    }
+  }
+  waitingKnown = true;
   lastWaiting.clear();
-  for (const tag of waiting) lastWaiting.add(tag);
+  for (const w of waiting) lastWaiting.add(w.tag);
 }
 
 // Раскладка одного агента: проекты-каталоги, внутри проекта — по статусу.
@@ -567,22 +575,23 @@ function renderSessions() {
         continue;
       }
       const { pinned, projects } = orderedList(a, list);
-      // Раскрытость считаем заранее: от неё зависит, какие закреплённые строки
-      // придётся показать сверху. Во время поиска проекты раскрыты — иначе
-      // совпадение осталось бы за плюсиком.
+      // Раскрытость считаем заранее: по ней решается, что показывать внутри проекта.
+      // Во время поиска проекты раскрыты — иначе совпадение осталось бы за плюсиком.
       const opened = new Map();
       for (const project of projects) opened.set(project.key, !!q || !projectClosed(a.name, project.key));
-      // Закреплённая сессия живёт в своём проекте. Наверх, в отдельный блок, она
-      // поднимается только пока проект свёрнут: иначе строка была бы видна дважды.
-      const lifted = pinned.filter((i) => !opened.get(i.projectKey));
-      if (lifted.length) {
+      // Закреплённые сессии живут отдельным блоком сверху — так их видно всегда,
+      // даже когда проект свёрнут. Внутри проекта они не повторяются.
+      if (pinned.length) {
         plan.push(groupEntry(a.name, 'pinned', 'Закреплённые'));
-        for (const item of lifted) plan.push(rowEntry(a, item.s, false));
+        for (const item of pinned) plan.push(rowEntry(a, item.s, false));
       }
       for (const project of projects) {
         plan.push(projectEntry(a, project, opened.get(project.key)));
         if (!opened.get(project.key)) continue;
-        for (const item of project.items) plan.push(rowEntry(a, item.s, true));
+        for (const item of project.items) {
+          if (item.pinned) continue;
+          plan.push(rowEntry(a, item.s, true));
+        }
       }
     }
   }

@@ -535,6 +535,47 @@ mod tests {
     }
 
     #[test]
+    fn pin_and_collapse_apply_before_agent_answers() {
+        let (tx, mut rx) = mpsc::channel::<String>(8);
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), AgentEntry { tx: None, ..entry() });
+        inner.browsers.insert(1, BrowserEntry { tx, owner: "alice".into(), watching: None, sub: None });
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+        let key = ("alice".to_string(), "pc".to_string());
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::PinSession { agent: "pc".into(), session: "claude:s1".into(), on: true },
+        );
+        // Панель видит закреп сразу: рассылка ушла раньше, чем ответил агент,
+        // иначе следующий скан со старым состоянием снял бы закреп на глазах.
+        let sent = rx.try_recv().expect("нет рассылки браузерам");
+        assert!(sent.contains("claude:s1"), "{sent}");
+        assert_eq!(app.lock().agents[&key].pins, ["claude:s1"]);
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::PinSession { agent: "pc".into(), session: "claude:s1".into(), on: false },
+        );
+        assert!(app.lock().agents[&key].pins.is_empty());
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::CollapseProject { agent: "pc".into(), project: "dir:c:\\api".into(), on: true },
+        );
+        assert_eq!(app.lock().agents[&key].closed, ["dir:c:\\api"]);
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::CollapseProject { agent: "pc".into(), project: "dir:c:\\api".into(), on: false },
+        );
+        assert!(app.lock().agents[&key].closed.is_empty());
+    }
+
+    #[test]
     fn browser_owns_only_its_agents() {
         let mut inner = Inner::default();
         inner.agents.insert(("alice".into(), "alice-pc".into()), entry());

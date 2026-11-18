@@ -475,6 +475,26 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
                 return;
             };
+            // Список у сервера меняем сразу: сканы агента (каждые две секунды)
+            // рассылают состояние всем браузерам, и без этого нажатие откатывалось
+            // бы следующим же обновлением — со стороны это выглядело так, будто
+            // новый закреп снимает прежний. Ответ агента придёт следом и поправит
+            // сервер, если записать закреп не удалось.
+            {
+                let key = (owner.clone(), agent.clone());
+                if let Some(entry) = inner.agents.get_mut(&key) {
+                    let at = entry.pins.iter().position(|s| s == &session);
+                    if on {
+                        if let Some(i) = at {
+                            entry.pins.remove(i);
+                        }
+                        entry.pins.insert(0, session.clone());
+                    } else if let Some(i) = at {
+                        entry.pins.remove(i);
+                    }
+                }
+            }
+            inner.broadcast_agents();
             // Ответ — состояние списка от агента, его получат все браузеры.
             inner.to_agent(&owner, &agent, ServerMsg::PinSession { session, on });
         }
@@ -491,6 +511,21 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
                 return;
             };
+            // Свёрнутость тоже применяем сразу — по той же причине, что и закреп.
+            {
+                let key = (owner.clone(), agent.clone());
+                if let Some(entry) = inner.agents.get_mut(&key) {
+                    let at = entry.closed.iter().position(|p| p == &project);
+                    if on {
+                        if at.is_none() {
+                            entry.closed.push(project.clone());
+                        }
+                    } else if let Some(i) = at {
+                        entry.closed.remove(i);
+                    }
+                }
+            }
+            inner.broadcast_agents();
             inner.to_agent(&owner, &agent, ServerMsg::CollapseProject { project, on });
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
