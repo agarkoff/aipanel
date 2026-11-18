@@ -34,8 +34,8 @@ use crate::{
 };
 
 use transcript::{
-    last_update, read_feed, read_items, scan_ask, scan_tasks, tail_meta, turn_usage, ParseOpts, Queue, TailMeta,
-    TurnCache,
+    last_update, read_feed, read_items, scan_ask, scan_tasks, sub_turn, tail_meta, turn_usage, ParseOpts, Queue,
+    SubTurn, TailMeta, TurnCache,
 };
 
 const TAIL_META_BYTES: u64 = 256 * 1024;
@@ -121,6 +121,8 @@ struct St {
     tails: HashMap<PathBuf, (SystemTime, TailMeta)>,
     /// Токены текущего хода и смещение запроса, с которого он начался.
     turns: HashMap<PathBuf, TurnCache>,
+    /// Токены подагентов: файл транскрипта -> накопленное по уже прочитанным строкам.
+    sub_turns: HashMap<PathBuf, SubTurn>,
     transcripts: HashMap<String, PathBuf>,
     /// Начало показанной части транскрипта: от него назад читается догрузка
     /// ранних сообщений. Ноль — показан весь транскрипт.
@@ -423,13 +425,14 @@ impl Claude {
                 continue;
             };
             // Открывать нечего, если транскрипта рядом нет.
-            if !dir.join(format!("agent-{id}.jsonl")).is_file() {
+            let transcript = dir.join(format!("agent-{id}.jsonl"));
+            if !transcript.is_file() {
                 continue;
             }
             let path = entry.path();
             let Ok(md) = entry.metadata() else { continue };
             let stamp = md.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            let info = match st.sub_metas.get(&path) {
+            let mut info = match st.sub_metas.get(&path) {
                 Some((known, info)) if *known == stamp => info.clone(),
                 _ => {
                     let Ok(text) = fs::read_to_string(&path) else { continue };
@@ -442,6 +445,8 @@ impl Claude {
                             agent: v["agentType"].as_str().unwrap_or_default().to_owned(),
                             running: v["finished"].as_bool() != Some(true),
                             started_at,
+                            ended_at: 0,
+                            turn: None,
                         },
                         tool_id: v["toolUseId"].as_str().unwrap_or_default().to_owned(),
                     };
@@ -449,6 +454,16 @@ impl Claude {
                     info
                 }
             };
+            // Токены и границы меняются чаще метаданных, поэтому считаются не
+            // по кешу `sub_metas`, а по своему кешу транскрипта (дописываются
+            // только новые строки). Время берём из строк транскрипта: оно не
+            // зависит от того, когда файл создали или скопировали.
+            let (turn, times) = sub_turn(&mut st, &transcript);
+            info.info.turn = turn;
+            if times.started_at > 0 {
+                info.info.started_at = times.started_at;
+            }
+            info.info.ended_at = times.ended_at;
             out.push(info);
         }
         out.sort_by_key(|s| s.info.started_at);
@@ -562,7 +577,8 @@ impl Claude {
             .ok_or("транскрипт сессии не найден")?;
         fs::remove_file(&path).map_err(|e| format!("не удалось удалить транскрипт: {e}"))?;
         // Рядом Claude Code хранит транскрипты подпроцессов: <id>/subagents/…
-        if let Some(dir) = path.parent().map(|p| p.join(sid)).filter(|p| p.is_dir()) {
+        let sub_dir = path.parent().map(|p| p.join(sid));
+        if let Some(dir) = sub_dir.as_ref().filter(|p| p.is_dir()) {
             let _ = fs::remove_dir_all(dir);
         }
         let mut st = self.lock();
@@ -570,6 +586,11 @@ impl Claude {
         st.tails.remove(&path);
         st.transcripts.remove(sid);
         st.heads.remove(sid);
+        if let Some(dir) = sub_dir {
+            // Кеши разобранных файлов подагентов удалённой сессии больше не нужны.
+            st.sub_metas.retain(|p, _| !p.starts_with(&dir));
+            st.sub_turns.retain(|p, _| !p.starts_with(&dir));
+        }
         Ok(())
     }
 
@@ -1412,7 +1433,9 @@ impl Backend for Arc<Claude> {
 mod tests {
     use super::*;
 
-    use super::transcript::{is_prompt, line_model, parse_line, parse_line_opts, read_turn, sum_turn, ParseOpts};
+    use super::transcript::{
+        is_prompt, line_model, parse_line, parse_line_opts, read_turn, sub_turn, sum_turn, ParseOpts,
+    };
     use crate::util::parse_iso_ms;
 
     fn prompt_line(ts: &str) -> String {
@@ -1489,6 +1512,61 @@ mod tests {
         assert_eq!(at2, at);
         let turn2 = turn2.unwrap();
         assert_eq!((turn2.input, turn2.output), (602, 55));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Подагент: токены собираются по всему его транскрипту, дописанные строки
+    /// дочитываются с прежнего места, а недописанная ждёт продолжения.
+    #[test]
+    fn subagent_turn_reads_transcript_incrementally() {
+        let dir = std::env::temp_dir().join(format!("aipanel-sub-turn-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agent-a1.jsonl");
+        let first = format!(
+            "{}\n{}\n",
+            prompt_line("2026-11-15T03:00:00.000Z"),
+            reply_line("msg_1", 2, 100, 30)
+        );
+        fs::write(&path, &first).unwrap();
+        let mut st = St::default();
+        let (turn, times) = sub_turn(&mut st, &path);
+        let turn = turn.unwrap();
+        assert_eq!((turn.input, turn.output), (102, 30));
+        let start = parse_iso_ms("2026-11-15T03:00:00.000Z");
+        assert_eq!((times.started_at, times.ended_at), (start, start));
+
+        // Тот же ответ второй строкой (мысль, текст, вызов) не удваивает выход.
+        let second = format!("{first}{}\n", reply_line("msg_1", 2, 100, 30));
+        fs::write(&path, &second).unwrap();
+        let (turn, _) = sub_turn(&mut st, &path);
+        let turn = turn.unwrap();
+        assert_eq!((turn.input, turn.output), (102, 30));
+
+        // Дописанный ответ добавляет выход, вход берётся из последнего ответа.
+        let third = format!("{second}{}\n", reply_line("msg_2", 3, 200, 20));
+        fs::write(&path, &third).unwrap();
+        let (turn, _) = sub_turn(&mut st, &path);
+        let turn = turn.unwrap();
+        assert_eq!((turn.input, turn.output), (203, 50));
+
+        // Недописанная строка не съедается: смещение остаётся на её начале.
+        let partial = reply_line("msg_3", 4, 300, 5);
+        fs::write(&path, format!("{third}{}", &partial[..20])).unwrap();
+        let (turn, _) = sub_turn(&mut st, &path);
+        let turn = turn.unwrap();
+        assert_eq!((turn.input, turn.output), (203, 50));
+        fs::write(&path, format!("{third}{partial}\n")).unwrap();
+        let (turn, _) = sub_turn(&mut st, &path);
+        let turn = turn.unwrap();
+        assert_eq!((turn.input, turn.output), (304, 55));
+
+        // Время подагента — по меткам его строк: конец сдвигается последней.
+        let tail = r#"{"type":"user","timestamp":"2026-11-15T03:00:07.000Z","message":{"role":"user","content":"итог"}}"#;
+        fs::write(&path, format!("{third}{partial}\n{tail}\n")).unwrap();
+        let (_, times) = sub_turn(&mut st, &path);
+        assert_eq!(times.started_at, start);
+        assert_eq!(times.ended_at, parse_iso_ms("2026-11-15T03:00:07.000Z"));
         let _ = fs::remove_dir_all(&dir);
     }
 

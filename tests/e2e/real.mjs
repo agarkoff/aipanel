@@ -188,7 +188,12 @@ fs.writeFileSync(
       uuid: 'sa1',
       timestamp: '2026-11-17T09:00:03.000Z',
       cwd: CWD,
-      message: { id: 'msg_sub', role: 'assistant', content: [{ type: 'text', text: SUB_REPLY }] },
+      message: {
+        id: 'msg_sub',
+        role: 'assistant',
+        content: [{ type: 'text', text: SUB_REPLY }],
+        usage: { input_tokens: 1200, cache_creation_input_tokens: 0, cache_read_input_tokens: 300, output_tokens: 40 },
+      },
     }),
   ].join('\n') + '\n',
   'utf8',
@@ -451,6 +456,21 @@ enabled = false
       15000,
     ),
     await evaluate(`(() => ({ feed: document.querySelector('#feed')?.innerText || '', tabs: document.querySelector('#feed-tabs')?.innerText || '' }))()`),
+  );
+
+  // Вкладка подагента показывает его собственные токены и полное время работы:
+  // подагент завершён, поэтому время считается от начала до его `idle`.
+  check(
+    'подагент: на его вкладке видны его токены и время',
+    await waitFor(
+      `(() => {
+         const t = document.querySelector('#turn');
+         return t && !t.hidden && t.innerText.includes('↑ 1.5k') && t.innerText.includes('↓ 40')
+           && t.innerText.includes('1с');
+       })()`,
+      5000,
+    ),
+    await evaluate(`(() => { const t = document.querySelector('#turn'); return { hidden: t.hidden, text: t.innerText, title: t.title }; })()`),
   );
 
   await evaluate(`(() => { document.querySelectorAll('#feed-tabs .feed-tab-btn')[0].click(); return true; })()`);

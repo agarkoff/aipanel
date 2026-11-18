@@ -20,8 +20,34 @@ function fmtElapsed(ms) {
   return `${Math.floor(m / 60)}ч ${String(m % 60).padStart(2, '0')}м`;
 }
 
+// Строка хода на вкладке подагента: только его собственные токены. Слева —
+// время: идущее с запуска, пока он работает, и полное у завершённого.
+function renderSubTurn(box) {
+  const sub = subagentById(subTab);
+  if (!sub) {
+    box.hidden = true;
+    return;
+  }
+  const turn = sub.turn || {};
+  const parts = [];
+  const end = sub.running ? Date.now() : sub.ended_at;
+  if (sub.started_at && end > sub.started_at) parts.push(el('span', '', fmtElapsed(end - sub.started_at)));
+  if (turn.input) parts.push(el('span', '', `↑ ${fmtTokens(turn.input)}`));
+  if (turn.output) parts.push(el('span', '', `↓ ${fmtTokens(turn.output)}`));
+  if (!parts.length) {
+    box.hidden = true;
+    return;
+  }
+  box.replaceChildren(el('span', 'turn-mark', '✻'), ...parts);
+  box.title = 'Токены подагента: ↑ контекст его последнего ответа, ↓ выход за прогон';
+  box.classList.toggle('done', !sub.running);
+  box.hidden = false;
+}
+
 function renderTurn() {
   const box = $('turn');
+  if (subTab) return renderSubTurn(box);
+  box.classList.remove('done');
   const cur = current();
   const turn = cur && cur.agent.online && BUSY_STATUSES.has(cur.session.status) ? cur.session.turn : null;
   if (!turn) {

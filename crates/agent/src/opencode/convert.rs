@@ -14,12 +14,21 @@ use crate::util::{create_diff, edit_diff, is_edit_tool, tool_path, tool_text, tr
 
 use super::{PAGE, PROMPT_FIELDS, PROMPT_OPTIONS, RESULT_LIMIT, TEXT_LIMIT, TURN_PAGE};
 
+/// Что удалось прочитать о ходе сессии.
+pub(super) struct TurnRead {
+    pub usage: Option<TurnUsage>,
+    /// Страница прочитана целиком, а конца прошлого хода в ней нет: начало
+    /// текущего хода осталось выше. По этому признаку видно, насколько предел
+    /// `TURN_PAGE` мешает на самом деле.
+    pub beyond_page: bool,
+}
+
 /// Токены текущего хода из сообщений сессии, новые первыми. Ход идёт от первого
 /// запроса пользователя после последней отметки `idle` (конца прошлого хода), так
 /// что сообщение, отправленное посреди хода, его не перезапускает. Токены есть только
 /// у завершённых шагов ассистента: недописанный шаг в сумму не входит.
-/// `None`, если запроса не видно или ход длиннее прочитанной страницы.
-pub(super) fn turn_from_messages(msgs: &[Value]) -> Option<TurnUsage> {
+/// `usage` пуст, если запроса не видно или ход длиннее прочитанной страницы.
+pub(super) fn turn_from_messages(msgs: &[Value]) -> TurnRead {
     let mut started: Option<i64> = None;
     let mut input: Option<u64> = None;
     let mut output = 0u64;
@@ -45,9 +54,29 @@ pub(super) fn turn_from_messages(msgs: &[Value]) -> Option<TurnUsage> {
         }
     }
     if !ended && msgs.len() >= TURN_PAGE {
-        return None;
+        return TurnRead { usage: None, beyond_page: true };
     }
-    Some(TurnUsage { started_at: started?, input: input.unwrap_or(0), output })
+    let usage = started.map(|started_at| TurnUsage { started_at, input: input.unwrap_or(0), output });
+    TurnRead { usage, beyond_page: false }
+}
+
+/// Контекст последнего ответа: входные токены вместе с кешем ближайшего ответа
+/// ассистента. Сообщения приходят от новых к старым, поэтому ищется только в
+/// начале: суммарный выход подагента берётся из счётчиков его сессии, а не
+/// отсюда, так что глубже страницы ничего не нужно.
+pub(super) fn last_context(msgs: &[Value]) -> Option<u64> {
+    for m in msgs {
+        if m["type"].as_str() != Some("assistant") {
+            continue;
+        }
+        let t = &m["tokens"];
+        if !t.is_object() {
+            continue;
+        }
+        let count = |v: &Value| v.as_u64().unwrap_or(0);
+        return Some(count(&t["input"]) + count(&t["cache"]["read"]) + count(&t["cache"]["write"]));
+    }
+    None
 }
 
 pub(super) fn text_hash(text: &str) -> u64 {

@@ -35,6 +35,103 @@ pub(super) struct TurnCache {
     usage: Option<TurnUsage>,
 }
 
+/// Границы подагента по строкам его транскрипта: первая и последняя метка
+/// времени. По ним панель считает полное время работы.
+#[derive(Clone, Copy, Default)]
+pub(super) struct SubTimes {
+    pub(super) started_at: i64,
+    pub(super) ended_at: i64,
+}
+
+/// Накопленные токены подагента. Его транскрипт дописывается, поэтому читаем
+/// только новые строки и помним, что уже сложено.
+#[derive(Default)]
+pub(super) struct SubTurn {
+    mtime: Option<SystemTime>,
+    /// Сколько байт файла разобрано: с этого места читается продолжение.
+    len: u64,
+    usage: Option<TurnUsage>,
+    /// Выход по ответам: одна запись на `message.id`, хотя ответ пишется
+    /// несколькими строками с одинаковым usage.
+    outputs: HashMap<String, u64>,
+    times: SubTimes,
+}
+
+/// Токены и границы подагента: его прогон — это весь транскрипт `agent-<id>.jsonl`.
+/// Вход — контекст последнего ответа, выход — сумма по всем ответам.
+pub(super) fn sub_turn(st: &mut St, path: &Path) -> (Option<TurnUsage>, SubTimes) {
+    let Ok(md) = fs::metadata(path) else { return (None, SubTimes::default()) };
+    let mtime = md.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+    let len = md.len();
+    let cache = st.sub_turns.entry(path.to_owned()).or_default();
+    if cache.mtime == Some(mtime) && cache.len == len {
+        return (cache.usage.clone(), cache.times);
+    }
+    // Файл читается байтами, а строки дописываются целиком: недописанную
+    // строку оставляем до следующего раза, иначе смещение разъедется.
+    let from = if cache.mtime.is_some() && cache.len <= len { cache.len } else { 0 };
+    if from == 0 {
+        cache.outputs.clear();
+        cache.usage = None;
+        cache.times = SubTimes::default();
+    }
+    let data = read_range(path, from, len);
+    cache.len = from + usage_lines(&data, &mut cache.usage, &mut cache.outputs, &mut cache.times);
+    cache.mtime = Some(mtime);
+    (cache.usage.clone(), cache.times)
+}
+
+/// Складывает токены ответов из куска транскрипта и двигает границы подагента.
+/// Возвращает число байт до последней завершённой строки: её продолжение
+/// дочитается в следующий раз.
+pub(super) fn usage_lines(
+    data: &[u8],
+    usage: &mut Option<TurnUsage>,
+    outputs: &mut HashMap<String, u64>,
+    times: &mut SubTimes,
+) -> u64 {
+    let mut pos = 0;
+    let mut consumed = 0;
+    while let Some(nl) = data[pos..].iter().position(|&b| b == b'\n') {
+        let line = &data[pos..pos + nl];
+        pos += nl + 1;
+        consumed = pos;
+        let ts = line_ts_bytes(line);
+        if ts > 0 {
+            if times.started_at == 0 {
+                times.started_at = ts;
+            }
+            times.ended_at = times.ended_at.max(ts);
+        }
+        if !has(line, b"\"type\":\"assistant\"") {
+            continue;
+        }
+        let Ok(v) = serde_json::from_slice::<Value>(line) else { continue };
+        let u = &v["message"]["usage"];
+        let (Some(id), Some(out)) = (v["message"]["id"].as_str(), u["output_tokens"].as_u64()) else { continue };
+        let count = |key: &str| u[key].as_u64().unwrap_or(0);
+        let turn = usage.get_or_insert_with(|| TurnUsage { started_at: ts, input: 0, output: 0 });
+        turn.input = count("input_tokens") + count("cache_read_input_tokens") + count("cache_creation_input_tokens");
+        let slot = outputs.entry(id.to_owned()).or_insert(0);
+        if out > *slot {
+            // Ответ пишется несколькими строками с одинаковым usage: выход
+            // прибавляется только на разницу с уже учтённым.
+            turn.output += out - *slot;
+            *slot = out;
+        }
+    }
+    consumed as u64
+}
+
+/// Метка времени строки транскрипта без выделения памяти.
+fn line_ts_bytes(line: &[u8]) -> i64 {
+    const KEY: &[u8] = b"\"timestamp\":\"";
+    let Some(idx) = line.windows(KEY.len()).position(|w| w == KEY) else { return 0 };
+    let rest = &line[idx + KEY.len()..];
+    let Some(end) = rest.iter().position(|&b| b == b'"') else { return 0 };
+    std::str::from_utf8(&rest[..end]).map(parse_iso_ms).unwrap_or(0)
+}
+
 /// Название и каталог сессии из хвоста (и при необходимости начала) транскрипта.
 pub(super) fn tail_meta(st: &mut St, path: &Path, mtime: SystemTime) -> TailMeta {
     if let Some((cached, meta)) = st.tails.get(path) {

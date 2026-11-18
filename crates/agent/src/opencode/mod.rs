@@ -28,15 +28,19 @@ use crate::{
 };
 
 use convert::{
-    convert, form_prompt, models_from, older_page, permission_prompt, prompt_session_ids, prompts_hash,
+    convert, form_prompt, last_context, models_from, older_page, permission_prompt, prompt_session_ids, prompts_hash,
     queued_from_prompt, queued_items, session_model, split_model, text_hash, turn_from_messages,
 };
 
 const TEXT_LIMIT: usize = 20_000;
 const RESULT_LIMIT: usize = 4_000;
 /// Сколько последних сообщений читается, чтобы собрать токены текущего хода.
-/// Ход длиннее страницы считается неизвестным: часть его токенов не видна.
-const TURN_PAGE: usize = 100;
+/// Ход длиннее страницы считается неизвестным (о таком случае пишется строка в
+/// лог, см. `note_turn_limit`): видно, насколько предел мешает на самом деле.
+const TURN_PAGE: usize = 500;
+/// Сколько последних сообщений подагента читается ради контекста его последнего
+/// ответа: сам ответ лежит в начале страницы, глубже искать нечего.
+const SUB_CONTEXT_PAGE: usize = 20;
 /// Ограничения на запросы выбора из окна opencode: форма приходит из локального
 /// сервиса, но её поля попадают в браузер, поэтому размеры ограничены.
 const PROMPT_FIELDS: usize = 20;
@@ -175,6 +179,17 @@ fn send_subagents(
     }
 }
 
+/// Контекст последнего ответа подагента: выход уже посчитан счётчиками его
+/// сессии, здесь только вход. Если счётчиков не было, `turn` создаётся с
+/// нулевым выходом — вход всё равно полезен.
+fn set_sub_input(sub: &mut Subagent, input: Option<u64>) {
+    let Some(input) = input else { return };
+    match &mut sub.turn {
+        Some(turn) => turn.input = input,
+        None => sub.turn = Some(TurnUsage { started_at: sub.started_at, input, output: 0 }),
+    }
+}
+
 /// Пересылает части рассуждений и текста этой сессии из потока событий opencode.
 async fn watch_events(
     cfg: OpenCodeCfg,
@@ -247,6 +262,15 @@ pub struct OpenCode {
     optimistic: Mutex<HashMap<String, HashSet<String>>>,
     /// Догрузка ранних сообщений: сессия -> курсор на страницу до показанной.
     pages: Mutex<HashMap<String, Page>>,
+    /// Контекст последних ответов подагентов: id дочерней сессии ->
+    /// (время её изменения, вход последнего ответа). Выход и границы приходят
+    /// счётчиками сессии, а контекст читается из сообщений.
+    sub_inputs: Mutex<HashMap<String, (i64, Option<u64>)>>,
+    /// Когда последний раз писали в лог, что ход не поместился в страницу:
+    /// сессия -> время. Иначе журнал забивался бы опросом каждые две секунды.
+    turn_limit_logged: Mutex<HashMap<String, Instant>>,
+    /// Накопленная стоимость страницы хода за текущее окно.
+    turn_cost: Mutex<TurnCost>,
 }
 
 /// Место, с которого продолжается догрузка ранних сообщений сессии.
@@ -256,6 +280,26 @@ struct Page {
     cursor: Option<String>,
     /// Догрузка уже идёт: вторую страницу по тому же курсору не просим.
     loading: bool,
+}
+
+/// Стоимость запросов страницы хода: размер и время ответа, число сообщений.
+/// Копится между опросами и раз в 10 минут уходит в лог одной строкой — по ней
+/// видно, стало ли тяжелее после увеличения страницы.
+#[derive(Default)]
+struct TurnCost {
+    /// Начало окна; `None` — окно ещё не открыто.
+    since: Option<Instant>,
+    calls: u64,
+    bytes: u64,
+    max_bytes: usize,
+    msgs: u64,
+    max_msgs: usize,
+    /// Сколько раз страница пришла заполненной целиком.
+    full: u64,
+    millis: u128,
+    max_millis: u128,
+    /// Сколько раз токены не посчитались: ход длиннее страницы.
+    unknown: u64,
 }
 
 struct Endpoint {
@@ -280,6 +324,9 @@ impl OpenCode {
             launched: Mutex::new(HashMap::new()),
             optimistic: Mutex::new(HashMap::new()),
             pages: Mutex::new(HashMap::new()),
+            sub_inputs: Mutex::new(HashMap::new()),
+            turn_limit_logged: Mutex::new(HashMap::new()),
+            turn_cost: Mutex::new(TurnCost::default()),
         }
     }
 
@@ -317,6 +364,18 @@ impl OpenCode {
         query: &[(&str, &str)],
         body: Option<Value>,
     ) -> Result<Value, String> {
+        self.call_text(method, path, query, body).await.map(|(v, _)| v)
+    }
+
+    /// То же, но с размером ответа в байтах: по нему видно, насколько тяжёл
+    /// запрос страницы хода.
+    async fn call_text(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, &str)],
+        body: Option<Value>,
+    ) -> Result<(Value, usize), String> {
         let ep = self.endpoint()?;
         let mut req = self
             .http
@@ -332,11 +391,17 @@ impl OpenCode {
         if !status.is_success() {
             return Err(format!("opencode: HTTP {status}: {}", truncate(&text, 300)));
         }
-        Ok(serde_json::from_str(&text).unwrap_or(Value::Null))
+        let bytes = text.len();
+        Ok((serde_json::from_str(&text).unwrap_or(Value::Null), bytes))
     }
 
     async fn get(&self, path: &str) -> Result<Value, String> {
         self.call(reqwest::Method::GET, path, None).await
+    }
+
+    /// GET с размером тела ответа: мониторинг страницы хода.
+    async fn get_sized(&self, path: &str) -> Result<(Value, usize), String> {
+        self.call_text(reqwest::Method::GET, path, &[], None).await
     }
 
     /// Команды, доступные сессии (`/init`, `/review`, пользовательские из
@@ -404,10 +469,109 @@ impl OpenCode {
             .to_owned()
     }
 
-    /// Токены текущего хода по последним сообщениям сессии.
+    /// Токены текущего хода по последним сообщениям сессии. Заодно копится
+    /// стоимость страницы: её размер, время ответа и число сообщений.
     async fn turn(&self, id: &str) -> Option<TurnUsage> {
-        let v = self.get(&format!("/api/session/{id}/message?limit={TURN_PAGE}&order=desc")).await.ok()?;
-        turn_from_messages(v["data"].as_array()?)
+        let started = Instant::now();
+        let path = format!("/api/session/{id}/message?limit={TURN_PAGE}&order=desc");
+        let Ok((v, bytes)) = self.get_sized(&path).await else { return None };
+        let msgs = v["data"].as_array()?;
+        let read = turn_from_messages(msgs);
+        if read.beyond_page {
+            self.note_turn_limit(id);
+        }
+        self.note_turn_cost(bytes, msgs.len(), read.beyond_page, started.elapsed());
+        read.usage
+    }
+
+    /// Копит стоимость страницы хода и раз в 10 минут пишет сводку в лог:
+    /// средний и максимальный размер ответа, число сообщений, время, сколько раз
+    /// страница была полной и сколько раз токены не посчитались.
+    fn note_turn_cost(&self, bytes: usize, msgs: usize, beyond: bool, took: Duration) {
+        const WINDOW: Duration = Duration::from_secs(10 * 60);
+        let mut c = self.turn_cost.lock().unwrap_or_else(|e| e.into_inner());
+        let since = *c.since.get_or_insert_with(Instant::now);
+        c.calls += 1;
+        c.bytes += bytes as u64;
+        c.max_bytes = c.max_bytes.max(bytes);
+        c.msgs += msgs as u64;
+        c.max_msgs = c.max_msgs.max(msgs);
+        c.full += u64::from(msgs >= TURN_PAGE);
+        c.millis += took.as_millis();
+        c.max_millis = c.max_millis.max(took.as_millis());
+        c.unknown += u64::from(beyond);
+        if since.elapsed() < WINDOW {
+            return;
+        }
+        let calls = c.calls.max(1);
+        crate::util::log(&format!(
+            "opencode: страница хода {TURN_PAGE} — за {} мин {calls} опросов: {} КБ в среднем, {} КБ максимум; \
+             сообщений {} в среднем, {} максимум, полная страница {} раз; {} мс в среднем, {} мс максимум; \
+             токены не посчитаны {} раз",
+            WINDOW.as_secs() / 60,
+            c.bytes / 1024 / calls,
+            c.max_bytes / 1024,
+            c.msgs / calls,
+            c.max_msgs,
+            c.full,
+            c.millis / calls as u128,
+            c.max_millis,
+            c.unknown
+        ));
+        *c = TurnCost::default();
+    }
+
+    /// Ход длиннее страницы: токены не показаны. Пишем в лог не чаще раза в час
+    /// на сессию: по этим строкам видно, насколько предел `TURN_PAGE` мешает в жизни.
+    fn note_turn_limit(&self, id: &str) {
+        const EVERY: Duration = Duration::from_secs(60 * 60);
+        let mut map = self.turn_limit_logged.lock().unwrap_or_else(|e| e.into_inner());
+        if map.get(id).is_some_and(|t| t.elapsed() < EVERY) {
+            return;
+        }
+        map.retain(|_, t| t.elapsed() < EVERY);
+        map.insert(id.to_owned(), Instant::now());
+        crate::util::log(&format!(
+            "opencode: ход сессии {id} длиннее {TURN_PAGE} сообщений — токены не показаны"
+        ));
+    }
+
+    /// Контекст последнего ответа подагента: выход и границы приходят
+    /// счётчиками сессии прямо в списке, а контекст есть только в её последнем
+    /// ответе — он лежит в начале первой страницы. Перечитывается, только
+    /// когда `time.updated` сессии сдвинулся.
+    async fn with_sub_inputs(&self, subs: &mut [Subagent], stamps: &HashMap<String, i64>) {
+        let mut missing = Vec::new();
+        for (i, sub) in subs.iter_mut().enumerate() {
+            let stamp = stamps.get(&sub.id).copied().unwrap_or(0);
+            let cached = {
+                let cache = self.sub_inputs.lock().unwrap_or_else(|e| e.into_inner());
+                cache.get(&sub.id).filter(|(at, _)| *at == stamp).map(|(_, input)| *input)
+            };
+            match cached {
+                Some(input) => set_sub_input(sub, input),
+                None => missing.push((i, sub.id.clone())),
+            }
+        }
+        let loaded = futures_util::future::join_all(missing.into_iter().map(|(i, id)| async move {
+            let path = format!("/api/session/{id}/message?limit={SUB_CONTEXT_PAGE}&order=desc");
+            let input = self.get(&path).await.ok().and_then(|v| last_context(v["data"].as_array()?));
+            (i, id, input)
+        }))
+        .await;
+        for (i, id, input) in loaded {
+            set_sub_input(&mut subs[i], input);
+            let stamp = stamps.get(&id).copied().unwrap_or(0);
+            self.sub_inputs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id, (stamp, input));
+        }
+        // Кеш живёт, пока подагент есть в списке сессии.
+        self.sub_inputs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|id, _| subs.iter().any(|s| &s.id == id));
     }
 
     pub async fn scan(&self) -> Vec<SessionInfo> {
@@ -653,7 +817,9 @@ impl OpenCode {
                         tokio::join!(self.get(&list_path), self.get("/api/session/active"));
                     if let Ok(session_list) = session_list {
                         let active = active.unwrap_or(Value::Null);
-                        let now = subagents::list(&session_list, &active, &id);
+                        let mut now = subagents::list(&session_list, &active, &id);
+                        let stamps = subagents::updated(&session_list, &id);
+                        self.with_sub_inputs(&mut now, &stamps).await;
                         send_subagents(&out, &key, now, &mut shown_subs);
                     }
                 }
@@ -1536,11 +1702,35 @@ mod tests {
             json!({"type":"idle","time":{"created":900},"outcome":"succeeded"}),
             step(5000, 999, 999, 5000),
         ];
-        let turn = turn_from_messages(&msgs).unwrap();
+        let turn = turn_from_messages(&msgs).usage.unwrap();
         assert_eq!(turn.started_at, 1000);
         // Контекст — по последнему завершённому шагу, выход — по всем шагам хода.
         assert_eq!(turn.input, 1100);
         assert_eq!(turn.output, 35);
+    }
+
+    #[test]
+    fn turn_cost_counts_page_weight() {
+        let oc = OpenCode::new(OpenCodeCfg::default());
+        oc.note_turn_cost(1024, 3, false, Duration::from_millis(5));
+        oc.note_turn_cost(2048, TURN_PAGE, true, Duration::from_millis(7));
+        let c = oc.turn_cost.lock().unwrap();
+        assert_eq!((c.calls, c.bytes, c.max_bytes), (2, 3072, 2048));
+        assert_eq!((c.msgs, c.max_msgs), (3 + TURN_PAGE as u64, TURN_PAGE));
+        assert_eq!((c.full, c.unknown), (1, 1));
+        assert_eq!((c.millis, c.max_millis), (12, 7));
+    }
+
+    #[test]
+    fn last_context_takes_the_newest_answer() {
+        let msgs = vec![
+            json!({"type":"user","time":{"created":9}}),
+            step(100, 20, 5, 1000),
+            step(90, 10, 0, 800),
+        ];
+        assert_eq!(last_context(&msgs), Some(1100));
+        // Ответов ещё нет — контекста тоже.
+        assert_eq!(last_context(&[json!({"type":"user"})]), None);
     }
 
     #[test]
@@ -1552,7 +1742,7 @@ mod tests {
             json!({"type":"user","time":{"created":1000},"text":"раз"}),
             json!({"type":"idle","time":{"created":500}}),
         ];
-        let turn = turn_from_messages(&msgs).unwrap();
+        let turn = turn_from_messages(&msgs).usage.unwrap();
         assert_eq!(turn.started_at, 1000);
         assert_eq!(turn.output, 3);
     }
@@ -1561,13 +1751,17 @@ mod tests {
     fn turn_unknown_without_prompt_or_beyond_page() {
         // Ход только начался: запрос есть, завершённых шагов нет.
         let fresh = vec![json!({"type":"user","time":{"created":7}}), json!({"type":"idle","time":{"created":1}})];
-        let turn = turn_from_messages(&fresh).unwrap();
+        let read = turn_from_messages(&fresh);
+        let turn = read.usage.unwrap();
         assert_eq!((turn.started_at, turn.input, turn.output), (7, 0, 0));
+        assert!(!read.beyond_page);
         // Отметка конца хода есть, а запроса после неё нет.
-        assert!(turn_from_messages(&[step(1, 1, 0, 0), json!({"type":"idle","time":{"created":1}})]).is_none());
+        assert!(turn_from_messages(&[step(1, 1, 0, 0), json!({"type":"idle","time":{"created":1}})]).usage.is_none());
         // Страница заполнена, и конца прошлого хода в ней не видно.
         let long: Vec<Value> = (0..TURN_PAGE).map(|_| step(1, 1, 0, 0)).collect();
-        assert!(turn_from_messages(&long).is_none());
+        let read = turn_from_messages(&long);
+        assert!(read.usage.is_none());
+        assert!(read.beyond_page);
     }
 
     #[test]

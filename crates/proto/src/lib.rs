@@ -276,6 +276,14 @@ pub struct Subagent {
     /// Время запуска, мс с эпохи Unix; 0 — неизвестно.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub started_at: i64,
+    /// Время завершения, мс с эпохи Unix; 0 — подагент ещё работает или время
+    /// неизвестно. Панель показывает по нему полное время работы.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ended_at: i64,
+    /// Токены самого подагента: его прогон целиком. У Claude Code — весь его
+    /// транскрипт, у opencode — счётчики его сессии.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<TurnUsage>,
 }
 
 /// Сколько подагентов сессии показывает панель. Старые вытесняются: в списке
@@ -710,6 +718,8 @@ mod tasks_tests {
                 agent: "explore".into(),
                 running: true,
                 started_at: 7,
+                ended_at: 0,
+                turn: Some(TurnUsage { started_at: 7, input: 1200, output: 34 }),
             }],
         };
         let text = serde_json::to_string(&msg).unwrap();
