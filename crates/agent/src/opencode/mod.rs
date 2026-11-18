@@ -3,6 +3,7 @@
 //! Адрес и пароль сервиса opencode хранит в `~/.local/state/opencode/service.json`.
 
 mod convert;
+mod subagents;
 mod tasks;
 
 use std::{
@@ -14,7 +15,7 @@ use std::{
 };
 
 use aipanel_proto::{
-    AgentMsg, BgTask, Command, Item, Limits, ModelInfo, SessionInfo, TurnUsage, MAX_TITLE,
+    AgentMsg, BgTask, Command, Item, Limits, ModelInfo, SessionInfo, Subagent, TurnUsage, MAX_TITLE,
 };
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{self, UnboundedSender};
@@ -43,6 +44,9 @@ const PROMPT_OPTIONS: usize = 50;
 /// Сколько сообщений opencode отдаёт за один запрос: столько же догружается
 /// кнопкой «Загрузить ранние сообщения».
 const PAGE: usize = 100;
+/// Сколько сессий opencode запрашивается, когда нужны дочерние (подагенты):
+/// подпись и id подагента есть только в списке сессий.
+const SUBAGENT_SESSIONS: usize = 100;
 /// Пока окно запускается, повторное сообщение в ту же сессию не открывает второе окно.
 const LAUNCH_GUARD: Duration = Duration::from_secs(25);
 
@@ -154,6 +158,19 @@ fn send_tasks(
     let now = tasks.running();
     if shown.as_ref() != Some(&now) {
         let _ = out.send(AgentMsg::Tasks { session: key.to_owned(), tasks: now.clone() });
+        *shown = Some(now);
+    }
+}
+
+/// То же для подагентов: полный список уходит, только когда он изменился.
+fn send_subagents(
+    out: &UnboundedSender<AgentMsg>,
+    key: &str,
+    now: Vec<Subagent>,
+    shown: &mut Option<Vec<Subagent>>,
+) {
+    if shown.as_ref() != Some(&now) {
+        let _ = out.send(AgentMsg::Subagents { session: key.to_owned(), subagents: now.clone() });
         *shown = Some(now);
     }
 }
@@ -408,6 +425,11 @@ impl OpenCode {
         let mut out = Vec::new();
         for s in list["data"].as_array().into_iter().flatten() {
             let Some(id) = s["id"].as_str() else { continue };
+            // Дочерняя сессия — подагент: у неё своя лента в панели, а в списке
+            // сессий ей делать нечего.
+            if s["parentID"].as_str().is_some_and(|p| !p.is_empty()) {
+                continue;
+            }
             let cwd = s["location"]["directory"].as_str().unwrap_or_default();
             let title = s["title"].as_str().filter(|t| !t.is_empty()).unwrap_or_else(|| basename(cwd));
             let status = session_status(
@@ -489,6 +511,9 @@ impl OpenCode {
         // Фоновые задачи: команды с `background: true` и подагенты.
         let mut tasks = tasks::Tracker::default();
         let mut shown_tasks: Option<Vec<BgTask>> = None;
+        // Подагенты: дочерние сессии. Их вызовы в ленту не попадают, панель
+        // показывает список.
+        let mut shown_subs: Option<Vec<Subagent>> = None;
         let (tx, mut events) = mpsc::channel(256);
         let _events = AbortOnDrop(tokio::spawn(watch_events(
             self.cfg.clone(),
@@ -619,6 +644,18 @@ impl OpenCode {
                         first = false;
                     }
                     send_tasks(&out, &key, &tasks, &mut shown_tasks);
+                    // Подагенты — дочерние сессии opencode: id, подпись и тип
+                    // агента есть в списке сессий, работа — в списке активных.
+                    // Сам вызов инструмента для этого не годится: у синхронного
+                    // `subagent` в нём нет ни id сессии, ни статуса.
+                    let list_path = format!("/api/session?limit={SUBAGENT_SESSIONS}");
+                    let (session_list, active) =
+                        tokio::join!(self.get(&list_path), self.get("/api/session/active"));
+                    if let Ok(session_list) = session_list {
+                        let active = active.unwrap_or(Value::Null);
+                        let now = subagents::list(&session_list, &active, &id);
+                        send_subagents(&out, &key, now, &mut shown_subs);
+                    }
                 }
                 event = events.recv() => {
                     let Some(event) = event else { break };
@@ -639,6 +676,45 @@ impl OpenCode {
                         });
                     }
                 }
+            }
+        }
+    }
+
+    /// Следит за лентой подагента `sub` — дочерней сессии opencode: её сообщения
+    /// лежат по тому же адресу, что и у обычной сессии. Очередь, задачи и
+    /// запросы подагента панели не нужны, поэтому здесь только сама лента.
+    pub async fn watch_sub(&self, key: String, _id: String, sub: String, out: UnboundedSender<AgentMsg>) {
+        let mut feed = Feed::default();
+        let mut first = true;
+        // Ошибку сервиса повторяем, только когда она меняется: иначе подсказка
+        // в панели обновлялась бы каждые полторы секунды.
+        let mut shown_error: Option<String> = None;
+        let mut tick = tokio::time::interval(Duration::from_millis(1500));
+        loop {
+            tick.tick().await;
+            let mut items = Vec::new();
+            let error = match self.get(&format!("/api/session/{sub}/message?limit={PAGE}&order=desc")).await {
+                Ok(v) => {
+                    for m in v["data"].as_array().into_iter().flatten().rev() {
+                        convert(m, &mut items);
+                    }
+                    items.retain(|it| feed.changed(it));
+                    None
+                }
+                Err(e) => Some(e),
+            };
+            let error_changed = error != shown_error;
+            if first || !items.is_empty() || error_changed {
+                let _ = out.send(AgentMsg::SubHistory {
+                    session: key.clone(),
+                    sub: sub.clone(),
+                    reset: first,
+                    items,
+                    more: false,
+                    error: error.clone(),
+                });
+                shown_error = error;
+                first = false;
             }
         }
     }
@@ -1230,6 +1306,10 @@ impl Backend for Arc<OpenCode> {
 
     fn watch(&self, key: String, id: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()> {
         Box::pin(async move { OpenCode::watch(self, key, id, out).await })
+    }
+
+    fn watch_sub(&self, key: String, id: String, sub: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()> {
+        Box::pin(async move { OpenCode::watch_sub(self, key, id, sub, out).await })
     }
 
     fn older<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(Vec<Item>, bool), String>> {

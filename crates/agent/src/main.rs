@@ -55,7 +55,10 @@ struct Agent {
     force_limits: AtomicBool,
     online: AtomicBool,
     force: AtomicBool,
+    /// Наблюдение за лентой сессии: ключ — `tool:id`.
     watchers: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// Наблюдение за лентой подагента: ключ — (сессия, подагент).
+    sub_watchers: Mutex<HashMap<(String, String), JoinHandle<()>>>,
     /// Каталог каждой известной сессии: от него считаются относительные пути картинок.
     cwds: Mutex<HashMap<String, String>>,
     /// Избранные сообщения сессий: файл `favorites.json` в каталоге агента.
@@ -112,6 +115,28 @@ impl Agent {
             }
             ServerMsg::Unwatch { session } => {
                 if let Some(task) = self.watchers.lock().unwrap().remove(&session) {
+                    task.abort();
+                }
+            }
+            ServerMsg::WatchSub { session, sub } => {
+                if !safe_id(&sub) {
+                    return;
+                }
+                let me = Arc::clone(self);
+                let key = session.clone();
+                let sub_key = (session, sub.clone());
+                let task = tokio::spawn(async move {
+                    let out = me.out.clone();
+                    if let Ok((backend, id)) = me.session(&key) {
+                        backend.watch_sub(key.clone(), id.to_owned(), sub, out).await;
+                    }
+                });
+                if let Some(old) = self.sub_watchers.lock().unwrap().insert(sub_key, task) {
+                    old.abort();
+                }
+            }
+            ServerMsg::UnwatchSub { session, sub } => {
+                if let Some(task) = self.sub_watchers.lock().unwrap().remove(&(session, sub)) {
                     task.abort();
                 }
             }
@@ -450,6 +475,9 @@ impl Agent {
         for (_, task) in self.watchers.lock().unwrap().drain() {
             task.abort();
         }
+        for (_, task) in self.sub_watchers.lock().unwrap().drain() {
+            task.abort();
+        }
     }
 }
 
@@ -689,6 +717,7 @@ async fn run(cfg: Config) {
         online: AtomicBool::new(false),
         force: AtomicBool::new(false),
         watchers: Mutex::new(HashMap::new()),
+        sub_watchers: Mutex::new(HashMap::new()),
         cwds: Mutex::new(HashMap::new()),
         favorites: Mutex::new(favorites::Store::open()),
         push: Mutex::new(push::Store::open()),

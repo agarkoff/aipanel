@@ -3,7 +3,7 @@
 //! файла и превращение строк в элементы ленты; состояние сессий — в `mod.rs`.
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     io::{Read, Seek, SeekFrom},
     path::Path,
@@ -13,7 +13,7 @@ use std::{
 use aipanel_proto::{Item, TurnUsage};
 use serde_json::Value;
 
-use crate::util::{create_diff, edit_diff, parse_iso_ms, to_ms, tool_text, truncate, DIFF_LIMIT};
+use crate::util::{create_diff, edit_diff, is_subagent_tool, parse_iso_ms, to_ms, tool_text, truncate, DIFF_LIMIT};
 
 use super::{HEAD_META_BYTES, St, TAIL_META_BYTES, RESULT_LIMIT, TEXT_LIMIT, TURN_CHUNK, TURN_MAX_BYTES};
 
@@ -251,6 +251,24 @@ pub(super) fn read_range(path: &Path, start: u64, end: u64) -> Vec<u8> {
     buf
 }
 
+/// Что разбирать и что прятать при чтении строк транскрипта.
+#[derive(Default)]
+pub(super) struct ParseOpts<'a> {
+    /// Не показывать вызовы подагентов (`Agent`, `Task`) и их результаты: у них
+    /// своя лента, которая открывается из списка подагентов.
+    pub(super) hide_subagents: bool,
+    /// id вызовов подагентов из файлов `<id>/subagents/*.meta.json`: по ним
+    /// прячется результат вызова, даже если строка самого вызова осталась за
+    /// пределами прочитанного куска.
+    pub(super) hide_ids: Option<&'a HashSet<String>>,
+    /// Разбирать записи подагента: в его транскрипте все строки помечены
+    /// `isSidechain`, а в ленте сессии такие строки пропускаются.
+    pub(super) sidechain: bool,
+    /// id вызовов подагентов, встреченных в этом куске: по ним прячется
+    /// результат вызова, даже когда файла метаданных ещё нет.
+    pub(super) seen: HashSet<String>,
+}
+
 /// Читает `[start, end)` и разбирает только завершённые строки. Возвращает
 /// элементы, число обработанных байт и смещение в файле, с которого начинаются
 /// оставленные элементы (конец прочитанного, если оставлено пусто).
@@ -258,8 +276,15 @@ pub(super) fn read_range(path: &Path, start: u64, end: u64) -> Vec<u8> {
 /// `max_items` ограничивает размер ленты, которую панель получает сразу; обрезка
 /// идёт по строкам, чтобы смещение начала оставшегося было точным — с него
 /// продолжится догрузка ранних сообщений.
-pub(super) fn read_items(path: &Path, start: u64, end: u64, skip_first: bool, max_items: usize) -> (Vec<Item>, u64, u64) {
-    let (items, _, consumed, begin) = read_feed(path, start, end, skip_first, max_items, None);
+pub(super) fn read_items(
+    path: &Path,
+    start: u64,
+    end: u64,
+    skip_first: bool,
+    max_items: usize,
+    mut opts: ParseOpts,
+) -> (Vec<Item>, u64, u64) {
+    let (items, _, consumed, begin) = read_feed(path, start, end, skip_first, max_items, None, &mut opts);
     (items, consumed, begin)
 }
 
@@ -332,6 +357,7 @@ pub(super) fn read_feed(
     skip_first: bool,
     max_items: usize,
     mut queue: Option<&mut Queue>,
+    opts: &mut ParseOpts,
 ) -> (Vec<Item>, Vec<String>, u64, u64) {
     let buf = read_range(path, start, end);
     let Some(last_nl) = buf.iter().rposition(|b| *b == b'\n') else {
@@ -364,7 +390,7 @@ pub(super) fn read_feed(
                         }
                     }
                 }
-                _ => parse_line(line, &mut items),
+                _ => parse_line_opts(line, &mut items, opts),
             }
         }
         if !items.is_empty() {
@@ -465,7 +491,12 @@ pub(super) fn push_diff(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item>) {
     });
 }
 
+#[cfg(test)]
 pub(super) fn parse_line(line: &str, out: &mut Vec<Item>) {
+    parse_line_opts(line, out, &mut ParseOpts::default());
+}
+
+pub(super) fn parse_line_opts(line: &str, out: &mut Vec<Item>, opts: &mut ParseOpts) {
     // Сообщение, отправленное в открытую сессию, пока модель работает: Claude Code
     // не пишет для него отдельную строку `type: user`, а вкладывает в текущий ход
     // вложением `queued_command`. Без разбора этой строки такие сообщения в ленту
@@ -484,7 +515,9 @@ pub(super) fn parse_line(line: &str, out: &mut Vec<Item>) {
         Some("assistant") => "assistant",
         _ => return,
     };
-    if v["isSidechain"].as_bool() == Some(true) || v["isMeta"].as_bool() == Some(true) {
+    // Записи подагента лежат и в его собственном транскрипте, и отдельными
+    // строками с `isSidechain` в основном. В ленте сессии вторые не нужны.
+    if v["isMeta"].as_bool() == Some(true) || (!opts.sidechain && v["isSidechain"].as_bool() == Some(true)) {
         return;
     }
     let uuid = v["uuid"].as_str().unwrap_or_default();
@@ -527,31 +560,54 @@ pub(super) fn parse_line(line: &str, out: &mut Vec<Item>) {
                             push(i, role, "thinking", truncate(text, TEXT_LIMIT), None);
                         }
                     }
-                    Some("tool_use") => push(
-                        i,
-                        "assistant",
-                        "tool_use",
-                        match b["name"].as_str() {
-                            // Панель разбирает вопросы из JSON: обрезка по пределу
-                            // аргументов (4000) сломала бы его на длинных вопросах.
-                            Some("AskUserQuestion") => {
-                                truncate(&serde_json::to_string(&b["input"]).unwrap_or_default(), TEXT_LIMIT)
+                    Some("tool_use") => {
+                        let name = b["name"].as_str();
+                        let id = b["id"].as_str().unwrap_or_default();
+                        let subagent = name.is_some_and(is_subagent_tool);
+                        // id из метаданных подагентов: вызов мог остаться за
+                        // пределами этого куска, а его результат — попасть в него.
+                        let known = !id.is_empty() && opts.hide_ids.is_some_and(|ids| ids.contains(id));
+                        if subagent && opts.hide_subagents {
+                            // По этому id прячется результат вызова ниже.
+                            if !id.is_empty() {
+                                opts.seen.insert(id.to_owned());
                             }
-                            name => tool_text(name, &b["input"]),
-                        },
-                        b["name"].as_str().map(str::to_owned),
-                    ),
+                        }
+                        if !(opts.hide_subagents && (subagent || known)) {
+                            push(
+                                i,
+                                "assistant",
+                                "tool_use",
+                                match name {
+                                    // Панель разбирает вопросы из JSON: обрезка по пределу
+                                    // аргументов (4000) сломала бы его на длинных вопросах.
+                                    Some("AskUserQuestion") => {
+                                        truncate(&serde_json::to_string(&b["input"]).unwrap_or_default(), TEXT_LIMIT)
+                                    }
+                                    name => tool_text(name, &b["input"]),
+                                },
+                                name.map(str::to_owned),
+                            );
+                        }
+                    }
                     Some("tool_result") => {
-                        let text = match &b["content"] {
-                            Value::String(s) => s.clone(),
-                            Value::Array(parts) => parts
-                                .iter()
-                                .filter_map(|p| p["text"].as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                            _ => String::new(),
-                        };
-                        push(i, "tool", "tool_result", truncate(&text, RESULT_LIMIT), None);
+                        let use_id = b["tool_use_id"].as_str().unwrap_or_default();
+                        let hidden = opts.hide_subagents
+                            && !use_id.is_empty()
+                            && (opts.hide_ids.is_some_and(|ids| ids.contains(use_id))
+                                || opts.seen.contains(use_id));
+                        if !hidden {
+                            let text = match &b["content"] {
+                                Value::String(s) => s.clone(),
+                                Value::Array(parts) => parts
+                                    .iter()
+                                    .filter_map(|p| p["text"].as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                                _ => String::new(),
+                            };
+                            push(i, "tool", "tool_result", truncate(&text, RESULT_LIMIT), None);
+                        }
                     }
                     _ => {}
                 }

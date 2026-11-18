@@ -36,6 +36,11 @@ pub(crate) enum BrowserMsg {
     Unwatch,
     /// Догрузить более ранние сообщения ленты: агент ответит `older`.
     Older { agent: String, session: String },
+    /// Открыть ленту подагента `sub` вместо основной ленты сессии; агент будет
+    /// присылать её, пока вкладка открыта.
+    WatchSub { agent: String, session: String, sub: String },
+    /// Лента подагента больше не нужна: ушли в основную ленту или закрыли вкладку.
+    UnwatchSub { agent: String, session: String, sub: String },
     Send { id: String, agent: String, session: String, text: String },
     Interrupt { id: String, agent: String, session: String },
     Start {
@@ -136,7 +141,7 @@ pub(crate) async fn browser_conn(app: Arc<App>, owner: String, socket: WebSocket
         let mut inner = app.lock();
         let id = inner.id();
         let _ = tx.try_send(inner.agents_json(&owner));
-        inner.browsers.insert(id, BrowserEntry { tx, owner, watching: None });
+        inner.browsers.insert(id, BrowserEntry { tx, owner, watching: None, sub: None });
         id
     };
 
@@ -204,6 +209,53 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             // Старые сообщения одинаковы для всех, кто смотрит сессию: ответ
             // агента уходит всем наблюдателям, как и лента.
             inner.to_agent(&owner, &agent, ServerMsg::Older { session });
+        }
+        BrowserMsg::WatchSub { agent, session, sub } => {
+            if !inner.browser_owns(browser, &agent) || !safe_id(&sub) {
+                return;
+            }
+            // Подагента открывают у той сессии, лента которой показана.
+            let watching_now = inner
+                .browsers
+                .get(&browser)
+                .is_some_and(|b| matches!(&b.watching, Some((a, s)) if a == &agent && s == &session));
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            if !watching_now {
+                return;
+            }
+            // У браузера открыт один подагент: прежний закрывается вместе с вкладкой.
+            let old = inner.browsers.get_mut(&browser).and_then(|b| b.sub.replace(sub.clone()));
+            if let Some(old) = old.filter(|o| *o != sub) {
+                if inner.sub_watchers(&owner, &agent, &session, &old) == 0 {
+                    inner.to_agent(&owner, &agent, ServerMsg::UnwatchSub { session: session.clone(), sub: old });
+                }
+            }
+            inner.to_agent(&owner, &agent, ServerMsg::WatchSub { session, sub });
+        }
+        BrowserMsg::UnwatchSub { agent, session, sub } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            // Отмена относится только к той ленте, которая сейчас открыта: вкладку
+            // могли сменить раньше, чем пришло это сообщение.
+            let current = inner.browsers.get(&browser).is_some_and(|b| {
+                matches!(&b.watching, Some((a, s)) if a == &agent && s == &session)
+                    && b.sub.as_deref() == Some(sub.as_str())
+            });
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            if !current {
+                return;
+            }
+            if let Some(b) = inner.browsers.get_mut(&browser) {
+                b.sub = None;
+            }
+            if inner.sub_watchers(&owner, &agent, &session, &sub) == 0 {
+                inner.to_agent(&owner, &agent, ServerMsg::UnwatchSub { session, sub });
+            }
         }
         BrowserMsg::Commands { agent, session } => {
             if !inner.browser_owns(browser, &agent) {

@@ -38,7 +38,7 @@ function resetOlder() {
 // нечего или соединения нет. По этому ответу нажатие закрепа понимает,
 // дождётся ли оно догрузки, или идти обычным путём.
 function askOlder() {
-  if (!selected || !olderMore || !nodes.size) return false;
+  if (subTab || !selected || !olderMore || !nodes.size) return false;
   if (olderPending) return true;
   if (!send({ t: 'older', agent: selected.agent, session: selected.session })) return false;
   olderPending = true;
@@ -60,7 +60,7 @@ function askOlder() {
 // них отдельным нажатием кнопки не нужно. Кнопка остаётся для тех случаев,
 // когда догрузку не вышло запустить прокруткой.
 function askOlderAtTop() {
-  if (!olderMore || olderPending || !nodes.size) return;
+  if (subTab || !olderMore || olderPending || !nodes.size) return;
   if ($('feed').scrollTop > 0) return;
   askOlder();
 }
@@ -79,6 +79,10 @@ function applyOlder(msg) {
     return;
   }
   olderMore = msg.more !== false;
+  cachePrepend('', msg.items || []);
+  // Пока догрузка шла, могли открыть вкладку подагента: тогда пополняем только
+  // кэш — соберётся при возврате в основную ленту.
+  if (subTab) return;
   mountOlder();
   const feed = $('feed');
   const pinned = myMessages()[pinIdx] || null;
@@ -273,6 +277,7 @@ function nearEnd() {
 // кромки ленты, а у самого низа — последнее своё. Как в Telegram, где закреп
 // меняется синхронно с движением ленты.
 function followPin() {
+  if (subTab) return;
   const list = myMessages();
   if (!list.length) return;
   let idx = list.length - 1;

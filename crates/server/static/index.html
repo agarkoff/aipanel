@@ -126,6 +126,7 @@
       <span id="pin-count" class="pin-count" hidden></span>
     </button>
     <div class="feed-wrap">
+      <div id="feed-tabs" class="feed-tabs" role="tablist" aria-label="Ленты сессии" hidden></div>
       <div id="feed" class="feed">
         <button id="older" class="older" type="button" hidden>Загрузить ранние сообщения</button>
       </div>
@@ -136,6 +137,7 @@
         </svg>
       </button>
     </div>
+    <div id="subagents" class="subagents" role="region" aria-label="Подагенты сессии" hidden></div>
     <p id="turn" class="turn" hidden></p>
     <details id="tasks" class="bg-tasks" hidden>
       <summary><span class="turn-mark" aria-hidden="true">●</span> <span id="tasks-title"></span></summary>
@@ -268,6 +270,7 @@
 <script src="/app.notify.js"></script>
 <script src="/app.push.js"></script>
 <script src="/app.feed.js"></script>
+<script src="/app.subagents.js"></script>
 <script src="/app.favorites.js"></script>
 <script src="/app.paging.js"></script>
 <script src="/app.prompts.js"></script>

@@ -17,7 +17,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use aipanel_proto::{AgentMsg, BgTask, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, MAX_TITLE};
+use aipanel_proto::{
+    AgentMsg, BgTask, Command, Item, Limits, ModelInfo, Prompt, SessionInfo, Subagent, MAX_SUBAGENTS, MAX_TITLE,
+};
 use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -28,11 +30,12 @@ use crate::{
     backend::{Backend, Fut},
     config::ClaudeCfg,
     handoff,
-    util::{basename, meter, now_ms, truncate},
+    util::{basename, meter, now_ms, to_ms, truncate},
 };
 
 use transcript::{
-    last_update, read_feed, read_items, scan_ask, scan_tasks, tail_meta, turn_usage, Queue, TailMeta, TurnCache,
+    last_update, read_feed, read_items, scan_ask, scan_tasks, tail_meta, turn_usage, ParseOpts, Queue, TailMeta,
+    TurnCache,
 };
 
 const TAIL_META_BYTES: u64 = 256 * 1024;
@@ -103,6 +106,15 @@ struct Known {
     status: String,
 }
 
+/// Подагент сессии: что уходит в панель и каким вызовом он запущен.
+#[derive(Clone)]
+struct SubInfo {
+    info: Subagent,
+    /// id вызова инструмента (`toolu_…`): строку вызова и её результат панель
+    /// не показывает — подагент открывается отдельной вкладкой.
+    tool_id: String,
+}
+
 #[derive(Default)]
 struct St {
     known: HashMap<String, Known>,
@@ -113,6 +125,11 @@ struct St {
     /// Начало показанной части транскрипта: от него назад читается догрузка
     /// ранних сообщений. Ноль — показан весь транскрипт.
     heads: HashMap<String, u64>,
+    /// Метаданные подагентов: файл -> (время изменения, разобранная запись).
+    /// Наблюдение за сессией спрашивает список часто, а читать десятки файлов
+    /// каждый раз незачем: Claude Code дописывает их только при запуске и конце
+    /// подагента, и это видно по mtime.
+    sub_metas: HashMap<PathBuf, (SystemTime, SubInfo)>,
     listed_at: Option<Instant>,
     /// Вопросы `AskUserQuestion`, показанные панели формой: по ним вводится ответ.
     asks: HashMap<String, crate::ask::Ask>,
@@ -378,6 +395,69 @@ impl Claude {
             .find(|p| p.is_file())
     }
 
+    /// Каталог подагентов сессии: Claude Code кладёт их рядом с транскриптом,
+    /// в `<sessionId>/subagents`.
+    fn subagent_dir(&self, sid: &str) -> Option<PathBuf> {
+        let path = self.lock().known.get(sid).and_then(|k| k.path.clone()).or_else(|| self.find_path(sid))?;
+        Some(path.parent()?.join(sid).join("subagents"))
+    }
+
+    /// Транскрипт подагента `sub` сессии.
+    fn subagent_path(&self, sid: &str, sub: &str) -> Option<PathBuf> {
+        let path = self.subagent_dir(sid)?.join(format!("agent-{sub}.jsonl"));
+        path.is_file().then_some(path)
+    }
+
+    /// Подагенты сессии по метаданным Claude Code: тип агента, описание задачи и
+    /// id вызова лежат в `agent-<id>.meta.json` рядом с его транскриптом. Порядок —
+    /// по времени запуска: файл создаётся при запуске подагента.
+    fn subagents(&self, sid: &str) -> Vec<SubInfo> {
+        let Some(dir) = self.subagent_dir(sid) else { return Vec::new() };
+        let Ok(entries) = fs::read_dir(&dir) else { return Vec::new() };
+        let mut st = self.lock();
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(id) = name.strip_suffix(".meta.json").and_then(|n| n.strip_prefix("agent-")) else {
+                continue;
+            };
+            // Открывать нечего, если транскрипта рядом нет.
+            if !dir.join(format!("agent-{id}.jsonl")).is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(md) = entry.metadata() else { continue };
+            let stamp = md.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let info = match st.sub_metas.get(&path) {
+                Some((known, info)) if *known == stamp => info.clone(),
+                _ => {
+                    let Ok(text) = fs::read_to_string(&path) else { continue };
+                    let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
+                    let started_at = md.created().or_else(|_| md.modified()).map(to_ms).unwrap_or(0);
+                    let info = SubInfo {
+                        info: Subagent {
+                            id: id.to_owned(),
+                            title: truncate(v["description"].as_str().unwrap_or_default(), 200),
+                            agent: v["agentType"].as_str().unwrap_or_default().to_owned(),
+                            running: v["finished"].as_bool() != Some(true),
+                            started_at,
+                        },
+                        tool_id: v["toolUseId"].as_str().unwrap_or_default().to_owned(),
+                    };
+                    st.sub_metas.insert(path, (stamp, info.clone()));
+                    info
+                }
+            };
+            out.push(info);
+        }
+        out.sort_by_key(|s| s.info.started_at);
+        if out.len() > MAX_SUBAGENTS {
+            out.drain(..out.len() - MAX_SUBAGENTS);
+        }
+        out
+    }
+
     /// Удаляет транскрипт закрытой сессии вместе с каталогом её подпроцессов.
     /// Открытую или выполняющуюся сессию без `close` не трогаем: Claude Code
     /// дописывал бы в удалённый файл. С `close` сначала завершаем её процесс.
@@ -508,7 +588,18 @@ impl Claude {
         let mut tasks = crate::tasks::Tracker::default();
         let mut shown_tasks: Option<Vec<BgTask>> = None;
         let mut queue = Queue::default();
+        let mut shown_subs: Option<Vec<Subagent>> = None;
         loop {
+            // Список подагентов нужен и до ленты: по нему панель показывает их
+            // над полем ввода, а вызовы в самой ленте прячутся.
+            let subs = self.subagents(&sid);
+            let hide_ids: HashSet<String> =
+                subs.iter().filter(|s| !s.tool_id.is_empty()).map(|s| s.tool_id.clone()).collect();
+            let now_subs: Vec<Subagent> = subs.into_iter().map(|s| s.info).collect();
+            if shown_subs.as_ref() != Some(&now_subs) {
+                let _ = out.send(AgentMsg::Subagents { session: key.clone(), subagents: now_subs.clone() });
+                shown_subs = Some(now_subs);
+            }
             if path.is_none() {
                 path = self.find_path(&sid);
             }
@@ -518,8 +609,14 @@ impl Claude {
                     if first || len < offset {
                         let start = len.saturating_sub(HISTORY_BYTES);
                         queue = Queue::default();
+                        let mut opts = ParseOpts {
+                            hide_subagents: true,
+                            hide_ids: Some(&hide_ids),
+                            sidechain: false,
+                            ..Default::default()
+                        };
                         let (items, _, consumed, begin) =
-                            read_feed(p, start, len, start > 0, HISTORY_ITEMS, Some(&mut queue));
+                            read_feed(p, start, len, start > 0, HISTORY_ITEMS, Some(&mut queue), &mut opts);
                         // С конца показанной части пойдёт догрузка ранних сообщений.
                         self.lock().heads.insert(sid.clone(), begin);
                         offset = start + consumed;
@@ -538,8 +635,21 @@ impl Claude {
                             more: begin > 0,
                         });
                     } else if len > offset {
-                        let (items, drop, consumed, _) =
-                            read_feed(p, offset, len.min(offset + MAX_CHUNK), false, usize::MAX, Some(&mut queue));
+                        let mut opts = ParseOpts {
+                            hide_subagents: true,
+                            hide_ids: Some(&hide_ids),
+                            sidechain: false,
+                            ..Default::default()
+                        };
+                        let (items, drop, consumed, _) = read_feed(
+                            p,
+                            offset,
+                            len.min(offset + MAX_CHUNK),
+                            false,
+                            usize::MAX,
+                            Some(&mut queue),
+                            &mut opts,
+                        );
                         scan_ask(p, offset, offset + consumed, false, &mut ask);
                         scan_tasks(p, offset, offset + consumed, false, &mut tasks);
                         offset += consumed;
@@ -583,6 +693,79 @@ impl Claude {
         }
     }
 
+    /// Следит за лентой подагента `sub`: вкладка с ней открывается из списка над
+    /// полем ввода. Транскрипт подагента — обычный транскрипт Claude Code, только
+    /// все его строки помечены `isSidechain`: их разбираем как есть.
+    pub async fn watch_sub(&self, key: String, sid: String, sub: String, out: UnboundedSender<AgentMsg>) {
+        let mut path: Option<PathBuf> = None;
+        let mut offset = 0u64;
+        let mut first = true;
+        loop {
+            if path.is_none() {
+                path = self.subagent_path(&sid, &sub);
+            }
+            match path.as_deref().map(|p| (p, fs::metadata(p))) {
+                Some((p, Ok(md))) => {
+                    let len = md.len();
+                    if first || len < offset {
+                        let start = len.saturating_sub(HISTORY_BYTES);
+                        let (items, consumed, _) =
+                            read_items(p, start, len, start > 0, HISTORY_ITEMS, ParseOpts { sidechain: true, ..Default::default() });
+                        offset = start + consumed;
+                        first = false;
+                        let _ = out.send(AgentMsg::SubHistory {
+                            session: key.clone(),
+                            sub: sub.clone(),
+                            reset: true,
+                            items,
+                            more: false,
+                            error: None,
+                        });
+                    } else if len > offset {
+                        let mut opts = ParseOpts { sidechain: true, ..Default::default() };
+                        let (items, _, consumed, _) = read_feed(
+                            p,
+                            offset,
+                            len.min(offset + MAX_CHUNK),
+                            false,
+                            usize::MAX,
+                            None,
+                            &mut opts,
+                        );
+                        offset += consumed;
+                        if !items.is_empty() {
+                            let _ = out.send(AgentMsg::SubHistory {
+                                session: key.clone(),
+                                sub: sub.clone(),
+                                reset: false,
+                                items,
+                                more: false,
+                                error: None,
+                            });
+                        }
+                    }
+                }
+                Some((_, Err(_))) => path = None,
+                None => {
+                    // Файла ещё нет (или его уже удалили): панель показывает
+                    // пустую ленту, а наблюдение продолжает искать файл.
+                    if first {
+                        first = false;
+                        let _ = out.send(AgentMsg::SubHistory {
+                            session: key.clone(),
+                            sub: sub.clone(),
+                            reset: true,
+                            items: Vec::new(),
+                            more: false,
+                            error: None,
+                        });
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(700)).await;
+        }
+    }
+
     /// Страница ранних элементов транскрипта — то, что было до показанной ленты.
     /// `more` — остались ли ещё более старые.
     pub fn older(&self, sid: &str) -> Result<(Vec<Item>, bool), String> {
@@ -592,11 +775,22 @@ impl Claude {
         if left == 0 {
             return Ok((Vec::new(), false));
         }
+        // Вызовы подагентов прячутся и в ранних сообщениях: их id берём из
+        // метаданных, а встреченные в куске id запоминаем для их результатов.
+        let subs = self.subagents(sid);
+        let hide_ids: HashSet<String> =
+            subs.iter().filter(|s| !s.tool_id.is_empty()).map(|s| s.tool_id.clone()).collect();
         let mut items = Vec::new();
         let mut spent = 0u64;
         while left > 0 && items.is_empty() && spent < OLDER_MAX_BYTES {
             let from = left.saturating_sub(OLDER_BYTES);
-            let (page, _, begin) = read_items(&path, from, left, from > 0, usize::MAX);
+            let opts = ParseOpts {
+                hide_subagents: true,
+                hide_ids: Some(&hide_ids),
+                sidechain: false,
+                ..Default::default()
+            };
+            let (page, _, begin) = read_items(&path, from, left, from > 0, usize::MAX, opts);
             spent += left - from;
             // Если целых строк в куске нет (одна огромная строка), шагаем дальше
             // от прочитанного: иначе следующий запрос вернулся бы на то же место.
@@ -636,7 +830,7 @@ impl Claude {
         }
         let len = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         let start = len.saturating_sub(HANDOFF_BYTES);
-        let (items, _, _) = read_items(&path, start, len, start > 0, usize::MAX);
+        let (items, _, _) = read_items(&path, start, len, start > 0, usize::MAX, ParseOpts::default());
         let messages: Vec<(String, String)> = items
             .into_iter()
             .filter(|i| i.kind == "text" && (i.role == "user" || i.role == "assistant"))
@@ -1119,6 +1313,10 @@ impl Backend for Arc<Claude> {
         Box::pin(async move { Claude::watch(self, key, id, out).await })
     }
 
+    fn watch_sub(&self, key: String, id: String, sub: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()> {
+        Box::pin(async move { Claude::watch_sub(self, key, id, sub, out).await })
+    }
+
     fn older<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(Vec<Item>, bool), String>> {
         Box::pin(async move { Claude::older(self, id) })
     }
@@ -1214,7 +1412,7 @@ impl Backend for Arc<Claude> {
 mod tests {
     use super::*;
 
-    use super::transcript::{is_prompt, line_model, parse_line, read_turn, sum_turn};
+    use super::transcript::{is_prompt, line_model, parse_line, parse_line_opts, read_turn, sum_turn, ParseOpts};
     use crate::util::parse_iso_ms;
 
     fn prompt_line(ts: &str) -> String {
@@ -1760,7 +1958,7 @@ mod tests {
         let len = body.len() as u64;
 
         // Оставляем один элемент: начало оставшегося — строка третьего.
-        let (items, consumed, begin) = read_items(&path, 0, len, false, 1);
+        let (items, consumed, begin) = read_items(&path, 0, len, false, 1, ParseOpts::default());
         let third = body.find(&line("u3", "третий")).unwrap() as u64;
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "u3:0");
@@ -1768,7 +1966,7 @@ mod tests {
         assert_eq!(begin, third);
 
         // Назад от начала оставшегося читается остальное и без повторов.
-        let (older, _, older_begin) = read_items(&path, 0, begin, false, usize::MAX);
+        let (older, _, older_begin) = read_items(&path, 0, begin, false, usize::MAX, ParseOpts::default());
         let ids: Vec<_> = older.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["u1:0", "u2:0"]);
         assert_eq!(older_begin, 0);
@@ -1776,7 +1974,7 @@ mod tests {
         // Кусок без целой строки элементов не даёт и байт не съедает: догрузка
         // продолжит читать с того же места.
         let cut = third + 5;
-        let (empty, consumed, begin) = read_items(&path, cut, len - 1, false, usize::MAX);
+        let (empty, consumed, begin) = read_items(&path, cut, len - 1, false, usize::MAX, ParseOpts::default());
         assert!(empty.is_empty());
         assert_eq!((consumed, begin), (0, cut));
         let _ = fs::remove_dir_all(&dir);
@@ -1805,7 +2003,15 @@ mod tests {
         );
         fs::write(&path, &first).unwrap();
         let mut queue = Queue::default();
-        let (items, drop, consumed, _) = read_feed(&path, 0, first.len() as u64, false, usize::MAX, Some(&mut queue));
+        let (items, drop, consumed, _) = read_feed(
+            &path,
+            0,
+            first.len() as u64,
+            false,
+            usize::MAX,
+            Some(&mut queue),
+            &mut ParseOpts::default(),
+        );
         let got: Vec<_> = items.iter().map(|i| (i.kind.as_str(), i.text.as_str())).collect();
         assert_eq!(got, [("queued", "статус?"), ("queued", "третье")]);
         assert!(drop.is_empty());
@@ -1817,14 +2023,49 @@ mod tests {
         let rest = format!("{dequeue}\n{dequeue}\n{}\n", op("popAll", "третье"));
         fs::write(&path, format!("{first}{rest}")).unwrap();
         let end = (first.len() + rest.len()) as u64;
-        let (items, drop, _, _) = read_feed(&path, consumed, end, false, usize::MAX, Some(&mut queue));
+        let (items, drop, _, _) = read_feed(
+            &path,
+            consumed,
+            end,
+            false,
+            usize::MAX,
+            Some(&mut queue),
+            &mut ParseOpts::default(),
+        );
         assert!(items.is_empty());
         assert_eq!(drop, [status, third]);
 
         // Без очереди (догрузка ранних, перенос) строки очереди не дают ничего.
-        let (items, _, _) = read_items(&path, 0, end, false, usize::MAX);
+        let (items, _, _) = read_items(&path, 0, end, false, usize::MAX, ParseOpts::default());
         assert!(items.is_empty());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Вызов подагента в ленту сессии не попадает (ни вызов, ни его результат),
+    /// а в ленте самого подагента его записи видны как обычные сообщения.
+    #[test]
+    fn subagent_calls_are_hidden_from_session_feed() {
+        let call = r#"{"type":"assistant","uuid":"a1","timestamp":"2026-11-15T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Agent","input":{"description":"Найти причину","subagent_type":"explore"}}]}}"#;
+        let result = r#"{"type":"user","uuid":"u1","timestamp":"2026-11-15T10:01:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"готово"}]}]}}"#;
+        let plain = r#"{"type":"assistant","uuid":"a2","timestamp":"2026-11-15T10:02:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"a.rs"}}]}}"#;
+        let mut opts = ParseOpts { hide_subagents: true, ..Default::default() };
+        let mut items = Vec::new();
+        for line in [call, result, plain] {
+            parse_line_opts(line, &mut items, &mut opts);
+        }
+        let got: Vec<_> = items.iter().map(|i| (i.kind.as_str(), i.tool.as_deref())).collect();
+        assert_eq!(got, [("tool_use", Some("Read"))]);
+
+        // Записи подагента: в его транскрипте все строки `isSidechain`.
+        let side = r#"{"type":"assistant","isSidechain":true,"uuid":"s1","timestamp":"2026-11-15T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ищу"}]}}"#;
+        let mut items = Vec::new();
+        parse_line_opts(side, &mut items, &mut ParseOpts { sidechain: true, ..Default::default() });
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "s1:0");
+        // Та же строка в ленте сессии не показывается: её пишет подагент.
+        let mut items = Vec::new();
+        parse_line(side, &mut items);
+        assert!(items.is_empty());
     }
 }
 

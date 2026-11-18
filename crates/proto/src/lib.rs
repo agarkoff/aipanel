@@ -255,6 +255,33 @@ pub struct BgTask {
 /// Сколько фоновых задач сессии показывает панель.
 pub const MAX_TASKS: usize = 50;
 
+/// Подагент сессии: дочерний агент, которого запустил инструмент (`Agent` раньше
+/// `Task` в Claude Code, `subagent` в opencode). В ленте сессии его вызов не
+/// показывается: панель держит подагентов отдельным списком, а ленту выбранного
+/// подагента открывает вкладкой.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Subagent {
+    /// Идентификатор подагента: id его транскрипта у Claude Code или id дочерней
+    /// сессии opencode. По нему панель просит ленту.
+    pub id: String,
+    /// Описание задачи из вызова.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// Тип подагента: `general-purpose`, `explore` и т.п.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub agent: String,
+    /// Подагент ещё работает.
+    #[serde(default)]
+    pub running: bool,
+    /// Время запуска, мс с эпохи Unix; 0 — неизвестно.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub started_at: i64,
+}
+
+/// Сколько подагентов сессии показывает панель. Старые вытесняются: в списке
+/// нужны те, к которым ещё можно вернуться.
+pub const MAX_SUBAGENTS: usize = 50;
+
 /// Сообщения от агента серверу.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
@@ -311,6 +338,27 @@ pub enum AgentMsg {
         session: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tasks: Vec<BgTask>,
+    },
+    /// Подагенты сессии — в том числе завершённые. Полный список: клиент заменяет
+    /// им показанный ранее. Сами вызовы подагентов в ленту не попадают.
+    Subagents {
+        session: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        subagents: Vec<Subagent>,
+    },
+    /// Лента подагента `sub`: его собственные сообщения, вызовы и результаты.
+    /// `reset` — клиент очищает показанное перед добавлением.
+    SubHistory {
+        session: String,
+        sub: String,
+        reset: bool,
+        items: Vec<Item>,
+        /// Есть ли перед `items` более ранние элементы (пока не бывает: лента
+        /// подагента приходит целиком).
+        #[serde(default, skip_serializing_if = "is_false")]
+        more: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
     /// Избранные сообщения сессии. Полный список: клиент заменяет им показанный
     /// ранее. Хранится у агента, поэтому его видят все браузеры и устройства.
@@ -602,6 +650,51 @@ mod tasks_tests {
         let back: AgentMsg = serde_json::from_str(&text).unwrap();
         assert!(matches!(back, AgentMsg::Tasks { tasks, .. } if tasks.len() == 1 && tasks[0].ends_at == 0));
     }
+
+    #[test]
+    fn subagents_round_trip() {
+        let msg = AgentMsg::Subagents {
+            session: "claude:x".into(),
+            subagents: vec![Subagent {
+                id: "a031ee1e".into(),
+                title: "Найти причину".into(),
+                agent: "explore".into(),
+                running: true,
+                started_at: 7,
+            }],
+        };
+        let text = serde_json::to_string(&msg).unwrap();
+        assert!(text.starts_with("{\"t\":\"subagents\""), "{text}");
+        let back: AgentMsg = serde_json::from_str(&text).unwrap();
+        assert!(matches!(back, AgentMsg::Subagents { subagents, .. } if subagents[0].running));
+
+        let msg = AgentMsg::SubHistory {
+            session: "opencode:x".into(),
+            sub: "ses_child".into(),
+            reset: true,
+            items: vec![Item { id: "m:0".into(), ts: 1, role: "assistant".into(), kind: "text".into(), text: "итог".into(), tool: None }],
+            more: false,
+            error: None,
+        };
+        let text = serde_json::to_string(&msg).unwrap();
+        assert!(text.starts_with("{\"t\":\"sub_history\""), "{text}");
+        let back: AgentMsg = serde_json::from_str(&text).unwrap();
+        assert!(matches!(back, AgentMsg::SubHistory { sub, .. } if sub == "ses_child"));
+
+        for msg in [
+            ServerMsg::WatchSub { session: "opencode:x".into(), sub: "ses_child".into() },
+            ServerMsg::UnwatchSub { session: "opencode:x".into(), sub: "ses_child".into() },
+        ] {
+            let text = serde_json::to_string(&msg).unwrap();
+            assert!(text.starts_with("{\"t\":\"unwatch_sub\"") || text.starts_with("{\"t\":\"watch_sub\""), "{text}");
+            let back: ServerMsg = serde_json::from_str(&text).unwrap();
+            match (msg, back) {
+                (ServerMsg::WatchSub { sub: a, .. }, ServerMsg::WatchSub { sub: b, .. }) => assert_eq!(a, b),
+                (ServerMsg::UnwatchSub { sub: a, .. }, ServerMsg::UnwatchSub { sub: b, .. }) => assert_eq!(a, b),
+                _ => panic!("не тот вариант"),
+            }
+        }
+    }
 }
 
 /// Наибольшая длина названия сессии в символах. Предел общий для панели,
@@ -708,6 +801,11 @@ pub enum ServerMsg {
     /// Догрузить более ранние элементы ленты `session`: агент присылает их
     /// ответом `AgentMsg::Older`.
     Older { session: String },
+    /// Следить за лентой подагента `sub` сессии `session`: агент присылает её
+    /// ответами `AgentMsg::SubHistory`, пока не придёт `UnwatchSub`.
+    WatchSub { session: String, sub: String },
+    /// Лента подагента больше не нужна: вкладку закрыли или ушли в основную.
+    UnwatchSub { session: String, sub: String },
     Send { id: String, session: String, text: String },
     Interrupt { id: String, session: String },
     /// Новая сессия: `tool` — `claude` или `opencode`, `cwd` — абсолютный путь,

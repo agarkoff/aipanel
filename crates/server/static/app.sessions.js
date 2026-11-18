@@ -452,6 +452,8 @@ function select(agent, session) {
   applyFavorites();
   clearPrompts();
   clearTasks();
+  // Вкладки и подагенты относятся к прежней сессии.
+  resetSubagentView();
   resetHistoryNav();
   clearTimeout(copyIdTimer);
   $('copy-id').classList.remove('copied');
@@ -481,6 +483,7 @@ function closeView() {
   applyFavorites();
   clearPrompts();
   clearTasks();
+  resetSubagentView();
   resetPin();
   resetOlder();
   send({ t: 'unwatch' });

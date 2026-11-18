@@ -178,6 +178,13 @@ pub fn is_edit_tool(name: &str) -> bool {
     )
 }
 
+/// Инструменты, которые запускают подагента: `Agent` у Claude Code (раньше
+/// `Task`) и `subagent` у opencode (в старых версиях `task`). Их вызовы в ленту
+/// сессии не попадают — панель показывает подагентов отдельным списком.
+pub fn is_subagent_tool(name: &str) -> bool {
+    matches!(name, "Agent" | "Task" | "subagent" | "task")
+}
+
 pub fn tool_path(input: &Value) -> Option<&str> {
     input.get("file_path").or_else(|| input.get("path")).and_then(Value::as_str)
 }

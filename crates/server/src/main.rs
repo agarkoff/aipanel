@@ -47,6 +47,8 @@ struct BrowserEntry {
     owner: String,
     /// (агент, сессия), ленту которой сейчас смотрит браузер.
     watching: Option<(String, String)>,
+    /// Подагент, лента которого открыта вкладкой; `None` — показана основная.
+    sub: Option<String>,
 }
 
 /// Команда браузера, ожидающая ответа агента.
@@ -130,6 +132,18 @@ impl Inner {
             .count()
     }
 
+    /// Сколько браузеров смотрят ленту одного подагента.
+    fn sub_watchers(&self, owner: &str, agent: &str, session: &str, sub: &str) -> usize {
+        self.browsers
+            .values()
+            .filter(|b| {
+                b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && s == session)
+                    && b.sub.as_deref() == Some(sub)
+            })
+            .count()
+    }
+
     /// Браузеру можно работать только с агентами своего пользователя.
     fn browser_owns(&self, browser: u64, agent: &str) -> bool {
         self.browsers
@@ -182,9 +196,17 @@ impl Inner {
             return;
         };
         let owner = b.owner.clone();
+        let sub = b.sub.take();
         let Some((agent, session)) = b.watching.take() else {
             return;
         };
+        // Вкладку подагента закрыли (или ушли из сессии): слежение за его лентой
+        // больше не нужно, если её не смотрит никто другой.
+        if let Some(sub) = sub {
+            if self.sub_watchers(&owner, &agent, &session, &sub) == 0 {
+                self.to_agent(&owner, &agent, ServerMsg::UnwatchSub { session: session.clone(), sub });
+            }
+        }
         if self.watchers(&owner, &agent, &session) == 0 {
             self.to_agent(&owner, &agent, ServerMsg::Unwatch { session });
         }
@@ -480,7 +502,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<String>(1);
         inner.browsers.insert(
             1,
-            BrowserEntry { tx, owner: "alice".into(), watching: None },
+            BrowserEntry { tx, owner: "alice".into(), watching: None, sub: None },
         );
 
         assert!(inner.browser_owns(1, "alice-pc"));
@@ -579,6 +601,7 @@ mod tests {
                 tx,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
             },
         );
         inner.browsers.insert(
@@ -587,6 +610,7 @@ mod tests {
                 tx: other,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s2".into())),
+                sub: None,
             },
         );
         let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
@@ -619,6 +643,7 @@ mod tests {
                 tx,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
             },
         );
         inner.browsers.insert(
@@ -627,6 +652,7 @@ mod tests {
                 tx: other,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s2".into())),
+                sub: None,
             },
         );
         let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
@@ -665,6 +691,7 @@ mod tests {
                 tx: btx,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
             },
         );
         let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
@@ -723,6 +750,7 @@ mod tests {
                 tx,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
             },
         );
         inner.browsers.insert(
@@ -731,6 +759,7 @@ mod tests {
                 tx: other,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s2".into())),
+                sub: None,
             },
         );
         let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
@@ -760,6 +789,125 @@ mod tests {
     }
 
     #[test]
+    fn sub_history_reaches_only_the_open_subagent_tab() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let (main, mut main_rx) = mpsc::channel::<String>(4);
+        let (other, mut other_rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "claude:s1".into())),
+                sub: Some("a1".into()),
+            },
+        );
+        // Та же сессия, но открыта основная лента: чужая вкладка сюда не идёт.
+        inner.browsers.insert(
+            2,
+            BrowserEntry {
+                tx: main,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "claude:s1".into())),
+                sub: None,
+            },
+        );
+        // Тот же id подагента, но другая сессия.
+        inner.browsers.insert(
+            3,
+            BrowserEntry {
+                tx: other,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "claude:s2".into())),
+                sub: Some("a1".into()),
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::SubHistory {
+                session: "claude:s1".into(),
+                sub: "a1".into(),
+                reset: true,
+                items: vec![aipanel_proto::Item {
+                    id: "s1:0".into(),
+                    ts: 1,
+                    role: "assistant".into(),
+                    kind: "text".into(),
+                    text: "итог подагента".into(),
+                    tool: None,
+                }],
+                more: false,
+                error: None,
+            },
+        );
+        let msg = rx.try_recv().unwrap();
+        assert!(msg.contains("\"t\":\"sub_history\"") && msg.contains("итог подагента"), "{msg}");
+        assert!(msg.contains("\"sub\":\"a1\""), "{msg}");
+        assert!(main_rx.try_recv().is_err(), "лента подагента ушла в основную вкладку");
+        assert!(other_rx.try_recv().is_err(), "лента подагента ушла в чужую сессию");
+    }
+
+    #[test]
+    fn watch_sub_is_forwarded_and_replaces_the_previous_tab() {
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(4);
+        let (browser, _browser_rx) = mpsc::channel::<String>(1);
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), AgentEntry { tx: Some(tx), ..entry() });
+        inner.browsers.insert(
+            1,
+            BrowserEntry {
+                tx: browser,
+                owner: "alice".into(),
+                watching: Some(("pc".into(), "claude:s1".into())),
+                sub: None,
+            },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::WatchSub { agent: "pc".into(), session: "claude:s1".into(), sub: "a1".into() },
+        );
+        assert!(
+            matches!(rx.try_recv().unwrap(), ServerMsg::WatchSub { sub, .. } if sub == "a1"),
+            "агент не получил подписку на ленту подагента"
+        );
+        assert_eq!(app.lock().browsers.get(&1).and_then(|b| b.sub.clone()).as_deref(), Some("a1"));
+
+        // Вкладку сменили: прежняя отписка уходит агенту до новой подписки.
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::WatchSub { agent: "pc".into(), session: "claude:s1".into(), sub: "a2".into() },
+        );
+        assert!(matches!(rx.try_recv().unwrap(), ServerMsg::UnwatchSub { sub, .. } if sub == "a1"));
+        assert!(matches!(rx.try_recv().unwrap(), ServerMsg::WatchSub { sub, .. } if sub == "a2"));
+
+        // Отмена вкладки, которая уже не открыта, ничего не трогает.
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::UnwatchSub { agent: "pc".into(), session: "claude:s1".into(), sub: "a1".into() },
+        );
+        assert!(rx.try_recv().is_err());
+
+        // Ложная отмена текущей вкладки снимает подписку.
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::UnwatchSub { agent: "pc".into(), session: "claude:s1".into(), sub: "a2".into() },
+        );
+        assert!(matches!(rx.try_recv().unwrap(), ServerMsg::UnwatchSub { sub, .. } if sub == "a2"));
+        assert!(app.lock().browsers.get(&1).is_some_and(|b| b.sub.is_none()));
+    }
+
+    #[test]
     fn older_request_goes_to_the_agent() {
         let (tx, mut rx) = mpsc::channel::<ServerMsg>(4);
         let (browser, _browser_rx) = mpsc::channel::<String>(1);
@@ -774,6 +922,7 @@ mod tests {
                 tx: browser,
                 owner: "alice".into(),
                 watching: Some(("pc".into(), "opencode:s1".into())),
+                sub: None,
             },
         );
         let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
@@ -793,7 +942,7 @@ mod tests {
         let mut inner = Inner::default();
         inner.browsers.insert(
             1,
-            BrowserEntry { tx, owner: "alice".into(), watching: None },
+            BrowserEntry { tx, owner: "alice".into(), watching: None, sub: None },
         );
         inner.pending.insert(
             "srv:1".into(),

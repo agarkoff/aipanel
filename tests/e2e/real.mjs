@@ -28,6 +28,12 @@ const SESSION_ID = '11111111-2222-3333-4444-555555555555';
 const CWD = 'D:\\Projects\\demo';
 const USER_TEXT = 'привет из e2e';
 const REPLY_TEXT = 'ответ из e2e';
+// Подагент: вызов `Agent` в основном транскрипте и его собственный транскрипт
+// рядом, в `<sessionId>/subagents` — так их хранит Claude Code.
+const SUB_ID = 'aabbccdd11223344';
+const SUB_ASK = 'найди причину';
+const SUB_REPLY = 'причина в кэше';
+const SUB_TOOL_ID = 'toolu_sub1';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -101,6 +107,34 @@ fs.writeFileSync(
     }),
     JSON.stringify({
       type: 'assistant',
+      uuid: 'a0',
+      timestamp: '2026-11-17T09:00:02.000Z',
+      cwd: CWD,
+      message: {
+        id: 'msg_0',
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id: SUB_TOOL_ID,
+            name: 'Agent',
+            input: { description: SUB_ASK, subagent_type: 'explore', prompt: 'найди причину' },
+          },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: 'user',
+      uuid: 'u2',
+      timestamp: '2026-11-17T09:00:04.000Z',
+      cwd: CWD,
+      message: {
+        role: 'user',
+        content: [{ type: 'tool_result', tool_use_id: SUB_TOOL_ID, content: [{ type: 'text', text: 'подагент закончил' }] }],
+      },
+    }),
+    JSON.stringify({
+      type: 'assistant',
       uuid: 'a1',
       timestamp: '2026-11-17T09:00:05.000Z',
       cwd: CWD,
@@ -110,6 +144,47 @@ fs.writeFileSync(
         content: [{ type: 'text', text: REPLY_TEXT }],
         usage: { input_tokens: 12, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 34 },
       },
+    }),
+  ].join('\n') + '\n',
+  'utf8',
+);
+
+// Транскрипт подагента и его метаданные: описание, тип агента и id вызова — всё,
+// что панели нужно для строки над счётчиком хода и для его ленты.
+const subDir = path.join(project, SESSION_ID, 'subagents');
+fs.mkdirSync(subDir, { recursive: true });
+fs.writeFileSync(
+  path.join(subDir, `agent-${SUB_ID}.meta.json`),
+  JSON.stringify({
+    agentType: 'explore',
+    isBuiltIn: true,
+    description: SUB_ASK,
+    toolUseId: SUB_TOOL_ID,
+    spawnDepth: 1,
+    finished: true,
+  }),
+  'utf8',
+);
+fs.writeFileSync(
+  path.join(subDir, `agent-${SUB_ID}.jsonl`),
+  [
+    JSON.stringify({
+      type: 'user',
+      isSidechain: true,
+      agentId: SUB_ID,
+      uuid: 'su1',
+      timestamp: '2026-11-17T09:00:02.000Z',
+      cwd: CWD,
+      message: { role: 'user', content: SUB_ASK },
+    }),
+    JSON.stringify({
+      type: 'assistant',
+      isSidechain: true,
+      agentId: SUB_ID,
+      uuid: 'sa1',
+      timestamp: '2026-11-17T09:00:03.000Z',
+      cwd: CWD,
+      message: { id: 'msg_sub', role: 'assistant', content: [{ type: 'text', text: SUB_REPLY }] },
     }),
   ].join('\n') + '\n',
   'utf8',
@@ -320,6 +395,57 @@ enabled = false
       15000,
     ),
     await evaluate(`document.querySelector('#feed')?.innerText || ''`),
+  );
+
+  // Подагент: вызов `Agent` в ленте не показывается, а строка над счётчиком
+  // хода открывает его собственную ленту вкладкой в блоке ленты.
+  check(
+    'подагент: вызов скрыт из ленты, а сам он виден над счётчиком хода',
+    await waitFor(
+      `(() => {
+         const feed = document.querySelector('#feed')?.innerText || '';
+         const strip = document.querySelector('#subagents');
+         return !feed.includes(${JSON.stringify(SUB_ASK)})
+           && !feed.includes('подагент закончил')
+           && strip && !strip.hidden && strip.innerText.includes(${JSON.stringify(SUB_ASK)});
+       })()`,
+      15000,
+    ),
+    await evaluate(`(() => ({ feed: document.querySelector('#feed')?.innerText || '', strip: document.querySelector('#subagents')?.innerText || '' }))()`),
+  );
+
+  await evaluate(`(() => { document.querySelector('#subagents .subagent').click(); return true; })()`);
+  check(
+    'подагент: лента открывается вкладкой вместо основной',
+    await waitFor(
+      `(() => {
+         const t = document.querySelector('#feed')?.innerText || '';
+         const tabs = document.querySelector('#feed-tabs');
+         return tabs && !tabs.hidden && t.includes(${JSON.stringify(SUB_REPLY)})
+           && !t.includes(${JSON.stringify(USER_TEXT)});
+       })()`,
+      15000,
+    ),
+    await evaluate(`(() => ({ feed: document.querySelector('#feed')?.innerText || '', tabs: document.querySelector('#feed-tabs')?.innerText || '' }))()`),
+  );
+
+  await evaluate(`(() => { document.querySelectorAll('#feed-tabs .feed-tab-btn')[0].click(); return true; })()`);
+  check(
+    'подагент: возврат во вкладку сессии восстанавливает её ленту',
+    await waitFor(
+      `(() => {
+         const t = document.querySelector('#feed')?.innerText || '';
+         return t.includes(${JSON.stringify(USER_TEXT)}) && !t.includes(${JSON.stringify(SUB_REPLY)});
+       })()`,
+      10000,
+    ),
+    await evaluate(`document.querySelector('#feed')?.innerText || ''`),
+  );
+
+  await evaluate(`(() => { const close = document.querySelector('#feed-tabs .feed-tab-close'); if (close) close.click(); return true; })()`);
+  check(
+    'подагент: закрытая вкладка убирает полосу вкладок',
+    await waitFor(`document.querySelector('#feed-tabs').hidden`, 5000),
   );
 
   // Избранное: звезда в браузере -> агент пишет favorites.json в своём каталоге.

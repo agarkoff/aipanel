@@ -127,8 +127,8 @@ const stub = `
   const claudeModels = ${JSON.stringify(claudeModels)};
   const dirs = ${JSON.stringify(dirs)};
   window.__sent = [];
-  window.__screens = [];
-  window.__screenShots = [];
+  window.__subWatched = [];
+  window.__screens = [];  window.__screenShots = [];
   window.__screensError = '';
   window.__older = [];
   window.__olderPages = [];
@@ -190,6 +190,9 @@ const stub = `
         // Страницы задаёт тест: пустой список — ранних сообщений не осталось.
         const page = window.__olderPages.length ? window.__olderPages.shift() : { items: [], more: false };
         setTimeout(() => this.emit({ t: 'older', agent: msg.agent, session: msg.session, items: page.items, more: page.more }), 0);
+      } else if (msg.t === 'watch_sub' || msg.t === 'unwatch_sub') {
+        // Ленту подагента тест присылает сам: здесь только запоминаем подписку.
+        window.__subWatched.push(msg);
       } else if (msg.t === 'send') {
         window.__sent.push(msg);
       } else if (msg.t === 'set_model') {
@@ -2201,6 +2204,66 @@ try {
   })()`);
   check('push: сессия из уведомления открывается, адрес очищается',
     opened.selected === session.key && opened.hash === '', opened);
+
+  // Подагенты: их вызовы в ленте не показываются, а список над счётчиком хода
+  // открывает ленту подагента вкладкой в блоке ленты.
+  const subs = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const session = window.__session.key;
+    const msg = { agent: 'ui-test', session };
+    const emit = (m) => window.__sock.emit(m);
+    window.__subWatched = [];
+    const mainBefore = document.querySelectorAll('#feed .item').length;
+    emit({ t: 'subagents', ...msg, subagents: [
+      { id: 'a1', title: 'Найти причину', agent: 'explore', running: true, started_at: 1 },
+      { id: 'a2', title: 'Написать отчёт', agent: 'general-purpose', running: false, started_at: 2 },
+    ] });
+    await wait(20);
+    const strip = document.getElementById('subagents');
+    const chips = [...strip.querySelectorAll('.subagent')];
+    const shown = !strip.hidden;
+    const chipTitle = chips[0] ? chips[0].textContent : '';
+    chips[0].click();
+    await wait(20);
+    const watch = window.__subWatched[0] || {};
+    const tabsShown = !document.getElementById('feed-tabs').hidden;
+    const tabCount = document.querySelectorAll('#feed-tabs .feed-tab').length;
+    const mainGone = document.querySelectorAll('#feed .item').length === 0;
+    emit({ t: 'sub_history', ...msg, sub: 'a1', reset: true, more: false, items: [
+      { id: 's1', ts: 1, role: 'user', kind: 'text', text: 'Что нашёл?' },
+      { id: 's2', ts: 2, role: 'assistant', kind: 'text', text: 'Причину нашёл в кэше.' },
+    ] });
+    await wait(20);
+    const subItems = document.querySelectorAll('#feed .item').length;
+    const subText = document.getElementById('feed').textContent;
+    // Избранное относится к сессии: у подагента звёзд нет.
+    const favs = document.querySelectorAll('#feed .fav').length;
+    document.querySelectorAll('#feed-tabs .feed-tab-btn')[0].click();
+    await wait(20);
+    const backItems = document.querySelectorAll('#feed .item').length;
+    const unwatched = window.__subWatched.some((m) => m.t === 'unwatch_sub' && m.sub === 'a1');
+    // Закрываем вкладку подагента: открытых больше нет — полоса вкладок уходит.
+    document.querySelector('#feed-tabs .feed-tab-close').click();
+    await wait(20);
+    return {
+      shown, chips: chips.length, chipTitle, watch, tabsShown, tabCount, mainGone,
+      mainBefore, subItems, subText, favs, backItems, unwatched,
+      tabsAfter: document.querySelectorAll('#feed-tabs .feed-tab').length,
+      tabsHidden: document.getElementById('feed-tabs').hidden,
+      stripChips: document.querySelectorAll('#subagents .subagent').length,
+    };
+  })()`);
+  check('подагенты: список виден, вызовы в ленте не нужны', subs.shown && subs.chips === 2 && subs.stripChips === 2, subs);
+  check('подагенты: подпись и запуск ленты по нажатию',
+    subs.chipTitle.includes('Найти причину') && subs.watch.t === 'watch_sub' && subs.watch.sub === 'a1', subs);
+  check('подагенты: лента открывается вкладкой, основная уступает место',
+    subs.tabsShown && subs.tabCount === 2 && subs.mainGone, subs);
+  check('подагенты: пришедшие элементы видны, звёзд избранного нет',
+    subs.subItems === 2 && subs.subText.includes('Причину нашёл') && subs.favs === 0, subs);
+  check('подагенты: возврат в основную ленту восстанавливает её целиком',
+    subs.backItems === subs.mainBefore && subs.mainBefore > 0 && subs.unwatched, subs);
+  check('подагенты: закрытая вкладка убирает полосу вкладок',
+    subs.tabsAfter === 0 && subs.tabsHidden, subs);
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

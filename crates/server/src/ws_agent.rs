@@ -85,6 +85,21 @@ pub(crate) async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) 
             let _ = tx.try_send(ServerMsg::Favorites { session: session.clone() });
             let _ = tx.try_send(ServerMsg::Watch { session });
         }
+        // Открытые вкладки подагентов: их лента тоже должна прийти заново.
+        let mut subs: Vec<(String, String)> = inner
+            .browsers
+            .values()
+            .filter(|b| b.owner == owner)
+            .filter_map(|b| match (&b.watching, &b.sub) {
+                (Some((a, s)), Some(sub)) if a == &name => Some((s.clone(), sub.clone())),
+                _ => None,
+            })
+            .collect();
+        subs.sort();
+        subs.dedup();
+        for (session, sub) in subs {
+            let _ = tx.try_send(ServerMsg::WatchSub { session, sub });
+        }
         let (sessions, limits) = inner
             .agents
             .remove(&key)
@@ -261,6 +276,36 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
             for b in inner.browsers.values() {
                 if b.owner == owner
                     && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
+        AgentMsg::Subagents { session, mut subagents } => {
+            subagents.truncate(aipanel_proto::MAX_SUBAGENTS);
+            let text = json!({
+                "t": "subagents", "agent": agent, "session": session, "subagents": subagents,
+            })
+            .to_string();
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                {
+                    let _ = b.tx.try_send(text.clone());
+                }
+            }
+        }
+        AgentMsg::SubHistory { session, sub, reset, items, more, error } => {
+            let text = json!({
+                "t": "sub_history", "agent": agent, "session": session, "sub": sub,
+                "reset": reset, "items": items, "more": more, "error": error,
+            })
+            .to_string();
+            // Лента подагента нужна только тем, у кого открыта его вкладка.
+            for b in inner.browsers.values() {
+                if b.owner == owner
+                    && matches!(&b.watching, Some((a, s)) if a == agent && *s == session)
+                    && b.sub.as_deref() == Some(sub.as_str())
                 {
                     let _ = b.tx.try_send(text.clone());
                 }

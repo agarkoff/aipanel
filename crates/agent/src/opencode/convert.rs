@@ -319,6 +319,11 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                     }
                     Some("tool") => {
                         let name = c["name"].as_str();
+                        // Вызов подагента в ленте не показывается: он живёт в
+                        // отдельном списке, а его лента — в дочерней сессии.
+                        if name.is_some_and(crate::util::is_subagent_tool) {
+                            continue;
+                        }
                         let state = &c["state"];
                         push(
                             i.to_string(),

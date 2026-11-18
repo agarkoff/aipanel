@@ -113,7 +113,9 @@ function renderHeader() {
   $('sm-handoff').title = $('handoff').title;
   $('sm-handoff').disabled = $('handoff').disabled;
   const canSend = agent.online && session.delivery !== 'none';
-  $('composer').hidden = false;
+  // Лента подагента — только просмотр: сообщение отправляется в сессию, поэтому
+  // поле ввода на его вкладке скрыто.
+  $('composer').hidden = subTab !== '';
   $('text').disabled = !canSend;
   $('composer').querySelector('button').disabled = !canSend;
   if (!$('hint').dataset.sticky) {
@@ -528,8 +530,9 @@ function buildItem(item, call) {
     foot.append(el('div', 'time', new Date(item.ts).toLocaleString()));
     const actions = el('div', 'foot-actions');
     // В избранное попадают свои сообщения и ответы агента: у ошибок и
-    // служебных строк в списке был бы мусор.
-    if (item.kind === 'text' && (item.role === 'user' || item.role === 'assistant')) {
+    // служебных строк в списке был бы мусор. У подагента избранного нет — оно
+    // относится к сессии, а не к ленте подагента.
+    if (!subTab && item.kind === 'text' && (item.role === 'user' || item.role === 'assistant')) {
       actions.append(favoriteButton(item));
     }
     if (item.text) actions.append(copyTextButton(item.text));
@@ -558,6 +561,109 @@ function placeItem(item, target) {
   nodes.set(item.id, node);
 }
 
+// ------------------------------------------------------------ вкладки лент
+
+// Элементы лент по вкладкам: '' — основная сессия, иначе id подагента.
+// Лента сессии приходит всегда, даже когда открыта вкладка подагента: её
+// элементы копятся здесь и попадают в DOM при возврате на основную вкладку.
+const feedItems = new Map(); // ключ вкладки -> Map(id -> элемент)
+const feedOrder = new Map(); // ключ вкладки -> [id] в порядке ленты
+
+function tabKey(id) {
+  return id ? `sub:${id}` : '';
+}
+
+function cacheOf(key) {
+  let items = feedItems.get(key);
+  if (!items) {
+    items = new Map();
+    feedItems.set(key, items);
+    feedOrder.set(key, []);
+  }
+  return items;
+}
+
+function cacheReset(key) {
+  feedItems.set(key, new Map());
+  feedOrder.set(key, []);
+}
+
+function cacheDrop(key, id) {
+  const items = feedItems.get(key);
+  if (!items || !items.delete(id)) return;
+  const order = feedOrder.get(key);
+  const at = order.indexOf(id);
+  if (at >= 0) order.splice(at, 1);
+}
+
+function cachePut(key, item) {
+  const items = cacheOf(key);
+  if (!items.has(item.id)) feedOrder.get(key).push(item.id);
+  items.set(item.id, item);
+}
+
+// Ранние сообщения вставляются в начало ленты пачкой, в порядке ленты.
+function cachePrepend(key, list) {
+  const items = cacheOf(key);
+  const order = feedOrder.get(key);
+  const fresh = list.filter((item) => !items.has(item.id));
+  for (const item of fresh) items.set(item.id, item);
+  order.unshift(...fresh.map((item) => item.id));
+}
+
+// Какие элементы раскрыты: лента вкладки собирается заново, и раскрытые
+// вызовы должны остаться раскрытыми.
+function openItems() {
+  const open = new Set();
+  for (const node of $('feed').querySelectorAll('.item')) {
+    if (node.querySelector('details[open]')) open.add(node.dataset.id);
+  }
+  return open;
+}
+
+function restoreOpen(open) {
+  if (!open || !open.size) return;
+  for (const node of $('feed').querySelectorAll('.item')) {
+    if (!open.has(node.dataset.id)) continue;
+    const details = node.querySelector('details');
+    if (details) details.open = true;
+  }
+}
+
+// Собирает ленту вкладки из кэша. Основная лента показывает и кнопку догрузки
+// ранних сообщений, и закреп; у подагента их нет — он читается целиком.
+// `loading` — лента ещё ни разу не приходила от агента.
+function renderFeed(key, loading) {
+  const feed = $('feed');
+  nodes.clear();
+  favButtons.clear();
+  toolCalls.clear();
+  resultCalls.clear();
+  pendingCalls = [];
+  flashId = '';
+  feed.replaceChildren();
+  const items = feedItems.get(key);
+  if (!key) mountOlder();
+  else olderBtn.remove();
+  if (items && items.size) {
+    for (const id of feedOrder.get(key) || []) {
+      const item = items.get(id);
+      if (item) placeItem(item, feed);
+    }
+  } else {
+    feed.append(el('div', 'empty', loading ? 'Загрузка ленты…' : key ? 'Лента подагента пуста.' : 'Лента пуста.'));
+  }
+  updateToEnd();
+  if (key) {
+    // Подагент — отдельная лента: закреп и догрузка относятся к сессии.
+    $('pin').hidden = true;
+    return;
+  }
+  mountOlder();
+  updateOlder();
+  syncPin();
+}
+
 // Своё сообщение из ленты — оно же история для стрелок в поле ввода.
 // `true`, если элемент — запрос из ленты.
 function rememberRequest(item) {
@@ -567,21 +673,37 @@ function rememberRequest(item) {
 }
 
 function applyHistory(msg) {
-  const feed = $('feed');
-  const stick = Date.now() > scrollHoldUntil && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  // Кэш обновляется всегда: лента сессии продолжает приходить, пока открыта
+  // вкладка подагента, — иначе вернувшись, человек увидел бы старое.
   if (msg.reset) {
-    nodes.clear();
-    favButtons.clear();
+    cacheReset('');
     feedRequests.clear();
-    toolCalls.clear();
-    resultCalls.clear();
-    pendingCalls = [];
     // Лента собрана заново: ждать догрузку ради нажатия на старый закреп
     // больше не для чего.
     pinOlderFrom = null;
     // Агент сказал, есть ли перед этой лентой более ранние сообщения: если их
     // нет, кнопки догрузки не будет вовсе.
     olderMore = msg.more === true;
+    // Пока показана вкладка подагента, DOM занят его лентой: общие для ленты
+    // сессии карты не трогаем, их всё равно пересоберёт renderFeed.
+    if (!subTab) {
+      nodes.clear();
+      favButtons.clear();
+      toolCalls.clear();
+      resultCalls.clear();
+      pendingCalls = [];
+    }
+  }
+  for (const id of msg.drop || []) cacheDrop('', id);
+  for (const item of msg.items) {
+    cachePut('', item);
+    // Отправленное из панели уже в ленте: очередь больше не нужна.
+    if (rememberRequest(item)) consumeSentRequest(item.text);
+  }
+  if (subTab) return;
+  const feed = $('feed');
+  const stick = Date.now() > scrollHoldUntil && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  if (msg.reset) {
     feed.replaceChildren();
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
   } else if (msg.items.length && !nodes.size) {
@@ -599,8 +721,6 @@ function applyHistory(msg) {
     favButtons.delete(id);
   }
   for (const item of msg.items) {
-    // Отправленное из панели уже в ленте: очередь больше не нужна.
-    if (rememberRequest(item)) consumeSentRequest(item.text);
     placeItem(item, feed);
   }
   // Кнопка догрузки — всегда первая строка ленты; очистка выше её выбросила.

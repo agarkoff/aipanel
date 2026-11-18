@@ -94,6 +94,8 @@ function connect() {
     launchModelsRequest = null;
     if (selected) {
       send({ t: 'watch', agent: selected.agent, session: selected.session });
+      // Открыта вкладка подагента: её ленту тоже просим заново.
+      if (subTab) send({ t: 'watch_sub', agent: selected.agent, session: selected.session, sub: subTab });
       // Избранное живёт у агента: после переподключения берём его заново.
       send({ t: 'favorites', agent: selected.agent, session: selected.session });
     }
@@ -141,6 +143,12 @@ function onMessage(msg) {
   } else if (msg.t === 'tasks') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     applyTasks(msg.tasks);
+  } else if (msg.t === 'subagents') {
+    if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
+    applySubagents(msg.subagents);
+  } else if (msg.t === 'sub_history') {
+    if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
+    applySubHistory(msg);
   } else if (msg.t === 'favorites') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
     favorites = Array.isArray(msg.items) ? msg.items : [];

@@ -28,6 +28,8 @@ pub trait Backend: Send + Sync {
 
     /// Следит за лентой сессии, пока задачу наблюдения не отменят.
     fn watch(&self, key: String, id: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()>;
+    /// Следит за лентой подагента `sub` сессии `id`; `key` — ключ сессии.
+    fn watch_sub(&self, key: String, id: String, sub: String, out: UnboundedSender<AgentMsg>) -> Fut<'_, ()>;
     /// Страница ранних сообщений; `more` — остались ли ещё более старые.
     fn older<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(Vec<Item>, bool), String>>;
     /// Сообщение в сессию. `Some` возвращает элемент, который панель показывает
