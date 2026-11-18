@@ -413,6 +413,21 @@ impl Agent {
                     me.finish(id, result.map(|_| None));
                 });
             }
+            ServerMsg::Move { id, session, cwd } => {
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    // Каталог проверяем на машине агента: панель знает только
+                    // каталоги из списка сессий, и он мог устареть.
+                    let result = match crate::util::session_dir_with(&cwd, false) {
+                        Err(e) => Err(e),
+                        Ok(_) => match me.session(&session) {
+                            Ok((backend, sid)) => backend.move_to(sid, &cwd).await,
+                            Err(e) => Err(e),
+                        },
+                    };
+                    me.finish(id, result.map(|_| None));
+                });
+            }
             ServerMsg::PromptReply { id, session, prompt, kind, decision, answer, message, cancel } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {

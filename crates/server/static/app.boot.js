@@ -186,6 +186,7 @@ function onMessage(msg) {
     else if (deleteId && msg.id === deleteId) onDeleteResult(msg);
     else if (closeIds.has(msg.id)) onCloseResult(msg);
     else if (renameIds.has(msg.id)) onRenameResult(msg);
+    else if (moveIds.has(msg.id)) onMoveResult(msg);
     else if (interruptId && msg.id === interruptId) onInterruptResult(msg);
     else if (modelSet && msg.id === modelSet.id) onModelResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);

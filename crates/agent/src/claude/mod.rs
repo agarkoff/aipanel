@@ -1379,6 +1379,13 @@ impl Backend for Arc<Claude> {
         Box::pin(async move { Claude::rename(self, id, title) })
     }
 
+    fn move_to<'a>(&'a self, _id: &'a str, _cwd: &'a str) -> Fut<'a, Result<(), String>> {
+        // Транскрипт Claude Code лежит в `~/.claude/projects/<каталог>/`: другой
+        // каталог — другой проект, и `--resume` сессию там не найдёт. Перенос
+        // файла с переписыванием `cwd` — приватный формат, поэтому не делаем.
+        Box::pin(async move { Err("перемещать можно только сессии opencode".into()) })
+    }
+
     fn delete<'a>(&'a self, id: &'a str, close: bool) -> Fut<'a, Result<(), String>> {
         Box::pin(async move { Claude::delete(self, id, close).await })
     }

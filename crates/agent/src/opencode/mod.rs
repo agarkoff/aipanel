@@ -1188,6 +1188,17 @@ impl OpenCode {
             .map(|_| ())
     }
 
+    /// Перемещает сессию в другой каталог: opencode меняет её `location`, и
+    /// переписка переезжает вместе с ней. `delivery: steer` — на границе шага,
+    /// поэтому у занятой сессии каталог не меняется посреди шага, а у свободной
+    /// переезд происходит сразу (с `queue` он ждал бы следующего сообщения).
+    pub async fn move_to(&self, id: &str, cwd: &str) -> Result<(), String> {
+        let body = json!({ "directory": cwd, "delivery": "steer" });
+        self.call(reqwest::Method::POST, &format!("/api/session/{id}/move"), Some(body))
+            .await
+            .map(|_| ())
+    }
+
     /// Удаляет сессию через API opencode. Занятую или открытую в окне сессию
     /// без `close` не трогаем: opencode мог бы продолжить писать в неё после
     /// удаления. С `close` сначала закрываем окна с ней и прерываем ход.
@@ -1515,6 +1526,10 @@ impl Backend for Arc<OpenCode> {
 
     fn rename<'a>(&'a self, id: &'a str, title: &'a str) -> Fut<'a, Result<(), String>> {
         Box::pin(async move { OpenCode::rename(self, id, title).await })
+    }
+
+    fn move_to<'a>(&'a self, id: &'a str, cwd: &'a str) -> Fut<'a, Result<(), String>> {
+        Box::pin(async move { OpenCode::move_to(self, id, cwd).await })
     }
 
     fn delete<'a>(&'a self, id: &'a str, close: bool) -> Fut<'a, Result<(), String>> {

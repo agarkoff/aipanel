@@ -88,6 +88,16 @@ const stub = `
         state.closed = msg.on
           ? [...state.closed.filter((k) => k !== msg.project), msg.project]
           : state.closed.filter((k) => k !== msg.project);
+      } else if (msg.t === 'move') {
+        // Переезд сессии в другой каталог: у настоящего opencode меняется её
+        // location.directory, и следующий список приходит уже с новым местом.
+        const moved = sessions.find((s) => s.key === msg.session);
+        if (moved) moved.cwd = msg.cwd;
+        window.__moves.push({ session: msg.session, cwd: msg.cwd });
+        this.emit({ t: 'result', id: msg.id, ok: true });
+        save();
+        this.emitAgents();
+        return;
       } else {
         return;
       }
@@ -100,7 +110,7 @@ const stub = `
       this.emit({
         t: 'agents',
         agents: [
-          { name: 'pc', online: true, os: 'win', version: 'test', sessions, pins: state.pins, closed: state.closed },
+          { name: 'pc', online: true, os: 'win', version: window.__agentVersion || '17.4.0', sessions, pins: state.pins, closed: state.closed },
         ],
       });
     }
@@ -111,6 +121,7 @@ const stub = `
     sessions = list;
     window.__socket.emitAgents();
   };
+  window.__moves = [];
   window.__state = state;
   const realFetch = window.fetch.bind(window);
   window.fetch = (url, opts) =>
@@ -489,6 +500,157 @@ try {
     'закреп убран из хранилища агента',
     await evaluate(`window.__state.pins.length === 0`),
   );
+
+  // Перенос строки в другой проект: у opencode сессия меняет каталог, а с ним и
+  // проект в списке. На компьютере перенос начинается движением мыши.
+  await evaluate(`sessionStorage.removeItem('aipanel-test-list')`);
+  await send('Page.navigate', { url: pageUrl });
+  await waitFor(`!!window.__socket && !!document.getElementById('sessions')`, 8000);
+  await sendList(sessions());
+  await waitFor(`document.querySelectorAll('#sessions .project').length === 2`, 8000);
+
+  const dragBox = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Бегунок');
+    const project = [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs');
+    const from = row.getBoundingClientRect();
+    const to = project.getBoundingClientRect();
+    return {
+      x1: Math.round(from.left + from.width / 2),
+      y1: Math.round(from.top + from.height / 2),
+      x2: Math.round(to.left + to.width / 2),
+      y2: Math.round(to.top + to.height / 2),
+    };
+  })()`);
+  const mouse = (type, x, y, buttons) =>
+    send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons, clickCount: 1 });
+  await mouse('mousePressed', dragBox.x1, dragBox.y1, 0);
+  await mouse('mouseMoved', dragBox.x1 + 24, dragBox.y1 + 8, 1);
+  await mouse('mouseMoved', dragBox.x2, dragBox.y2, 1);
+  await sleep(80);
+  const carrying = await evaluate(`({
+    ghost: !!document.querySelector('.drag-ghost'),
+    target: !!document.querySelector('#sessions .project.drop-target'),
+  })`);
+  check('при переносе видна копия строки и подсвечен проект', carrying.ghost && carrying.target, carrying);
+  await mouse('mouseReleased', dragBox.x2, dragBox.y2, 0);
+  await sleep(250);
+  const moves = await evaluate(`window.__moves`);
+  check(
+    'строка, брошенная на проект, переезжает в его каталог',
+    moves.length === 1 && moves[0].session === 'opencode:a' && moves[0].cwd === DOCS,
+    moves,
+  );
+  const movedView = await evaluate(view);
+  const docsAfter = movedView.projects.find((p) => p.name === 'docs');
+  check(
+    'переехавшая сессия видна в новом проекте',
+    !!docsAfter && docsAfter.rows.includes('Бегунок'),
+    movedView.projects,
+  );
+
+  // Claude Code так не умеет: его переписка привязана к каталогу проекта. Панель
+  // говорит об этом сразу, а не после ответа агента.
+  const claudeBox = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Спит');
+    const project = [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'api');
+    const from = row.getBoundingClientRect();
+    const to = project.getBoundingClientRect();
+    return {
+      x1: Math.round(from.left + from.width / 2),
+      y1: Math.round(from.top + from.height / 2),
+      x2: Math.round(to.left + to.width / 2),
+      y2: Math.round(to.top + to.height / 2),
+    };
+  })()`);
+  await mouse('mousePressed', claudeBox.x1, claudeBox.y1, 0);
+  await mouse('mouseMoved', claudeBox.x1 + 24, claudeBox.y1 + 8, 1);
+  await mouse('mouseMoved', claudeBox.x2, claudeBox.y2, 1);
+  await sleep(80);
+  const refused = await evaluate(`({
+    ghost: !!document.querySelector('.drag-ghost'),
+    hint: document.getElementById('hint-list').textContent,
+  })`);
+  await mouse('mouseReleased', claudeBox.x2, claudeBox.y2, 0);
+  await sleep(120);
+  check(
+    'сессию Claude Code перенести нельзя — сказано почему',
+    !refused.ghost && refused.hint.includes('opencode'),
+    refused,
+  );
+  check('для Claude Code команда агенту не уходит', (await evaluate(`window.__moves.length`)) === 1);
+
+  // Агент старой версии не знает команду `move` и не ответил бы на неё: такой
+  // перенос панель не предлагает, а просит обновить агент.
+  await evaluate(`window.__agentVersion = '17.3.0'`);
+  await sendList(sessions());
+  await waitFor(`document.querySelectorAll('#sessions .project').length === 2`);
+  const oldBox = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Бегунок');
+    const project = [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs');
+    const from = row.getBoundingClientRect();
+    const to = project.getBoundingClientRect();
+    return {
+      x1: Math.round(from.left + from.width / 2),
+      y1: Math.round(from.top + from.height / 2),
+      x2: Math.round(to.left + to.width / 2),
+      y2: Math.round(to.top + to.height / 2),
+    };
+  })()`);
+  await mouse('mousePressed', oldBox.x1, oldBox.y1, 0);
+  await mouse('mouseMoved', oldBox.x1 + 24, oldBox.y1 + 8, 1);
+  await mouse('mouseMoved', oldBox.x2, oldBox.y2, 1);
+  await sleep(80);
+  const oldRefused = await evaluate(`({
+    ghost: !!document.querySelector('.drag-ghost'),
+    hint: document.getElementById('hint-list').textContent,
+  })`);
+  await mouse('mouseReleased', oldBox.x2, oldBox.y2, 0);
+  check(
+    'старый агент не обещает перенос — просит обновиться',
+    !oldRefused.ghost && oldRefused.hint.includes('обновите агент'),
+    oldRefused,
+  );
+  await evaluate(`window.__agentVersion = '17.4.0'`);
+  await sendList(sessions());
+  await sleep(80);
+
+  // На телефоне перенос начинается долгим нажатием: обычное движение пальцем
+  // по-прежнему прокручивает список, а горизонтальный жест удаляет строку.
+  const touchBox = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Второй');
+    const project = [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs');
+    const from = row.getBoundingClientRect();
+    const to = project.getBoundingClientRect();
+    return {
+      x1: Math.round(from.left + from.width / 2),
+      y1: Math.round(from.top + from.height / 2),
+      x2: Math.round(to.left + to.width / 2),
+      y2: Math.round(to.top + to.height / 2),
+    };
+  })()`);
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  const touch = (type, x, y) =>
+    send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] });
+  await touch('touchStart', touchBox.x1, touchBox.y1);
+  await sleep(600);
+  const holding = await evaluate(`!!document.querySelector('.drag-ghost')`);
+  await touch('touchMove', touchBox.x2, touchBox.y2);
+  await sleep(60);
+  await touch('touchEnd', touchBox.x2, touchBox.y2);
+  await sleep(250);
+  const touchMoves = await evaluate(`window.__moves`);
+  check('долгое нажатие пальцем тоже переносит сессию', holding && touchMoves.length === 2, {
+    holding,
+    moves: touchMoves,
+  });
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

@@ -48,6 +48,9 @@ pub trait Backend: Send + Sync {
     fn set_model<'a>(&'a self, id: &'a str, provider: &'a str, model: &'a str) -> Fut<'a, Result<(), String>>;
     fn interrupt<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(), String>>;
     fn rename<'a>(&'a self, id: &'a str, title: &'a str) -> Fut<'a, Result<(), String>>;
+    /// Переместить сессию в каталог `cwd`: сменить её проект. Умеют не все
+    /// инструменты: у Claude Code транскрипт привязан к каталогу проекта.
+    fn move_to<'a>(&'a self, id: &'a str, cwd: &'a str) -> Fut<'a, Result<(), String>>;
     fn delete<'a>(&'a self, id: &'a str, close: bool) -> Fut<'a, Result<(), String>>;
     fn close<'a>(&'a self, id: &'a str) -> Fut<'a, Result<(), String>>;
     fn start<'a>(&'a self, cwd: &'a str, model: &'a str) -> Fut<'a, Result<Option<String>, String>>;

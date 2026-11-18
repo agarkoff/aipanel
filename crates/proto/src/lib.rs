@@ -900,6 +900,11 @@ pub enum ServerMsg {
     /// в транскрипте — так же, как от своего `/rename`; opencode — новый заголовок
     /// сессии через свой API. Новое имя приходит в следующем списке сессий.
     Rename { id: String, session: String, title: String },
+    /// Переместить сессию `session` в каталог `cwd` — сменить её проект.
+    /// opencode умеет это своим API; Claude Code — нет: его транскрипт лежит в
+    /// каталоге проекта, и ответом будет ошибка. Каталог должен существовать на
+    /// машине агента.
+    Move { id: String, session: String, cwd: String },
     /// Ответить на запрос opencode `prompt`: разрешение (`decision`), форма
     /// (`answer`) или отмена формы (`cancel`).
     PromptReply {

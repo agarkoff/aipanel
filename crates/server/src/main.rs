@@ -1007,6 +1007,47 @@ mod tests {
     }
 
     #[test]
+    fn move_is_forwarded_and_checks_cwd() {
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(4);
+        let (browser, mut browser_rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), AgentEntry { tx: Some(tx), ..entry() });
+        inner.browsers.insert(
+            1,
+            BrowserEntry { tx: browser, owner: "alice".into(), watching: None, sub: None },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        // Пустой каталог до агента не доходит: панель сразу получает ошибку.
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::Move { id: "c1".into(), agent: "pc".into(), session: "opencode:s1".into(), cwd: "  ".into() },
+        );
+        assert!(rx.try_recv().is_err(), "пустой каталог ушёл агенту");
+        let answer = browser_rx.try_recv().unwrap();
+        assert!(answer.contains("\"ok\":false") && answer.contains("некорректный каталог"), "{answer}");
+
+        // Каталог доходит до агента без пробелов вокруг: он его и проверяет на диске.
+        on_browser_msg(
+            &app,
+            1,
+            BrowserMsg::Move {
+                id: "c2".into(),
+                agent: "pc".into(),
+                session: "opencode:s1".into(),
+                cwd: "  C:\\work\\docs  ".into(),
+            },
+        );
+        match rx.try_recv().unwrap() {
+            ServerMsg::Move { session, cwd, .. } => {
+                assert_eq!((session.as_str(), cwd.as_str()), ("opencode:s1", "C:\\work\\docs"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn agent_cannot_answer_foreign_command() {
         let (tx, mut rx) = mpsc::channel::<String>(4);
         let mut inner = Inner::default();

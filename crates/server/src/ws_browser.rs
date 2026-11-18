@@ -71,6 +71,9 @@ pub(crate) enum BrowserMsg {
     Close { id: String, agent: String, session: String },
     /// Переименовать сессию: имя меняется у самого инструмента, а не только в панели.
     Rename { id: String, agent: String, session: String, title: String },
+    /// Переместить сессию в другой каталог: у opencode меняется её проект и
+    /// `location.directory`, Claude Code ответит ошибкой.
+    Move { id: String, agent: String, session: String, cwd: String },
     /// Попросить у агента команды сессии для списка, который открывается по `/`.
     Commands { agent: String, session: String },
     /// Попросить у агента модели для окна «Новая сессия».
@@ -420,6 +423,15 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             }
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Rename { id: cmd, session, title });
+        }
+        BrowserMsg::Move { id, agent, session, cwd } => {
+            let cwd = cwd.trim().to_owned();
+            if cwd.is_empty() || cwd.len() > 4096 || cwd.chars().any(char::is_control) {
+                reply(&inner, browser, &id, "некорректный каталог");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Move { id: cmd, session, cwd });
         }
         BrowserMsg::Screens { id, agent } => {
             let cmd = format!("{browser}:{}", inner.id());

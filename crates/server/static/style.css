@@ -242,6 +242,37 @@ input, textarea, select {
 }
 .session-row.dragging .session { transition: none; }
 .session-row .session { touch-action: pan-y; }
+/* Перенос строки в другой проект: сама строка гаснет, над указателем едет её
+   копия, а проект-цель подсвечивается рамкой. */
+.session-row.drag-source { opacity: .45; }
+.session-row.drop-target .session,
+.project.drop-target { background: var(--user); box-shadow: inset 0 0 0 2px var(--accent); }
+.session-dragging { cursor: grabbing; }
+.session-dragging .session,
+.session-dragging .project { user-select: none; }
+.drag-ghost {
+  position: fixed;
+  z-index: 40;
+  transform: translate(-50%, -100%);
+  max-width: 280px;
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .3);
+  pointer-events: none;
+  user-select: none;
+}
+.drag-ghost-name,
+.drag-ghost-place {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drag-ghost-name { font-weight: 600; font-size: 13px; }
+.drag-ghost-place { font-size: 12px; color: var(--muted); }
 .session:hover { background: var(--bg); }
 .session.active { background: var(--user); box-shadow: inset 3px 0 0 var(--accent); }
 .swipe-action {

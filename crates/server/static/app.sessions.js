@@ -232,6 +232,9 @@ function orderedList(agent, list) {
         key,
         // Подсказка: адрес репозитория, а для обычного каталога — полный путь.
         cwd: r ? r.url || r.root || r.name || '' : i.s.cwd || '',
+        // Куда переехать, если строку бросить на этот проект: основная рабочая
+        // копия репозитория (worktree — это тот же проект), иначе сам каталог.
+        moveCwd: (r && r.root) || i.s.cwd || '',
         repo: !!r,
         name: r && r.name ? r.name : '',
         items: [],
@@ -342,6 +345,11 @@ function projectEntry(agent, project, expanded) {
     update(entry) {
       entry.agentName = agent.name;
       entry.projectKey = project.key;
+      // Куда переедет сессия, брошенная на этот проект: по этим полям цель
+      // находит перетаскивание (см. dragTargetOf).
+      entry.node.dataset.agent = agent.name;
+      entry.node.dataset.moveCwd = project.moveCwd || '';
+      entry.node.dataset.projectLabel = project.label || '';
       entry.node.setAttribute('aria-expanded', String(expanded));
       entry.name.textContent = project.label;
       // Подсказка объясняет, что за проект: репозиторий или каталог.
@@ -463,6 +471,7 @@ function rowEntry(agent, session, inProject) {
         onClose: () => askClose(entry.agentName, entry.session),
         onDelete: () => askDelete(entry.agentName, entry.session),
       });
+      attachDrag(entry.node, entry);
     },
     update(entry) {
       entry.session = session;
@@ -487,6 +496,11 @@ function rowEntry(agent, session, inProject) {
       entry.stop.hidden = !session.live;
       entry.node.classList.toggle('pinned', pinned);
       entry.node.classList.toggle('in-project', inProject);
+      // Куда переедет сессия, брошенная на эту строку: её собственный каталог
+      // (в том числе worktree). По этим полям цель находит перетаскивание.
+      entry.node.dataset.agent = agentName;
+      entry.node.dataset.moveCwd = session.cwd || '';
+      entry.node.dataset.moveName = session.title || key;
       entry.pin.classList.toggle('on', pinned);
       entry.pin.title = pinned ? 'Открепить сессию' : 'Закрепить сессию';
       entry.pin.setAttribute('aria-label', entry.pin.title);
@@ -632,6 +646,8 @@ function attachSwipe(row, btn, action, actions) {
   });
   row.addEventListener('pointermove', (e) => {
     if (!tracking) return;
+    // Строку несут в другой проект: свайп не должен ехать за пальцем.
+    if (dragSession) return;
     dx = e.clientX - startX;
     dy = e.clientY - startY;
     if (!horizontal) {
@@ -692,6 +708,221 @@ function attachSwipe(row, btn, action, actions) {
   );
 }
 
+// ------------------------------------------------------------ перенос в проект
+
+// Сессию opencode можно перенести в другой проект: перетаскивание строки на
+// заголовок проекта (или на строку другой сессии — в её каталог) меняет её
+// `cwd`, а с ним и проект в списке. Claude Code так не умеет: его транскрипт
+// лежит в каталоге проекта, и агент отвечает ошибкой.
+//
+// На компьютере перенос начинается движением мыши, на телефоне — долгим
+// нажатием: обычное касание должно по-прежнему прокручивать список, а
+// горизонтальное движение — смахивать строку на удаление.
+const DRAG_PRESS_MS = 450;
+const DRAG_START_PX = 8;
+const DRAG_SCROLL_EDGE = 32;
+// Перемещение появилось в протоколе агента 17.4: старый агент не знает команду
+// `move` и не ответит на неё вовсе, поэтому перенос ему не предлагается.
+const MOVE_MIN = [17, 4];
+
+let dragSession = null; // { agent, row, session, ghost, x, y, pointerId }
+let dragTarget = null; // узел под указателем, куда упадёт строка
+let dragSuppressClick = 0; // click сразу после переноса не открывает сессию
+let dragScrollTimer = 0;
+
+// Куда можно бросить строку: заголовок проекта или строка другой сессии того же
+// агента. Каталог цели берётся из `data-move-cwd`: у проекта — основная копия
+// репозитория, у строки — её собственный каталог.
+function dragTargetOf(x, y) {
+  if (!dragSession) return null;
+  const node = document.elementFromPoint(x, y);
+  if (!node) return null;
+  const candidate = node.closest('.project') || node.closest('.session-row');
+  if (!candidate || candidate === dragSession.row) return null;
+  if (candidate.dataset.agent !== dragSession.agent) return null;
+  const cwd = candidate.dataset.moveCwd || '';
+  if (!cwd || cwdKey(cwd) === cwdKey(dragSession.session.cwd)) return null;
+  return candidate;
+}
+
+function setDragTarget(node) {
+  if (dragTarget === node) return;
+  if (dragTarget) dragTarget.classList.remove('drop-target');
+  dragTarget = node;
+  if (dragTarget) dragTarget.classList.add('drop-target');
+}
+
+function dragLabel(node) {
+  return node.dataset.projectLabel || node.dataset.moveName || baseName(node.dataset.moveCwd);
+}
+
+function beginDrag(row, session, agent, x, y, pointerId) {
+  if (session.tool !== 'opencode') {
+    setHint('Перемещать можно только сессии opencode: у Claude Code переписка привязана к каталогу проекта.', true);
+    return;
+  }
+  const version = agentByName(agent)?.version;
+  const [major, minor] = String(version || '').split('.').map(Number);
+  if (!(major > MOVE_MIN[0] || (major === MOVE_MIN[0] && minor >= MOVE_MIN[1]))) {
+    setHint(`Агент${version ? ` ${version}` : ''} не умеет перемещать сессии — обновите агент.`, true);
+    return;
+  }
+  const ghost = el('div', 'drag-ghost');
+  ghost.setAttribute('aria-hidden', 'true');
+  ghost.append(el('span', 'drag-ghost-name', session.title || session.key), el('span', 'drag-ghost-place', placeLabel(session)));
+  document.body.append(ghost);
+  dragSession = { agent, row, session, ghost, x, y, pointerId };
+  row.classList.add('drag-source');
+  document.body.classList.add('session-dragging');
+  // Движения пальца или мыши приходят строке, даже когда указатель ушёл с неё:
+  // иначе перенос обрывался бы на первом же шаге к чужому проекту.
+  try {
+    row.setPointerCapture(pointerId);
+  } catch {}
+  // click после отпускания не должен открыть сессию, мимо которой пронесли.
+  dragSuppressClick = Date.now() + 600;
+  moveGhost(x, y);
+  if (!dragScrollTimer) dragScrollTimer = setInterval(dragScrollTick, 16);
+  setHint('Отпустите над проектом, куда переместить сессию.');
+}
+
+function moveGhost(x, y) {
+  if (!dragSession) return;
+  dragSession.x = x;
+  dragSession.y = y;
+  dragSession.ghost.style.left = `${x}px`;
+  dragSession.ghost.style.top = `${y - 18}px`;
+  setDragTarget(dragTargetOf(x, y));
+}
+
+// У края списка он прокручивается сам: до дальнего проекта иначе не дотянуть.
+function dragScrollTick() {
+  if (!dragSession) {
+    clearInterval(dragScrollTimer);
+    dragScrollTimer = 0;
+    return;
+  }
+  const box = $('sessions');
+  const rect = box.getBoundingClientRect();
+  const { x, y } = dragSession;
+  if (y < rect.top + DRAG_SCROLL_EDGE) box.scrollTop -= 12;
+  else if (y > rect.bottom - DRAG_SCROLL_EDGE) box.scrollTop += 12;
+  else return;
+  setDragTarget(dragTargetOf(x, y));
+}
+
+function endDrag(x, y, drop) {
+  if (!dragSession) return;
+  const drag = dragSession;
+  const target = drop ? dragTargetOf(x, y) : null;
+  dragSession = null;
+  setDragTarget(null);
+  drag.ghost.remove();
+  drag.row.classList.remove('drag-source');
+  document.body.classList.remove('session-dragging');
+  try {
+    drag.row.releasePointerCapture(drag.pointerId);
+  } catch {}
+  dragSuppressClick = Date.now() + 400;
+  if (dragScrollTimer) {
+    clearInterval(dragScrollTimer);
+    dragScrollTimer = 0;
+  }
+  if (!target) return;
+  askMove(drag.agent, drag.session, target.dataset.moveCwd, dragLabel(target));
+}
+
+function attachDrag(row, entry) {
+  let press = null; // { x, y, pointerId, touch, timer } — нажатие до переноса
+
+  const cancelPress = () => {
+    if (!press) return;
+    clearTimeout(press.timer);
+    press = null;
+  };
+
+  row.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || dragSession) return;
+    // Кнопки строки (закреп, закрытие, удаление) — не начало переноса.
+    const button = e.target.closest('button');
+    if (button && !button.classList.contains('session')) return;
+    // В поле правки имени мышь и палец должны выделять текст, а не переносить.
+    if (e.target.closest('input, textarea')) return;
+    const touch = e.pointerType !== 'mouse';
+    press = { x: e.clientX, y: e.clientY, pointerId: e.pointerId, touch, timer: 0 };
+    if (!touch) return;
+    press.timer = setTimeout(() => {
+      const held = press;
+      press = null;
+      if (held && entry.session) beginDrag(row, entry.session, entry.agentName, held.x, held.y, held.pointerId);
+    }, DRAG_PRESS_MS);
+  });
+
+  row.addEventListener('pointermove', (e) => {
+    if (dragSession) {
+      if (dragSession.row !== row) return;
+      moveGhost(e.clientX, e.clientY);
+      e.preventDefault();
+      return;
+    }
+    if (!press) return;
+    if (Math.abs(e.clientX - press.x) < DRAG_START_PX && Math.abs(e.clientY - press.y) < DRAG_START_PX) return;
+    // Касание ушло в прокрутку или свайп: переноса не будет.
+    if (press.touch) {
+      cancelPress();
+      return;
+    }
+    const start = press;
+    press = null;
+    if (entry.session) beginDrag(row, entry.session, entry.agentName, start.x, start.y, start.pointerId);
+  });
+
+  row.addEventListener('pointerup', (e) => {
+    if (dragSession && dragSession.row === row) {
+      endDrag(e.clientX, e.clientY, true);
+      return;
+    }
+    cancelPress();
+  });
+
+  row.addEventListener('pointercancel', (e) => {
+    if (dragSession && dragSession.row === row) endDrag(e.clientX, e.clientY, false);
+    cancelPress();
+  });
+
+  // Долгое нажатие на телефоне иначе открывает меню «выделить/сохранить».
+  row.addEventListener('contextmenu', (e) => {
+    if (press || dragSession) e.preventDefault();
+  });
+}
+
+// Пока строку несут, страница не прокручивается под пальцем.
+document.addEventListener(
+  'touchmove',
+  (e) => {
+    if (dragSession) e.preventDefault();
+  },
+  { passive: false },
+);
+
+// Click после переноса — это конец жеста, а не выбор сессии.
+document.addEventListener(
+  'click',
+  (e) => {
+    if (Date.now() >= dragSuppressClick) return;
+    e.preventDefault();
+    e.stopPropagation();
+  },
+  true,
+);
+
+// Esc отменяет перенос: сессия остаётся там, где была.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !dragSession) return;
+  e.preventDefault();
+  endDrag(dragSession.x, dragSession.y, false);
+});
+
 // ------------------------------------------------------------ закрытие консоли
 
 // Закрывает окно консоли сессии на компьютере (или её фоновый процесс),
@@ -709,6 +940,41 @@ function askClose(agent, session) {
 function onCloseResult(msg) {
   closeIds.delete(msg.id);
   setHint(msg.ok ? 'Консоль закрыта.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
+}
+
+// ------------------------------------------------------------ перемещение сессии
+
+// Перемещение — команда агенту: он зовёт `/api/session/<id>/move` opencode.
+// В панели каталог меняется не сразу, а следующим списком сессий: агент опрашивает
+// opencode раз в пару секунд, а занятая сессия переезжает после текущего ответа.
+const moveIds = new Map(); // id команды -> { title, label }
+
+function askMove(agentName, session, cwd, label) {
+  const agent = agentByName(agentName);
+  if (!agent || !agent.online) {
+    setHint('Агент не в сети: переместить сессию нельзя.', true);
+    return;
+  }
+  if (session.tool !== 'opencode') {
+    setHint('Перемещать можно только сессии opencode: у Claude Code переписка привязана к каталогу проекта.', true);
+    return;
+  }
+  const id = String(++cmdSeq);
+  if (!send({ t: 'move', id, agent: agentName, session: session.key, cwd })) {
+    setHint('Нет соединения с сервером.', true);
+    return;
+  }
+  const title = session.title || session.key;
+  moveIds.set(id, { title, label });
+  const busy = ['busy', 'shell', 'stalled'].includes(session.status);
+  setHint(`Перемещаем «${title}» в «${label}»${busy ? ' — на границе шага' : ''}…`);
+}
+
+function onMoveResult(msg) {
+  const req = moveIds.get(msg.id);
+  moveIds.delete(msg.id);
+  if (msg.ok) setHint(req ? `Сессия «${req.title}» переехала в «${req.label}».` : 'Сессия перемещена.');
+  else setHint(`Ошибка: ${msg.error || 'не удалось переместить сессию'}`, true);
 }
 
 // ------------------------------------------------------------ переименование
