@@ -122,69 +122,66 @@ function projectDot(items, online) {
   return 'dot';
 }
 
-// Закреплённые сессии: порядок хранится в браузере, свежие закреплённые сверху.
-const PINS_KEY = 'aipanel.pins';
-let pinnedSessions = readPinned();
-
-function readPinned() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(PINS_KEY) || '[]');
-    return Array.isArray(saved) ? saved.filter((v) => typeof v === 'string') : [];
-  } catch {
-    return [];
-  }
+// Закреплённые сессии и свёрнутые проекты приходят от агента вместе со списком
+// сессий (`pins` и `closed` в сообщении `agents`): хранятся они у него в
+// `list.json`, поэтому одинаковы во всех браузерах и на всех устройствах.
+function agentByName(name) {
+  return agents.find((a) => a.name === name);
 }
 
-function pinnedId(agent, key) {
+function agentPins(agent) {
+  return agent && Array.isArray(agent.pins) ? agent.pins : [];
+}
+
+function agentClosed(agent) {
+  return agent && Array.isArray(agent.closed) ? agent.closed : [];
+}
+
+// Ключ состояния: у агента свой список, поэтому имя агента в него не входит.
+function sessionTag(agent, key) {
   return `${agent}\n${key}`;
 }
 
 function isPinned(agent, key) {
-  return pinnedSessions.includes(pinnedId(agent, key));
+  return agentPins(agentByName(agent)).includes(key);
 }
 
-function togglePin(agent, key) {
-  const id = pinnedId(agent, key);
-  const at = pinnedSessions.indexOf(id);
-  if (at < 0) pinnedSessions.unshift(id);
-  else pinnedSessions.splice(at, 1);
-  try {
-    localStorage.setItem(PINS_KEY, JSON.stringify(pinnedSessions));
-  } catch {
-    // Хранилище недоступно (приватный режим): закреп проживёт до перезагрузки.
+function togglePin(agentName, key) {
+  const agent = agentByName(agentName);
+  if (!agent) return;
+  const on = !agentPins(agent).includes(key);
+  // Список меняем сразу, не дожидаясь ответа агента: нажатие должно отзываться
+  // мгновенно, а подтверждение придёт следующим списком.
+  agent.pins = on ? [key, ...agentPins(agent).filter((k) => k !== key)] : agentPins(agent).filter((k) => k !== key);
+  if (!send({ t: 'pin_session', agent: agentName, session: key, on })) {
+    setHint('Нет соединения с сервером.', true);
   }
   renderSessions();
 }
 
-// Свёрнутые проекты: тоже в браузере, чтобы список выглядел одинаково после
-// перезагрузки. Храним именно свёрнутые — новые проекты появляются раскрытыми.
-const CLOSED_KEY = 'aipanel.closed';
-const closedProjects = readClosed();
+// Свёрнутые проекты лежат там же. Храним именно свёрнутые — новые проекты
+// появляются раскрытыми.
+function projectClosed(agentName, key) {
+  return agentClosed(agentByName(agentName)).includes(key);
+}
 
-function readClosed() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(CLOSED_KEY) || '[]');
-    return new Set(Array.isArray(saved) ? saved.filter((v) => typeof v === 'string') : []);
-  } catch {
-    return new Set();
+function toggleProject(agentName, key) {
+  const agent = agentByName(agentName);
+  if (!agent) return;
+  const on = !agentClosed(agent).includes(key);
+  agent.closed = on ? [...agentClosed(agent), key] : agentClosed(agent).filter((k) => k !== key);
+  if (!send({ t: 'collapse_project', agent: agentName, project: key, on })) {
+    setHint('Нет соединения с сервером.', true);
   }
-}
-
-function saveClosed() {
-  try {
-    localStorage.setItem(CLOSED_KEY, JSON.stringify([...closedProjects]));
-  } catch {}
-}
-
-function toggleProject(id) {
-  if (closedProjects.has(id)) closedProjects.delete(id);
-  else closedProjects.add(id);
-  saveClosed();
   renderSessions();
 }
 
 function openProject(agentName, session) {
-  if (closedProjects.delete(projectId(agentName, projectKeyOf(session)))) saveClosed();
+  const agent = agentByName(agentName);
+  const key = projectKeyOf(session);
+  if (!agent || !agentClosed(agent).includes(key)) return;
+  agent.closed = agentClosed(agent).filter((k) => k !== key);
+  send({ t: 'collapse_project', agent: agentName, project: key, on: false });
 }
 
 // Сессия только что начала ждать ответа — раскрываем её проект, чтобы вопрос не
@@ -193,19 +190,17 @@ function openProject(agentName, session) {
 const lastWaiting = new Set();
 
 function revealWaiting() {
-  let changed = false;
   const waiting = new Set();
   for (const a of agents) {
     for (const s of a.sessions) {
       if (s.status !== 'waiting') continue;
-      const id = pinnedId(a.name, s.key);
-      waiting.add(id);
-      if (!lastWaiting.has(id) && closedProjects.delete(projectId(a.name, projectKeyOf(s)))) changed = true;
+      const tag = sessionTag(a.name, s.key);
+      waiting.add(tag);
+      if (!lastWaiting.has(tag)) openProject(a.name, s);
     }
   }
   lastWaiting.clear();
-  for (const id of waiting) lastWaiting.add(id);
-  if (changed) saveClosed();
+  for (const tag of waiting) lastWaiting.add(tag);
 }
 
 // Раскладка одного агента: закреплённые сверху, дальше проекты-каталоги, а внутри
@@ -222,7 +217,8 @@ function orderedList(agent, list) {
   }
 
   const pinned = items.filter((i) => i.pinned);
-  pinned.sort((a, b) => pinnedSessions.indexOf(pinnedId(agent.name, a.s.key)) - pinnedSessions.indexOf(pinnedId(agent.name, b.s.key)));
+  const pinOrder = agentPins(agent);
+  pinned.sort((a, b) => pinOrder.indexOf(a.s.key) - pinOrder.indexOf(b.s.key));
 
   const byProject = new Map();
   for (const i of items) {
@@ -236,6 +232,7 @@ function orderedList(agent, list) {
         key,
         // Подсказка: адрес репозитория, а для обычного каталога — полный путь.
         cwd: r ? r.url || r.root || r.name || '' : i.s.cwd || '',
+        repo: !!r,
         name: r && r.name ? r.name : '',
         items: [],
       };
@@ -327,7 +324,8 @@ function projectEntry(agent, project, expanded) {
   return {
     id: project.id,
     init(entry) {
-      entry.projectId = project.id;
+      entry.agentName = agent.name;
+      entry.projectKey = project.key;
       entry.node = el('button', 'project');
       entry.node.type = 'button';
       entry.toggle = el('span', 'project-toggle');
@@ -335,14 +333,18 @@ function projectEntry(agent, project, expanded) {
       entry.count = el('span', 'project-count');
       entry.dot = el('span', 'dot');
       entry.node.append(entry.toggle, entry.name, entry.count, entry.dot);
-      entry.node.addEventListener('click', () => toggleProject(entry.projectId));
+      entry.node.addEventListener('click', () => toggleProject(entry.agentName, entry.projectKey));
     },
     update(entry) {
-      entry.projectId = project.id;
+      entry.agentName = agent.name;
+      entry.projectKey = project.key;
       entry.node.setAttribute('aria-expanded', String(expanded));
       entry.toggle.textContent = expanded ? '−' : '+';
       entry.name.textContent = project.label;
-      entry.name.title = project.cwd || 'Каталог неизвестен';
+      // Подсказка объясняет, что за проект: репозиторий или каталог.
+      entry.name.title = project.cwd
+        ? `${project.repo ? 'Репозиторий' : 'Каталог'}: ${project.cwd}`
+        : 'Каталог неизвестен';
       entry.count.textContent = String(project.items.length);
       entry.dot.className = project.dot;
       entry.node.setAttribute(
@@ -545,7 +547,7 @@ function renderSessions() {
       }
       for (const project of projects) {
         // Во время поиска проекты раскрыты: иначе совпадение осталось бы за плюсиком.
-        const expanded = !!q || !closedProjects.has(project.id);
+        const expanded = !!q || !projectClosed(a.name, project.key);
         plan.push(projectEntry(a, project, expanded));
         if (!expanded) continue;
         for (const item of project.items) plan.push(rowEntry(a, item.s, true));

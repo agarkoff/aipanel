@@ -39,6 +39,10 @@ struct AgentEntry {
     sessions: Vec<SessionInfo>,
     /// Последние проверенные лимиты подписок на машине агента.
     limits: Vec<Limits>,
+    /// Закреплённые сессии и свёрнутые проекты: состояние списка хранится у
+    /// агента, сервер только передаёт его браузерам.
+    pins: Vec<String>,
+    closed: Vec<String>,
 }
 
 struct BrowserEntry {
@@ -109,6 +113,8 @@ impl Inner {
                     "version": a.version,
                     "sessions": a.sessions,
                     "limits": a.limits,
+                    "pins": a.pins,
+                    "closed": a.closed,
                 })
             })
             .collect();
@@ -495,6 +501,8 @@ mod tests {
             version: "0.1".into(),
             sessions: Vec::new(),
             limits: Vec::new(),
+            pins: Vec::new(),
+            closed: Vec::new(),
         }
     }
 
@@ -508,6 +516,22 @@ mod tests {
         let agents = json["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0]["name"], "pc");
+    }
+
+    #[test]
+    fn session_list_state_reaches_browsers() {
+        let mut inner = Inner::default();
+        inner.agents.insert(("alice".into(), "pc".into()), entry());
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::SessionList { pins: vec!["claude:a".into()], closed: vec!["dir:c:\\api".into()] },
+        );
+        let json: serde_json::Value = serde_json::from_str(&app.lock().agents_json("alice")).unwrap();
+        assert_eq!(json["agents"][0]["pins"][0], "claude:a");
+        assert_eq!(json["agents"][0]["closed"][0], "dir:c:\\api");
     }
 
     #[test]

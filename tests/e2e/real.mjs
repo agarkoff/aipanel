@@ -487,6 +487,37 @@ enabled = false
     favoritesText.slice(0, 200),
   );
 
+  // Состояние списка: свёрнутый проект и закреплённая сессия живут у агента
+  // (list.json), а не в браузере — поэтому одинаковы на всех устройствах.
+  const listFile = path.join(stateHome, 'list.json');
+  const readList = async () => {
+    for (let i = 0; i < 100; i++) {
+      if (fs.existsSync(listFile)) {
+        const text = fs.readFileSync(listFile, 'utf8');
+        if (text.includes('closed') || text.includes('pins')) return text;
+      }
+      await sleep(100);
+    }
+    return '';
+  };
+  await evaluate(`(() => { const p = document.querySelector('#sessions .project'); if (p) p.click(); return true; })()`);
+  const collapsedText = await readList();
+  check('агент записал свёрнутый проект в свой каталог', collapsedText.includes('dir:'), collapsedText.slice(0, 200));
+  // Раскрываем обратно и закрепляем сессию: в файле должен появиться её ключ.
+  await evaluate(`(() => { const p = document.querySelector('#sessions .project'); if (p) p.click(); return true; })()`);
+  await waitFor(`!!document.querySelector('#sessions .session-pin')`, 5000);
+  await evaluate(`(() => { const b = document.querySelector('#sessions .session-pin'); if (b) b.click(); return true; })()`);
+  let pinnedText = '';
+  for (let i = 0; i < 100 && !pinnedText.includes('claude:'); i++) {
+    pinnedText = fs.existsSync(listFile) ? fs.readFileSync(listFile, 'utf8') : '';
+    if (!pinnedText.includes('claude:')) await sleep(100);
+  }
+  check(
+    'агент записал закреплённую сессию в свой каталог',
+    pinnedText.includes('claude:') && pinnedText.includes(SESSION_ID),
+    pinnedText.slice(0, 200),
+  );
+
   // Черновик: браузер -> агент -> файл drafts.json, затем второе устройство
   // (своя вкладка со своим соединением) видит тот же недописанный текст.
   await evaluate(`(() => {

@@ -62,6 +62,12 @@ const sessions = () => [
 
 const stub = `
 (() => {
+  // Заглушка агента хранит состояние списка (закреплённые и свёрнутые проекты)
+  // за панель: в жизни это файл list.json на машине агента, здесь sessionStorage,
+  // чтобы состояние переживало перезагрузку страницы.
+  const state = JSON.parse(sessionStorage.getItem('aipanel-test-list') || '{"pins":[],"closed":[]}');
+  const save = () => sessionStorage.setItem('aipanel-test-list', JSON.stringify(state));
+  let sessions = [];
   class FakeSocket {
     static OPEN = 1;
     constructor() {
@@ -72,16 +78,40 @@ const stub = `
         if (this.onopen) this.onopen();
       }, 0);
     }
-    send() {}
+    send(text) {
+      const msg = JSON.parse(text);
+      if (msg.t === 'pin_session') {
+        state.pins = msg.on
+          ? [msg.session, ...state.pins.filter((k) => k !== msg.session)]
+          : state.pins.filter((k) => k !== msg.session);
+      } else if (msg.t === 'collapse_project') {
+        state.closed = msg.on
+          ? [...state.closed.filter((k) => k !== msg.project), msg.project]
+          : state.closed.filter((k) => k !== msg.project);
+      } else {
+        return;
+      }
+      save();
+      this.emitAgents();
+    }
     close() { this.readyState = 3; }
     emit(msg) { if (this.onmessage) this.onmessage({ data: JSON.stringify(msg) }); }
+    emitAgents() {
+      this.emit({
+        t: 'agents',
+        agents: [
+          { name: 'pc', online: true, os: 'win', version: 'test', sessions, pins: state.pins, closed: state.closed },
+        ],
+      });
+    }
   }
   window.WebSocket = FakeSocket;
   // Список агента целиком: тест подменяет его между проверками.
-  window.__send = (list) => window.__socket.emit({
-    t: 'agents',
-    agents: [{ name: 'pc', online: true, os: 'win', version: 'test', sessions: list }],
-  });
+  window.__send = (list) => {
+    sessions = list;
+    window.__socket.emitAgents();
+  };
+  window.__state = state;
   const realFetch = window.fetch.bind(window);
   window.fetch = (url, opts) =>
     String(url) === '/api/me'
@@ -355,8 +385,8 @@ try {
     collapsed.projects,
   );
   check(
-    'свёрнутость сохранена в браузере',
-    await evaluate(`JSON.parse(localStorage.getItem('aipanel.closed') || '[]').length === 1`),
+    'свёрнутость сохранена у агента',
+    await evaluate(`window.__state.closed.length === 1`),
   );
 
   // Обновление списка от агента не раскрывает свёрнутый проект обратно.
@@ -375,8 +405,8 @@ try {
   const pinned = await evaluate(view);
   check('закреплённая сессия стоит выше проектов', JSON.stringify(pinned.pinned) === JSON.stringify(['Спит']), pinned);
   check(
-    'закреп сохранён в браузере',
-    await evaluate(`JSON.parse(localStorage.getItem('aipanel.pins') || '[]').includes('pc\\nclaude:i')`),
+    'закреп сохранён у агента',
+    await evaluate(`window.__state.pins.includes('claude:i')`),
   );
 
   // «Спит» была закреплена, поэтому проект docs остался с двумя строками.
@@ -402,14 +432,14 @@ try {
   const docs = revealed.projects.find((p) => p.name === 'docs');
   check('проект раскрывается, когда в нём появился вопрос', docs.expanded === 'true', revealed.projects);
 
-  // Перезагрузка: закреп и свёрнутость читаются из localStorage.
+  // Перезагрузка: состояние списка приходит от агента (в заглушке — из sessionStorage).
   await send('Page.reload');
   await waitFor(`!!window.__socket && !!document.getElementById('sessions')`, 8000);
   await sendList(sessions());
   await waitFor(`document.querySelectorAll('#sessions .project').length === 2`, 8000);
   const reloaded = await evaluate(view);
   check(
-    'закреп и свёрнутый проект переживают перезагрузку',
+    'закреп и свёрнутый проект приходят после перезагрузки',
     JSON.stringify(reloaded.pinned) === JSON.stringify(['Спит']) &&
       reloaded.projects.find((p) => p.name === 'api').expanded === 'false',
     reloaded,
@@ -425,8 +455,8 @@ try {
   const unpinned = await evaluate(view);
   check('после открепления сессия вернулась в свой проект', unpinned.pinned.length === 0, unpinned);
   check(
-    'закреп убран из хранилища',
-    await evaluate(`JSON.parse(localStorage.getItem('aipanel.pins') || '[]').length === 0`),
+    'закреп убран из хранилища агента',
+    await evaluate(`window.__state.pins.length === 0`),
   );
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);

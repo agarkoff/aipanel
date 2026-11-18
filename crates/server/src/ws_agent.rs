@@ -7,8 +7,8 @@ use std::{
 };
 
 use aipanel_proto::{
-    AgentMsg, PushSub, ServerMsg, IMAGE_MIMES, MAX_FAVORITES, MAX_IMAGE_BYTES, MAX_PUSH_SUBS, MAX_SCREENS,
-    MAX_SCREEN_BYTES,
+    AgentMsg, PushSub, ServerMsg, IMAGE_MIMES, MAX_CLOSED_PROJECTS, MAX_FAVORITES, MAX_IMAGE_BYTES, MAX_PINS,
+    MAX_PUSH_SUBS, MAX_SCREENS, MAX_SCREEN_BYTES,
 };
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -113,7 +113,7 @@ pub(crate) async fn agent_conn(app: Arc<App>, owner: String, socket: WebSocket) 
             .unwrap_or_default();
         inner.agents.insert(
             key.clone(),
-            AgentEntry { conn, tx: Some(tx), os, version, sessions, limits },
+            AgentEntry { conn, tx: Some(tx), os, version, sessions, limits, pins: Vec::new(), closed: Vec::new() },
         );
         inner.broadcast_agents();
         conn
@@ -191,6 +191,15 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                     contact: app.vapid_contact.clone().or_else(|| inner.origin.clone()),
                 });
             }
+        }
+        AgentMsg::SessionList { mut pins, mut closed } => {
+            pins.truncate(MAX_PINS);
+            closed.truncate(MAX_CLOSED_PROJECTS);
+            if let Some(a) = inner.agents.get_mut(&(owner.to_owned(), agent.to_owned())) {
+                a.pins = pins;
+                a.closed = closed;
+            }
+            inner.broadcast_agents();
         }
         AgentMsg::PushSubs { subs } => {
             let known = inner.push.entry(owner.to_owned()).or_default();

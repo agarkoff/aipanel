@@ -8,6 +8,7 @@ mod config;
 mod dirs;
 mod drafts;
 mod favorites;
+mod liststate;
 mod handoff;
 mod image;
 mod install;
@@ -31,7 +32,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use aipanel_proto::{AgentMsg, Favorite, Limits, ServerMsg, SessionInfo, MAX_DRAFT_TEXT, MAX_ITEM_ID};
+use aipanel_proto::{AgentMsg, Favorite, Limits, ServerMsg, SessionInfo, MAX_DRAFT_TEXT, MAX_ITEM_ID, MAX_PROJECT_KEY};
 use futures_util::{SinkExt, StreamExt};
 use tokio::{
     net::TcpStream,
@@ -68,6 +69,9 @@ struct Agent {
     /// Недописанные сообщения сессий: файл `drafts.json` в каталоге агента.
     /// Хранятся у агента, поэтому черновик общий для всех устройств.
     drafts: Mutex<drafts::Store>,
+    /// Закреплённые сессии и свёрнутые проекты: файл `list.json` в каталоге
+    /// агента. Тоже общие для всех устройств.
+    liststate: Mutex<liststate::Store>,
     /// Подписки устройств на push-уведомления: файл `push.json` в каталоге агента.
     push: Mutex<push::Store>,
     /// Голосовой ввод: распознавание записи на этой машине.
@@ -215,6 +219,39 @@ impl Agent {
                 // Текст уходит обратно всем наблюдателям, включая отправителя:
                 // так все устройства показывают один и тот же черновик.
                 let _ = self.out.send(AgentMsg::Draft { session, text });
+            }
+            ServerMsg::SessionList => {
+                let (pins, closed) = self.liststate.lock().unwrap().list();
+                let _ = self.out.send(AgentMsg::SessionList { pins, closed });
+            }
+            ServerMsg::PinSession { session, on } => {
+                // Ключ сессии попадает в файл состояния: принимаются только
+                // известные инструменты и безопасные идентификаторы.
+                if split_key(&session).is_err() {
+                    util::log(&format!("pin: некорректный ключ сессии {session}"));
+                    return;
+                }
+                if let Err(e) = self.liststate.lock().unwrap().pin(&session, on) {
+                    util::log(&format!("pin: {e}"));
+                }
+                // Состояние уходит сразу: в памяти оно уже изменено, и
+                // расходиться с тем, что нажали в панели, ему нельзя.
+                let (pins, closed) = self.liststate.lock().unwrap().list();
+                let _ = self.out.send(AgentMsg::SessionList { pins, closed });
+            }
+            ServerMsg::CollapseProject { project, on } => {
+                let bad = project.is_empty()
+                    || project.chars().count() > MAX_PROJECT_KEY
+                    || project.chars().any(char::is_control);
+                if bad {
+                    util::log(&format!("collapse: некорректный проект {project:?}"));
+                    return;
+                }
+                if let Err(e) = self.liststate.lock().unwrap().collapse(&project, on) {
+                    util::log(&format!("collapse: {e}"));
+                }
+                let (pins, closed) = self.liststate.lock().unwrap().list();
+                let _ = self.out.send(AgentMsg::SessionList { pins, closed });
             }
             ServerMsg::Send { id, session, text } => {
                 let me = Arc::clone(self);
@@ -689,6 +726,12 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
     if sink.send(text_msg(&subs)).await.is_err() {
         return;
     }
+    // Состояние списка сессий (закреплённые и свёрнутые проекты) тоже живёт
+    // у агента: так его видят все браузеры и устройства.
+    let (pins, closed) = agent.liststate.lock().unwrap().list();
+    if sink.send(text_msg(&AgentMsg::SessionList { pins, closed })).await.is_err() {
+        return;
+    }
     agent.force.store(true, Ordering::Relaxed);
     agent.force_limits.store(true, Ordering::Relaxed);
     agent.online.store(true, Ordering::Relaxed);
@@ -770,6 +813,7 @@ async fn run(cfg: Config) {
         cwds: Mutex::new(HashMap::new()),
         favorites: Mutex::new(favorites::Store::open()),
         drafts: Mutex::new(drafts::Store::open()),
+        liststate: Mutex::new(liststate::Store::open()),
         push: Mutex::new(push::Store::open()),
         started: util::now_ms(),
         connected_since: AtomicI64::new(0),

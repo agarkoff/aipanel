@@ -4,7 +4,8 @@
 use std::{sync::Arc, time::Instant};
 
 use aipanel_proto::{
-    PushSub, ServerMsg, MAX_AUDIO_BYTES, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PUSH_SUBS,
+    PushSub, ServerMsg, MAX_AUDIO_BYTES, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PROJECT_KEY,
+    MAX_PUSH_SUBS,
 };
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -123,6 +124,11 @@ pub(crate) enum BrowserMsg {
     /// Сохранить недописанный текст сессии: он живёт у агента, поэтому черновик
     /// один на все устройства. Пустой `text` — черновика нет.
     Draft { agent: String, session: String, text: String },
+    /// Закрепить сессию (`on`) или открепить её. Список хранится у агента.
+    PinSession { agent: String, session: String, on: bool },
+    /// Свернуть проект (`on`) или раскрыть его. Ключ проекта считает панель:
+    /// `repo:<адрес>` или `dir:<путь>`.
+    CollapseProject { agent: String, project: String, on: bool },
     /// Распознать голосовую запись `audio` (base64). Распознаёт агент на машине,
     /// где идёт сессия: сервер только передаёт запись, ничего не считая.
     Transcribe { id: String, agent: String, audio: String },
@@ -458,6 +464,34 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 return;
             };
             inner.to_agent(&owner, &agent, ServerMsg::Draft { session, text });
+        }
+        BrowserMsg::PinSession { agent, session, on } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            if session.is_empty() {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            // Ответ — состояние списка от агента, его получат все браузеры.
+            inner.to_agent(&owner, &agent, ServerMsg::PinSession { session, on });
+        }
+        BrowserMsg::CollapseProject { agent, project, on } => {
+            if !inner.browser_owns(browser, &agent) {
+                return;
+            }
+            if project.is_empty()
+                || project.chars().count() > MAX_PROJECT_KEY
+                || project.chars().any(char::is_control)
+            {
+                return;
+            }
+            let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {
+                return;
+            };
+            inner.to_agent(&owner, &agent, ServerMsg::CollapseProject { project, on });
         }
         BrowserMsg::PromptReply { id, agent, session, prompt, kind, decision, answer, message, cancel } => {
             if !safe_id(&prompt) {
