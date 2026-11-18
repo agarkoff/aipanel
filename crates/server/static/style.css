@@ -349,7 +349,8 @@ input, textarea, select {
    (44×44 при строке 60 px), сам значок остаётся прежним. */
 @media (hover: none) {
   .session-pin {
-    right: 2px;
+    /* Тот же отступ от кромки, что и у текста строки: значок не липнет к краю. */
+    right: 8px;
     width: 44px;
     height: 44px;
     opacity: .35;
@@ -358,6 +359,9 @@ input, textarea, select {
   .session-pin svg { width: 18px; height: 18px; }
   .session-pin.on { opacity: 1; }
   .session-pin:active { background: var(--tool); opacity: 1; }
+  /* 8 кромка + 44 кнопка + 8 зазор: время не заходит под зону нажатия и не
+     прижимается к правой кромке. */
+  .session { padding-right: 60px; }
 }
 .session-delete:hover { background: var(--wait); color: #fff; }
 .session-close:hover { background: var(--accent); color: #fff; }
@@ -1488,7 +1492,7 @@ button .icon { display: none; }
   .project-toggle { width: 22px; height: 22px; }
   .project-name { font-size: 15px; }
   .session-row.in-project .session { padding-left: 26px; }
-  .session { padding: 10px 50px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
+  .session { padding: 10px 60px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
   .session .meta, .session .when { font-size: 13px; }
   .top {
     padding: calc(6px + env(safe-area-inset-top)) 10px 6px 4px;
