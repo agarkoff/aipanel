@@ -1567,6 +1567,56 @@ try {
   check('при перестройке сообщения картинка остаётся раскрытой', img.kept, img);
   check('повторный клик сворачивает картинку', img.hidden, img);
 
+  // Раскрытая картинка открывается на весь экран тем же просмотром, что и
+  // снимок экрана: один кадр, подпись с размером и без кнопки «Обновить».
+  const fullImage = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const src = location.origin + '/icon-192.png';
+    const box = document.createElement('div');
+    box.className = 'body md';
+    box.append(renderMarkdown('![схема](' + src + ')'));
+    document.getElementById('feed').append(box);
+    box.querySelector('a.img-link').dispatchEvent(
+      new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+    const preview = box.querySelector('.img-preview img');
+    await new Promise((r) => (preview.complete ? r() : preview.addEventListener('load', r, { once: true })));
+    const click = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 });
+    preview.dispatchEvent(click);
+    const dialog = document.getElementById('shot');
+    // Размер картинки появляется в подписи после её загрузки уже в просмотре.
+    const until = Date.now() + 2000;
+    while (Date.now() < until && !/192×192/.test(document.getElementById('shot-label').textContent)) await wait(20);
+    const viewer = document.querySelector('#shot-strip .shot-page img');
+    const rect = dialog.getBoundingClientRect();
+    const state = {
+      open: dialog.open,
+      full: Math.round(rect.width) === innerWidth && Math.round(rect.height) === innerHeight,
+      prevented: click.defaultPrevented,
+      label: document.getElementById('shot-label').textContent,
+      refresh: document.getElementById('shot-refresh').hidden,
+      pages: document.querySelectorAll('#shot-strip .shot-page').length,
+    };
+    // В просмотре картинки колесо приближает без Ctrl: прокручивать нечего.
+    const r = document.getElementById('shot-stage').getBoundingClientRect();
+    document.getElementById('shot-stage').dispatchEvent(new WheelEvent('wheel', {
+      bubbles: true, cancelable: true, deltaY: -200,
+      clientX: r.left + r.width / 2, clientY: r.top + r.height / 2,
+    }));
+    state.transform = viewer.style.transform;
+    state.zoomed = document.getElementById('shot-label').textContent;
+    document.getElementById('shot-close').click();
+    state.closed = !dialog.open;
+    box.remove();
+    return state;
+  })()`);
+  check('картинка открывается на весь экран поверх ленты',
+    fullImage.open && fullImage.full && fullImage.prevented, fullImage);
+  check('просмотр картинки: один кадр, размер в подписи и без «Обновить»',
+    fullImage.pages === 1 && fullImage.label === 'схема · 192×192' && fullImage.refresh, fullImage);
+  check('просмотр картинки: колесо приближает без Ctrl',
+    /scale\(/.test(fullImage.transform) && /· \d+%$/.test(fullImage.zoomed), fullImage);
+  check('просмотр картинки закрывается крестиком', fullImage.closed, fullImage);
+
   // Пути к картинкам на машине агента: в тексте, в `коде` и в ссылке. Картинку
   // отдаёт /api/image с агентом и сессией ленты; ошибка видна текстом.
   const local = await evaluate(`(async () => {

@@ -1,7 +1,9 @@
 'use strict';
 
 // Снимок экрана машины агента: серия кадров, листание и приближение
-// щипком. Снимает агент, а не браузер — он знает свои мониторы.
+// щипком. Снимает агент, а не браузер — он знает свои мониторы. Тем же
+// полноэкранным просмотром открывается картинка из ленты: один кадр без
+// листания, но с тем же щипком, колесом и панорамой.
 
 // ------------------------------------------------------------ снимок экрана
 
@@ -66,6 +68,7 @@ function askShotAgent(online) {
 
 function startShots(agent) {
   closeShots();
+  $('shot').setAttribute('aria-label', 'Снимок экрана');
   shot = {
     agent,
     id: String(++cmdSeq),
@@ -100,6 +103,29 @@ function closeShots() {
   $('shot-dots').replaceChildren();
   $('shot-label').textContent = '';
   $('shot-hint').textContent = '';
+}
+
+// Картинка из ленты открывается тем же полноэкранным просмотром, что и снимок
+// экрана: щипок, колесо и панорама уже готовы, остаётся подставить один кадр.
+// Адрес — готовый (`blob:` у картинки с машины агента, `http(s):` у чужой).
+function viewImage(url, label) {
+  if (!url) return;
+  closeShots();
+  $('shot').setAttribute('aria-label', 'Просмотр картинки');
+  shot = {
+    agent: '',
+    id: '',
+    total: 1,
+    index: 0,
+    pages: [{ label: String(label || 'Картинка'), width: 0, height: 0, url: String(url) }],
+    nodes: [],
+    timer: null,
+    done: true,
+    error: '',
+    image: true,
+  };
+  if (!$('shot').open) $('shot').showModal();
+  renderShot();
 }
 
 // Один экран пришёл: ставим его на свою страницу, остальные могут ещё ехать.
@@ -214,8 +240,10 @@ function updateShotLabel() {
   const count = Math.max(1, shot.total);
   const page = shot.pages[shot.index];
   const zoomed = shotZoom.scale > 1 ? ` · ${Math.round(shotZoom.scale * 100)}%` : '';
+  // У картинки из ленты размеров до загрузки нет: подпись — только её имя.
+  const size = page && page.width && page.height ? ` · ${page.width}×${page.height}` : '';
   let text;
-  if (page) text = `${page.label} · ${page.width}×${page.height}${zoomed}`;
+  if (page) text = `${page.label}${size}${zoomed}`;
   else if (count > 1) text = `Экран ${shot.index + 1} из ${count}${zoomed}`;
   else text = `Снимаю экран…${zoomed}`;
   // Подпись обновляется на каждом движении пальца: лишнюю перерисовку не делаем.
@@ -249,6 +277,15 @@ function renderShot() {
     img.src = data.url;
     img.alt = data.label;
     img.draggable = false;
+    // Размер настоящей картинки дописываем в подпись после загрузки: у снимка
+    // его присылает агент, а у картинки из ленты он виден только здесь.
+    img.addEventListener('load', () => {
+      if (!shot || shot.pages[i] !== data) return;
+      if (data.width && data.height) return;
+      data.width = img.naturalWidth;
+      data.height = img.naturalHeight;
+      if (shot.index === i) updateShotLabel();
+    });
     node.slot.replaceWith(img);
     node.slot = img;
     node.url = data.url;
@@ -257,6 +294,8 @@ function renderShot() {
   strip.style.transform = `translateX(${-shot.index * 100}%)`;
 
   const many = count > 1;
+  // У одиночной картинки снимать заново нечего: кнопка остаётся только у экрана.
+  $('shot-refresh').hidden = !!shot.image;
   $('shot-prev').hidden = !many || shot.index <= 0;
   $('shot-next').hidden = !many || shot.index >= count - 1;
 
@@ -455,10 +494,11 @@ function attachShotSwipe(stage) {
     renderShot();
   });
   // Колесо с Ctrl — это щипок на тачпаде; приближённый снимок масштабируется
-  // колесом и без него.
+  // колесом и без него. В просмотре картинки колесо приближает всегда: под ним
+  // нет ленты, которую надо было бы прокручивать.
   stage.addEventListener('wheel', (e) => {
     if (!shotImage()) return;
-    if (!e.ctrlKey && shotZoom.scale <= 1) return;
+    if (!shot.image && !e.ctrlKey && shotZoom.scale <= 1) return;
     e.preventDefault();
     const c = stageCenter();
     const step = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002));

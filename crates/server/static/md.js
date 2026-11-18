@@ -115,11 +115,20 @@ const renderMarkdown = (() => {
       full.href = a.href;
       full.target = '_blank';
       full.rel = 'noopener noreferrer';
-      full.title = 'Открыть в новой вкладке';
+      full.title = 'Открыть на весь экран';
       const img = node('img');
       img.alt = a.textContent;
       img.referrerPolicy = 'no-referrer';
       img.decoding = 'async';
+      // Клик по раскрытой картинке показывает её на весь экран тем же
+      // просмотром, что и снимок экрана: щипок, колесо и панорама. Ctrl/Cmd/
+      // Shift-клик и средняя кнопка по-прежнему открывают адрес в новой вкладке.
+      full.addEventListener('click', (e) => {
+        if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+        if (typeof viewImage !== 'function') return;
+        e.preventDefault();
+        viewImage(img.src, img.alt);
+      });
       const fail = (why) => box.replaceChildren(node('span', why || 'Не удалось загрузить картинку'));
       img.addEventListener('error', () => fail(), { once: true });
       if (a.dataset.local) {
