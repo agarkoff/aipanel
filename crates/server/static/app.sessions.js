@@ -509,11 +509,6 @@ function rowEntry(agent, session, inProject) {
       entry.stop.hidden = !session.live;
       entry.node.classList.toggle('pinned', pinned);
       entry.node.classList.toggle('in-project', inProject);
-      // Куда переедет сессия, брошенная на эту строку: её собственный каталог
-      // (в том числе worktree). По этим полям цель находит перетаскивание.
-      entry.node.dataset.agent = agentName;
-      entry.node.dataset.moveCwd = session.cwd || '';
-      entry.node.dataset.moveName = session.title || key;
       entry.pin.classList.toggle('on', pinned);
       entry.pin.title = pinned ? 'Открепить сессию' : 'Закрепить сессию';
       entry.pin.setAttribute('aria-label', entry.pin.title);
@@ -725,9 +720,8 @@ function attachSwipe(row, btn, action, actions) {
 // ------------------------------------------------------------ перенос в проект
 
 // Сессию opencode можно перенести в другой проект: перетаскивание строки на
-// заголовок проекта (или на строку другой сессии — в её каталог) меняет её
-// `cwd`, а с ним и проект в списке. Claude Code так не умеет: его транскрипт
-// лежит в каталоге проекта, и агент отвечает ошибкой.
+// заголовок проекта меняет её `cwd`, а с ним и проект в списке. Claude Code так
+// не умеет: его транскрипт лежит в каталоге проекта, и агент отвечает ошибкой.
 //
 // На компьютере перенос начинается движением мыши, на телефоне — долгим
 // нажатием: обычное касание должно по-прежнему прокручивать список, а
@@ -744,19 +738,18 @@ let dragTarget = null; // узел под указателем, куда упа�
 let dragSuppressClick = 0; // click сразу после переноса не открывает сессию
 let dragScrollTimer = 0;
 
-// Куда можно бросить строку: заголовок проекта или строка другой сессии того же
-// агента. Каталог цели берётся из `data-move-cwd`: у проекта — основная копия
-// репозитория, у строки — её собственный каталог.
+// Куда можно бросить строку — только заголовок проекта того же агента: сессия
+// переезжает в каталог проекта (основную копию репозитория) и меняет место в
+// списке. Строка другой сессии целью не считается: «переехать в другую сессию»
+// читается как перенос задачи, а меняется только каталог.
 function dragTargetOf(x, y) {
   if (!dragSession) return null;
   const node = document.elementFromPoint(x, y);
-  if (!node) return null;
-  const candidate = node.closest('.project') || node.closest('.session-row');
-  if (!candidate || candidate === dragSession.row) return null;
-  if (candidate.dataset.agent !== dragSession.agent) return null;
-  const cwd = candidate.dataset.moveCwd || '';
+  const project = node ? node.closest('.project') : null;
+  if (!project || project.dataset.agent !== dragSession.agent) return null;
+  const cwd = project.dataset.moveCwd || '';
   if (!cwd || cwdKey(cwd) === cwdKey(dragSession.session.cwd)) return null;
-  return candidate;
+  return project;
 }
 
 function setDragTarget(node) {
@@ -767,7 +760,7 @@ function setDragTarget(node) {
 }
 
 function dragLabel(node) {
-  return node.dataset.projectLabel || node.dataset.moveName || baseName(node.dataset.moveCwd);
+  return node.dataset.projectLabel || baseName(node.dataset.moveCwd);
 }
 
 function beginDrag(row, session, agent, x, y, pointerId) {

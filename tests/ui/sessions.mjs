@@ -578,6 +578,35 @@ try {
     movedView.projects,
   );
 
+  // Строка другой сессии целью не считается: перенос — это смена каталога, а не
+  // передача задачи соседней сессии. Бросок на неё ничего не делает.
+  const rowBox = await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Спросит');
+    const target = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Второй');
+    const from = row.getBoundingClientRect();
+    const to = target.getBoundingClientRect();
+    return {
+      x1: Math.round(from.left + from.width / 2),
+      y1: Math.round(from.top + from.height / 2),
+      x2: Math.round(to.left + to.width / 2),
+      y2: Math.round(to.top + to.height / 2),
+    };
+  })()`);
+  await mouse('mousePressed', rowBox.x1, rowBox.y1, 0);
+  await mouse('mouseMoved', rowBox.x1 + 24, rowBox.y1 + 8, 1);
+  await mouse('mouseMoved', rowBox.x2, rowBox.y2, 1);
+  await sleep(80);
+  const rowHover = await evaluate(`!!document.querySelector('#sessions .session-row.drop-target')`);
+  await mouse('mouseReleased', rowBox.x2, rowBox.y2, 0);
+  await sleep(200);
+  check(
+    'строка другой сессии не цель переноса',
+    !rowHover && (await evaluate(`window.__moves.length`)) === 1,
+    { rowHover, moves: await evaluate(`window.__moves`) },
+  );
+
   // Claude Code так не умеет: его переписка привязана к каталогу проекта. Панель
   // говорит об этом сразу, а не после ответа агента.
   const claudeBox = await evaluate(`(() => {

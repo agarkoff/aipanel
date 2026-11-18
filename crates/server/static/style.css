@@ -245,7 +245,6 @@ input, textarea, select {
 /* Перенос строки в другой проект: сама строка гаснет, над указателем едет её
    копия, а проект-цель подсвечивается рамкой. */
 .session-row.drag-source { opacity: .45; }
-.session-row.drop-target .session,
 .project.drop-target { background: var(--user); box-shadow: inset 0 0 0 2px var(--accent); }
 .session-dragging { cursor: grabbing; }
 .session-dragging .session,
