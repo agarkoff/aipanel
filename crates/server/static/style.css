@@ -103,6 +103,9 @@ input, textarea, select {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* Шапка с версиями шире колонки: без этого список вылезал за правый край
+     экрана, и отступы справа выглядели меньше, чем слева. */
+  min-width: 0;
 }
 .sidebar header { display: flex; align-items: center; gap: 8px; padding: 12px 14px 8px; }
 .sidebar header .link { margin-left: auto; }
@@ -1479,6 +1482,8 @@ button .icon { display: none; }
   .sidebar header {
     padding: calc(10px + env(safe-area-inset-top)) 16px 8px;
     font-size: 18px;
+    /* Чуть плотнее: версия в шапке помещается, не растягивая колонку. */
+    gap: 6px;
   }
   .sidebar header .link { min-height: 44px; padding: 0 8px; font-size: 15px; }
   .push-btn { width: 44px; height: 44px; }
@@ -1488,7 +1493,13 @@ button .icon { display: none; }
   .new-session svg { width: 18px; height: 18px; }
   .sessions { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
   .agent { padding: 12px 16px 4px; }
-  .project { padding: 12px 16px; min-height: 48px; gap: 10px; }
+  .project {
+    /* Справа больше, чем слева: цветная точка состояния не прижимается к кромке
+       и встаёт на одну вертикаль со значком закрепа в строках сессий. */
+    padding: 12px 22px 12px 16px;
+    min-height: 48px;
+    gap: 10px;
+  }
   .project-toggle { width: 22px; height: 22px; }
   .project-name { font-size: 15px; }
   .session-row.in-project .session { padding-left: 26px; }
