@@ -1778,6 +1778,76 @@ try {
   check('дифф правки подсвечен по языку файла', hl.diffKw.join() === 'def,pass,def,pass' && hl.diffRow === '+def b(): pass', hl);
   check('блок кода в ответе подсвечен', hl.mdKw.join() === 'val', hl);
 
+  // Время вызова инструмента: пока команда идёт, под её строкой тикает таймер
+  // (справа снизу), а после результата он пропадает и длительность показывается
+  // справа от строки — только пока на неё наведена мышь.
+  const toolTime = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const load = (patch) => window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test',
+      sessions: [{ ...window.__session, ...patch }] }] });
+    const start = Date.now() - 12000;
+    const call = { id: 't1', ts: start, role: 'assistant', kind: 'tool_use', tool: 'Bash', text: 'npm run build' };
+    // Идущая команда: сессия занята, результата ещё нет.
+    load({ status: 'shell' });
+    applyHistory({ items: [call] });
+    await wait(30);
+    const node = document.querySelector('#feed .item[data-id="t1"]');
+    const timer = node && node.querySelector('.call-timer');
+    const time = node && node.querySelector('.call-time');
+    const s = node && node.querySelector('summary');
+    const tb = timer && timer.getBoundingClientRect();
+    const sb = s && s.getBoundingClientRect();
+    const running = {
+      timer: !!timer,
+      text: timer ? timer.textContent : '',
+      under: !!(tb && sb) && tb.top >= sb.bottom - 1,
+      right: !!(tb && sb) && Math.abs(tb.right - node.getBoundingClientRect().right) < 12,
+      timeHidden: time ? time.hidden : null,
+    };
+    // Результат пришёл: команда шла 45 секунд.
+    applyHistory({ items: [{ ...call }, { id: 't1:r', ts: start + 45000, role: 'tool', kind: 'tool_result', text: 'готово' }] });
+    await wait(30);
+    const after = document.querySelector('#feed .item[data-id="t1"]');
+    const done = {
+      timer: after.querySelector('.call-timer') === null,
+      time: after.querySelector('.call-time').textContent,
+      timeHidden: after.querySelector('.call-time').hidden,
+    };
+    // Вопрос Claude не измеряется: он ждёт человека, а не работает.
+    applyHistory({ items: [{ id: 'q1', ts: start, role: 'assistant', kind: 'tool_use', tool: 'AskUserQuestion',
+      text: JSON.stringify({ questions: [{ question: 'Что делать?' }] }) }] });
+    await wait(30);
+    const ask = document.querySelector('#feed .item[data-id="q1"]');
+    const askTimed = !!(ask.querySelector('.call-time') || ask.querySelector('.call-timer'));
+    return { running, done, askTimed };
+  })()`);
+  check('идущая команда: таймер под строкой справа', toolTime.running.timer && toolTime.running.under && toolTime.running.right, toolTime.running);
+  check('идущая команда: таймер считает её время', /^1[1-3]с$/.test(toolTime.running.text), toolTime.running);
+  check('идущая команда: времени справа от строки ещё нет', toolTime.running.timeHidden, toolTime.running);
+  check('команда закончилась: таймер пропал, время появилось', toolTime.done.timer && !toolTime.done.timeHidden && toolTime.done.time === '45с', toolTime.done);
+  check('вопрос Claude временем не измеряется', !toolTime.askTimed, toolTime.askTimed);
+
+  const opacityOf = () => evaluate(`getComputedStyle(document.querySelector('#feed .item[data-id="t1"] .call-time')).opacity`);
+  const hoverAt = await evaluate(`(() => {
+    const node = document.querySelector('#feed .item[data-id="t1"]');
+    node.scrollIntoView({ block: 'center' });
+    const b = node.querySelector('summary').getBoundingClientRect();
+    return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) };
+  })()`);
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hoverAt.x, y: hoverAt.y });
+  await sleep(300);
+  const hoveredOpacity = await opacityOf();
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: 5, y: 5 });
+  await sleep(300);
+  const awayOpacity = await opacityOf();
+  check('наведение на строку показывает время команды', hoveredOpacity === '1', hoveredOpacity);
+  check('без мыши время пропадает', awayOpacity === '0', awayOpacity);
+
+  await evaluate(`(() => {
+    applyHistory({ items: [], drop: ['t1', 't1:r', 'q1'] });
+    window.__sock.emit({ t: 'agents', agents: [{ name: 'ui-test', online: true, os: 'test', version: 'test', sessions: [window.__session] }] });
+  })()`);
+
   // Уведомления: конец хода и ожидание выбора. Вторая сессия нужна, чтобы
   // уведомления не гасились как «пользователь смотрит именно эту сессию».
   const notices = await evaluate(`(() => {

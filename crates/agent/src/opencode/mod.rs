@@ -1493,6 +1493,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tool_keeps_own_time() {
+        // У вызова и результата свои отметки: по ним панель считает, сколько
+        // шла команда, а не по времени всего сообщения.
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m1","type":"assistant","time":{"created":100,"completed":9000},"content":[
+                {"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"sleep 3"},
+                    "content":[{"type":"text","text":"ok"}],"time":{"created":150,"completed":3150}}}
+            ]}),
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.ts)).collect();
+        assert_eq!(got, [("m1:0", 150), ("m1:0:r", 3150)]);
+        // Своих отметок нет: результат получает время конца шага, а без него —
+        // просто неизвестен (0), и панель время команды не показывает.
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m2","type":"assistant","time":{"created":100,"completed":9000},"content":[
+                {"type":"tool","name":"shell","state":{"status":"completed","input":{"command":"ls"},"content":"ok"}}
+            ]}),
+            &mut items,
+        );
+        let got: Vec<_> = items.iter().map(|i| (i.id.as_str(), i.ts)).collect();
+        assert_eq!(got, [("m2:0", 100), ("m2:0:r", 9000)]);
+    }
+
     fn step(input: u64, output: u64, reasoning: u64, cache_read: u64) -> Value {
         json!({"type":"assistant","time":{"created":1},
             "tokens":{"input":input,"output":output,"reasoning":reasoning,"cache":{"read":cache_read,"write":0}}})

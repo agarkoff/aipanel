@@ -37,10 +37,14 @@ function renderTurn() {
   box.title = 'Время с запроса и токены, записанные в транскрипт: ↑ контекст последнего ответа, ↓ выход за ход';
   box.hidden = false;
 }
-setInterval(renderTurn, 1000);
+setInterval(() => {
+  renderTurn();
+  refreshCallTimers();
+}, 1000);
 
 function renderHeader() {
   renderTurn();
+  refreshCallTimers();
   // Сессию могли убрать из списка, пока правили её имя: поле больше не к чему.
   if (renaming && renaming.place === 'header' && !current()) dropRename();
   const cur = current();
@@ -391,6 +395,67 @@ function trackCall(item, isNew) {
   }
 }
 
+// Время команды: начало — отметка строки вызова, конец — отметка её результата.
+// Отметки приходят готовыми от агента: у Claude Code это время строки
+// транскрипта, у opencode — время части вызова.
+function trackCallTime(item) {
+  if (item.kind !== 'tool_use' || !item.ts) return;
+  let t = callTimes.get(item.id);
+  if (!t) callTimes.set(item.id, (t = {}));
+  if (!t.start) t.start = item.ts;
+}
+
+function endCallTime(id, ts) {
+  if (!ts) return;
+  let t = callTimes.get(id);
+  if (!t) callTimes.set(id, (t = {}));
+  if (!t.end) t.end = ts;
+}
+
+// Сколько шла команда, мс; null — конец неизвестен.
+function callDuration(id) {
+  const t = callTimes.get(id);
+  if (!t || !t.start || !t.end || t.end <= t.start) return null;
+  return t.end - t.start;
+}
+
+// Сессия сейчас работает. Вызов без результата считается идущим только тогда:
+// незакрытый вызов в простое — прерванный или ещё не разрешённый, и таймер
+// показывал бы не работу команды, а ожидание.
+function callBusy() {
+  const cur = current();
+  return Boolean(cur && cur.agent.online && BUSY_STATUSES.has(cur.session.status));
+}
+
+// Время на строке вызова: пока команда идёт — таймер под строкой, после конца —
+// длительность справа от строки (её показывает наведение, см. style.css).
+function refreshCallTime(id, node) {
+  node = node || nodes.get(id);
+  if (!node || !node.classList.contains('timed')) return;
+  const dur = callDuration(id);
+  const time = node.querySelector('.call-time');
+  if (time) {
+    time.textContent = dur === null ? '' : fmtElapsed(dur);
+    time.hidden = dur === null;
+  }
+  let timer = node.querySelector('.call-timer');
+  const t = callTimes.get(id);
+  if (!(t && t.start && !t.end && callBusy())) {
+    if (timer) timer.remove();
+    return;
+  }
+  if (!timer) node.append((timer = el('div', 'call-timer')));
+  timer.textContent = fmtElapsed(Date.now() - t.start);
+}
+
+// Раз в секунду и при каждой смене состояния сессии: таймеры идущих команд
+// двигаются, а закончившиеся и прерванные сразу теряют таймер.
+function refreshCallTimers() {
+  for (const node of $('feed').querySelectorAll('.item.tool_use.timed')) {
+    refreshCallTime(node.dataset.id, node);
+  }
+}
+
 // Неуспешный статус уведомления (`failed`, `killed` и т.п.): строка плашки красная.
 function noticeFailed(text) {
   const m = /<status>([\s\S]*?)<\/status>/.exec(text);
@@ -508,7 +573,17 @@ function buildItem(item, call) {
     } else {
       body = el('div', 'body', ask ? ask.text : item.text);
     }
-    details.append(el('summary', '', label), body);
+    // Вызов инструмента: строка — название и аргументы, а время справа от неё
+    // при наведении; пока команда идёт, под строкой тикает таймер. Вопрос
+    // Claude не измеряем: он ждёт ответа человека, а не работает.
+    const timed = item.kind === 'tool_use' && !ask;
+    const summary = el('summary', '', label);
+    if (timed) {
+      const time = el('span', 'call-time');
+      time.hidden = true;
+      summary.append(time);
+    }
+    details.append(summary, body);
     // Размышления раскрыты по умолчанию; вызовы инструментов и результаты свёрнуты.
     if (item.kind === 'thinking') details.open = true;
     if (item.kind === 'tool_use' && !ask) {
@@ -517,6 +592,7 @@ function buildItem(item, call) {
       highlightOnOpen(details, body, () => Highlight.toolResult(item.text, call && call.tool, call && call.text));
     }
     node.append(details);
+    if (timed) node.classList.add('timed');
     // Картинки из аргументов и вывода инструмента — под его строкой, их видно
     // и в свёрнутом виде.
     if (item.kind === 'tool_use' || item.kind === 'tool_result') {
@@ -547,7 +623,12 @@ function buildItem(item, call) {
 function placeItem(item, target) {
   const old = nodes.get(item.id);
   trackCall(item, !old);
-  const node = buildItem(item, item.kind === 'tool_result' ? callFor(item, !old) : null);
+  trackCallTime(item);
+  // Результат мог прийти раньше, чем вызов попал в ленту: конец вызова
+  // записываем сразу, а таймер и время дорисует `refreshCallTime`.
+  const call = item.kind === 'tool_result' ? callFor(item, !old) : null;
+  if (call) endCallTime(call.id, item.ts);
+  const node = buildItem(item, call);
   if (item.id === flashId) node.classList.add('flash');
   if (old) {
     const oldDetails = old.querySelector('details');
@@ -559,6 +640,10 @@ function placeItem(item, target) {
     target.append(node);
   }
   nodes.set(item.id, node);
+  refreshCallTime(item.id, node);
+  // Конец вызова: его строка могла быть нарисована раньше — снимаем таймер
+  // и готовим время к показу при наведении.
+  if (call) refreshCallTime(call.id);
 }
 
 // ------------------------------------------------------------ вкладки лент
@@ -639,6 +724,7 @@ function renderFeed(key, loading) {
   favButtons.clear();
   toolCalls.clear();
   resultCalls.clear();
+  callTimes.clear();
   pendingCalls = [];
   flashId = '';
   feed.replaceChildren();
@@ -692,6 +778,7 @@ function applyHistory(msg) {
       favButtons.clear();
       toolCalls.clear();
       resultCalls.clear();
+      callTimes.clear();
       pendingCalls = [];
     }
   }
@@ -719,6 +806,7 @@ function applyHistory(msg) {
     feedRequests.delete(id);
     toolCalls.delete(id);
     resultCalls.delete(id);
+    callTimes.delete(id);
     favButtons.delete(id);
   }
   for (const item of msg.items) {

@@ -282,13 +282,19 @@ pub(super) fn older_page(v: &Value) -> (Vec<Item>, bool) {
 pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
     let id = m["id"].as_str().unwrap_or_default();
     let ts = m["time"]["created"].as_i64().unwrap_or(0);
-    let mut push = |suffix: String, role: &str, kind: &str, text: String, tool: Option<String>| {
+    // Конец шага ассистента: если у инструмента нет своих отметок, это
+    // ближайшая оценка момента, когда команда закончилась. 0 — шаг ещё идёт.
+    let done = m["time"]["completed"]
+        .as_i64()
+        .or_else(|| m["time"]["end"].as_i64())
+        .unwrap_or(0);
+    let mut push = |suffix: String, ts: i64, role: &str, kind: &str, text: String, tool: Option<String>| {
         if !text.trim().is_empty() || kind == "tool_use" {
             out.push(Item { id: format!("{id}:{suffix}"), ts, role: role.into(), kind: kind.into(), text, tool });
         }
     };
     match m["type"].as_str() {
-        Some("user") => push("0".into(), "user", "text", truncate(m["text"].as_str().unwrap_or_default(), TEXT_LIMIT), None),
+        Some("user") => push("0".into(), ts, "user", "text", truncate(m["text"].as_str().unwrap_or_default(), TEXT_LIMIT), None),
         Some("assistant") => {
             // id частей совпадает с id потоковых событий opencode (`text:0`,
             // `reasoning:0`), поэтому пришедший по потоку текст заменяется
@@ -300,6 +306,7 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                     Some("text") => {
                         push(
                             format!("text:{texts}"),
+                            ts,
                             "assistant",
                             "text",
                             truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
@@ -310,6 +317,7 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                     Some("reasoning") => {
                         push(
                             format!("reasoning:{thinks}"),
+                            ts,
                             "assistant",
                             "thinking",
                             truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
@@ -325,8 +333,21 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                             continue;
                         }
                         let state = &c["state"];
+                        // Свои отметки команды: у вызова — создание части или
+                        // начало состояния, у результата — конец. Панель считает
+                        // по ним, сколько шла команда.
+                        let started = state["time"]["start"]
+                            .as_i64()
+                            .or_else(|| state["time"]["created"].as_i64())
+                            .or_else(|| c["time"]["created"].as_i64())
+                            .unwrap_or(ts);
+                        let finished = state["time"]["end"]
+                            .as_i64()
+                            .or_else(|| state["time"]["completed"].as_i64())
+                            .unwrap_or(done);
                         push(
                             i.to_string(),
+                            started,
                             "assistant",
                             "tool_use",
                             tool_text(name, &state["input"]),
@@ -336,7 +357,7 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                         if result.is_empty() {
                             result = content_text(&state["error"]);
                         }
-                        push(format!("{i}:r"), "tool", "tool_result", truncate(&result, RESULT_LIMIT), None);
+                        push(format!("{i}:r"), finished, "tool", "tool_result", truncate(&result, RESULT_LIMIT), None);
 
                         // opencode отдаёт готовые патчи изменённых файлов.
                         let mut shown = false;
@@ -347,6 +368,7 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                             shown = true;
                             push(
                                 format!("{i}:diff{j}"),
+                                finished,
                                 "assistant",
                                 "diff",
                                 truncate(patch, DIFF_LIMIT),
@@ -355,7 +377,7 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                         }
                         if !shown {
                             if let Some(text) = input_diff(name, &state["input"]) {
-                                push(format!("{i}:diff"), "assistant", "diff", truncate(&text, DIFF_LIMIT), None);
+                                push(format!("{i}:diff"), finished, "assistant", "diff", truncate(&text, DIFF_LIMIT), None);
                             }
                         }
                     }
@@ -364,19 +386,19 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
             }
             if !m["error"].is_null() {
                 let text = m["error"]["message"].as_str().map(str::to_owned).unwrap_or_else(|| m["error"].to_string());
-                push("err".into(), "system", "error", truncate(&text, RESULT_LIMIT), None);
+                push("err".into(), ts, "system", "error", truncate(&text, RESULT_LIMIT), None);
             }
         }
         Some("shell") => {
-            push("0".into(), "assistant", "tool_use", m["command"].as_str().unwrap_or_default().to_owned(), Some("shell".into()));
-            push("0:r".into(), "tool", "tool_result", truncate(&content_text(&m["output"]), RESULT_LIMIT), None);
+            push("0".into(), ts, "assistant", "tool_use", m["command"].as_str().unwrap_or_default().to_owned(), Some("shell".into()));
+            push("0:r".into(), done, "tool", "tool_result", truncate(&content_text(&m["output"]), RESULT_LIMIT), None);
         }
         // Сессия переехала в другой каталог (обычно — в созданный ею worktree):
         // opencode меняет её `location.directory`, и без отметки в ленте панель
         // просто начинает показывать другой путь.
         Some("location-switched") => {
             let to = m["location"]["directory"].as_str().unwrap_or_default();
-            push("0".into(), "system", "cwd", to.to_owned(), None);
+            push("0".into(), ts, "system", "cwd", to.to_owned(), None);
         }
         // Сообщение типа idle повторяет ошибку предыдущего ответа, поэтому не показывается.
         _ => {}

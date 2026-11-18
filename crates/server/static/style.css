@@ -750,6 +750,30 @@ input, textarea, select {
   font-size: 13px;
 }
 .item summary { cursor: pointer; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Время вызова инструмента: пока команда идёт, под её строкой справа тикает
+   таймер; после конца — длительность справа от строки, но только пока на неё
+   наведена мышь. Время лежит поверх строки и закрывает её хвост своей
+   подложкой: разметку строки не двигаем, треугольник раскрытия остаётся. */
+.item.tool_use summary { position: relative; }
+.item.tool_use .call-time {
+  position: absolute;
+  top: 0;
+  right: 0;
+  padding-left: 8px;
+  background: var(--tool);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transition: opacity .15s;
+}
+.item.tool_use summary:hover .call-time { opacity: 1; }
+.call-timer {
+  margin-top: 2px;
+  padding-right: 10px;
+  text-align: right;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
 .item details .body {
   font: 12px/1.4 ui-monospace, Consolas, monospace;
   max-height: 360px;
