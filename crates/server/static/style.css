@@ -315,9 +315,19 @@ input, textarea, select {
 }
 /* На телефоне наведения нет: закреп видно всегда, а кнопки консоли и удаления
    живут в свайпе. */
+/* На телефоне наведения нет: закреп видно всегда, а зона нажатия — под палец
+   (44×44 при строке 60 px), сам значок остаётся прежним. */
 @media (hover: none) {
-  .session-pin { right: 8px; opacity: .3; pointer-events: auto; }
+  .session-pin {
+    right: 2px;
+    width: 44px;
+    height: 44px;
+    opacity: .35;
+    pointer-events: auto;
+  }
+  .session-pin svg { width: 18px; height: 18px; }
   .session-pin.on { opacity: 1; }
+  .session-pin:active { background: var(--tool); opacity: 1; }
 }
 .session-delete:hover { background: var(--wait); color: #fff; }
 .session-close:hover { background: var(--accent); color: #fff; }
@@ -1448,7 +1458,7 @@ button .icon { display: none; }
   .project-toggle { width: 22px; height: 22px; }
   .project-name { font-size: 15px; }
   .session-row.in-project .session { padding-left: 26px; }
-  .session { padding: 10px 40px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
+  .session { padding: 10px 50px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
   .session .meta, .session .when { font-size: 13px; }
   .top {
     padding: calc(6px + env(safe-area-inset-top)) 10px 6px 4px;

@@ -458,6 +458,11 @@ function rowEntry(agent, session, inProject) {
       entry.pin = el('button', 'session-pin');
       entry.pin.type = 'button';
       entry.pin.append(icon(PIN_ICON));
+      // Палец, попавший по кнопке закрепа, не должен заодно тянуть свайп
+      // закрытия и удаления: жест начинается со строки, а не с кнопки.
+      for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) {
+        entry.pin.addEventListener(type, (e) => e.stopPropagation());
+      }
       entry.pin.addEventListener('click', (e) => {
         e.stopPropagation();
         togglePin(entry.agentName, entry.key);

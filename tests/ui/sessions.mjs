@@ -518,6 +518,30 @@ try {
     await evaluate(`window.__state.pins.length === 0`),
   );
 
+  // Телефон: зона нажатия закрепа должна быть под палец, а не 24 точки.
+  await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 800, deviceScaleFactor: 1, mobile: true });
+  await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  await sleep(250);
+  const touch = await evaluate(`(() => {
+    const row = document.querySelector('#sessions .session-row');
+    const pin = row.querySelector('.session-pin').getBoundingClientRect();
+    const when = row.querySelector('.when').getBoundingClientRect();
+    return {
+      width: Math.round(pin.width),
+      height: Math.round(pin.height),
+      pinLeft: Math.round(pin.left),
+      whenRight: Math.round(when.right),
+      viewport: window.innerWidth,
+    };
+  })()`);
+  check(
+    'на телефоне в кнопку закрепа легко попасть',
+    touch.width >= 40 && touch.height >= 40 && touch.pinLeft >= touch.whenRight,
+    touch,
+  );
+  await send('Emulation.setTouchEmulationEnabled', { enabled: false, maxTouchPoints: 1 });
+  await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
   failures.push(String(error));
