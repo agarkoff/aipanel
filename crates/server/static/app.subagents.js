@@ -181,7 +181,7 @@ function closeSubTab(id) {
 function applySubHistory(msg) {
   const key = tabKey(msg.sub);
   if (msg.reset) cacheReset(key);
-  for (const item of msg.items || []) cachePut(key, item);
+  for (const item of (msg.items || []).map(plainItem)) cachePut(key, item);
   if (msg.error && (msg.reset || (msg.items || []).length)) {
     setHint(`Лента подагента: ${msg.error}`, true);
   }

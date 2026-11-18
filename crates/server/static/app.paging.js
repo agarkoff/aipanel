@@ -79,6 +79,7 @@ function applyOlder(msg) {
     return;
   }
   olderMore = msg.more !== false;
+  msg.items = (msg.items || []).map(plainItem);
   cachePrepend('', msg.items || []);
   // Пока догрузка шла, могли открыть вкладку подагента: тогда пополняем только
   // кэш — соберётся при возврате в основную ленту.

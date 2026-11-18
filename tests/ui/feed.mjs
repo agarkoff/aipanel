@@ -2265,6 +2265,21 @@ try {
   check('подагенты: закрытая вкладка убирает полосу вкладок',
     subs.tabsAfter === 0 && subs.tabsHidden, subs);
 
+  // Вывод инструментов приходит из терминала с управляющими последовательностями
+  // ANSI: в ленте они не нужны, а у прогресс-строк остаётся итоговое состояние.
+  const cleaned = await evaluate(`(() => {
+    applyHistory({ items: [{ id: 'ansi1', ts: Date.now(), role: 'tool', kind: 'tool_result', tool: 'bash',
+      text: 'k1\\u001b[31;1m: ошибка\\u001b[0m\\nитог 1%\\rитог 100%' }] });
+    const node = document.querySelector('.item[data-id="ansi1"]');
+    const raw = node ? node.textContent : '';
+    const body = node ? (node.querySelector('.body') || {}).textContent || '' : '';
+    const summary = node ? (node.querySelector('summary') || {}).textContent || '' : '';
+    return { raw, body, summary, hasEsc: raw.includes('\\u001b') || raw.includes('[31;1m') };
+  })()`);
+  check('лента: управляющие последовательности не показываются',
+    !cleaned.hasEsc && cleaned.body.includes('итог 100%') && !cleaned.body.includes('итог 1%') && cleaned.summary.includes('ошибка'),
+    cleaned);
+
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {
   failures.push(String(error));

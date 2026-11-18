@@ -892,6 +892,36 @@ const Highlight = (() => {
     return name ? fragment(text, name) : null;
   }
 
+  // ------------------------------------------------------------ очистка вывода
+
+  // Вывод инструментов приходит из терминала как есть — вместе с управляющими
+  // последовательностями ANSI: цветами, перерисовкой прогресс-строк, заголовком
+  // окна. Терминала в ленте нет, поэтому эти команды остались бы видимым
+  // текстом («[31;1m» вместо красного). Снимаем их: у перерисованных строк
+  // оставляем итоговое состояние (то, что после последнего \r), прочие
+  // управляющие символы выбрасываем — кроме перевода строки и табуляции.
+  const RE_OSC = /\u001b\][\s\S]*?(?:\u0007|\u001b\\)/g; // заголовок окна, гиперссылка
+  const RE_OSC_TAIL = /\u001b\][\s\S]*$/; // OSC без закрывающего BEL/ST
+  const RE_CSI = /\u001b\[[0-?]*[ -/]*[@-~]/g; // цвета, курсор, стирание строки
+  const RE_ESC = /\u001b[ -/]*[0-~]/g; // прочие ESC-последовательности
+  const RE_CTRL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g;
+  // Быстрая проверка: обычный текст (в том числе многострочный) не разбираем.
+  const RE_SUSPECT = /[\u0000-\u0008\u000b\u000c\r\u000e-\u001f\u007f-\u009f]/;
+
+  function plainText(text) {
+    const s = String(text == null ? '' : text);
+    if (!RE_SUSPECT.test(s)) return s;
+    let out = s.replace(RE_OSC, '').replace(RE_OSC_TAIL, '').replace(RE_CSI, '').replace(RE_ESC, '');
+    if (out.includes('\r')) {
+      out = out
+        .replace(/\r\n/g, '\n')
+        .split('\n')
+        .map((line) => (line.includes('\r') ? line.split('\r').pop() : line))
+        .join('\n');
+    }
+    return out.replace(RE_CTRL, '');
+  }
+
   return {
     lang,
     langOfPath,
@@ -905,6 +935,7 @@ const Highlight = (() => {
     inputLang,
     toolResult,
     toolInput,
+    plainText,
   };
 })();
 

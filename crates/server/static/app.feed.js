@@ -673,6 +673,7 @@ function rememberRequest(item) {
 }
 
 function applyHistory(msg) {
+  msg.items = (msg.items || []).map(plainItem);
   // Кэш обновляется всегда: лента сессии продолжает приходить, пока открыта
   // вкладка подагента, — иначе вернувшись, человек увидел бы старое.
   if (msg.reset) {
