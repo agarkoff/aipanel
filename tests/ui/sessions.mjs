@@ -461,8 +461,9 @@ try {
   const docs = revealed.projects.find((p) => p.name === 'docs');
   check('проект раскрывается, когда в нём появился вопрос', docs.expanded === 'true', revealed.projects);
 
-  // Перезагрузка: состояние списка приходит от агента (в заглушке — из sessionStorage).
-  await send('Page.reload');
+  // Свежая загрузка без адреса открытой сессии: в адресе (`#agent=…`) она бы
+  // снова открылась и раскрыла свой проект — это не про состояние списка.
+  await send('Page.navigate', { url: pageUrl });
   await waitFor(`!!window.__socket && !!document.getElementById('sessions')`, 8000);
   await sendList(sessions());
   await waitFor(`document.querySelectorAll('#sessions .project').length === 2`, 8000);
