@@ -4,7 +4,19 @@
 'use strict';
 
 self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener('activate', (e) =>
+  e.waitUntil(
+    (async () => {
+      await self.clients.claim();
+      // После обновления панели на устройстве остаются плашки прежних версий:
+      // сессии давно прочитаны, а убирать их вручную никто не станет. Новая
+      // версия начинается с чистого списка — дальше плашки снимает открытие
+      // сессии (см. `dismiss` ниже).
+      const shown = await self.registration.getNotifications();
+      shown.filter((n) => (n.tag || '').startsWith('aipanel')).forEach((n) => n.close());
+    })(),
+  ),
+);
 
 self.addEventListener('push', (e) => {
   let data = {};
@@ -12,6 +24,11 @@ self.addEventListener('push', (e) => {
     data = e.data ? e.data.json() : {};
   } catch {
     data = { title: 'AiPanel', body: e.data ? e.data.text() : '' };
+  }
+  // Сессию открыли — например, на компьютере: плашку пора убрать, а не показывать.
+  if (data.close) {
+    e.waitUntil(dismiss(data.tag || 'aipanel'));
+    return;
   }
   // Показывать нужно всегда: Safari отзывает подписку, если push пришёл,
   // а уведомления не было.
@@ -30,6 +47,23 @@ self.addEventListener('push', (e) => {
     }),
   );
 });
+
+// Убирает плашку с тегом. Push обязан показать уведомление (Chrome иначе
+// пишет «сайт обновлён в фоне», Safari отзывает подписку), поэтому сначала
+// ставим на её место молчаливую копию, а потом закрываем все с этим тегом.
+async function dismiss(tag) {
+  const reg = self.registration;
+  await reg.showNotification('AiPanel', {
+    body: '',
+    tag,
+    silent: true,
+    icon: '/icon-192.png',
+    badge: '/badge.png',
+    data: { close: true },
+  });
+  const shown = await reg.getNotifications();
+  shown.filter((n) => n.tag === tag).forEach((n) => n.close());
+}
 
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();

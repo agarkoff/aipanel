@@ -33,6 +33,7 @@ const TTL_SECS: u64 = 24 * 60 * 60;
 const JWT_SECS: u64 = 12 * 60 * 60;
 
 /// Ключ сервера VAPID.
+#[derive(Clone)]
 pub struct Vapid {
     key: SigningKey,
     /// Открытый ключ в base64url: его браузер передаёт в `pushManager.subscribe`.
@@ -204,18 +205,29 @@ pub fn status_events(old: &[SessionInfo], new: &[SessionInfo]) -> Vec<StatusEven
     out
 }
 
+/// Тег уведомления сессии. Тот же, что у уведомлений страницы (`app.notify.js`):
+/// новое заменяет прежнее, а по нему же плашку убирают с устройств.
+fn notice_tag(agent: &str, session: &str) -> String {
+    format!("aipanel:{agent}:{session}")
+}
+
 /// Текст уведомления для service worker панели (`sw.js`).
 pub fn payload(agent: &str, e: &StatusEvent) -> String {
     let title: String = e.title.chars().take(120).collect();
     json!({
         "title": title,
         "body": format!("{agent} · {}", if e.waiting { "сессия ждёт ответа" } else { "ход завершён" }),
-        // Тот же tag, что у уведомлений страницы: новое заменяет прежнее.
-        "tag": format!("aipanel:{agent}:{}", e.session),
+        "tag": notice_tag(agent, &e.session),
         "agent": agent,
         "session": e.session,
     })
     .to_string()
+}
+
+/// Просьба убрать уведомление сессии: её открыли, и плашка в строке состояния
+/// больше не нужна (`close` разбирает `sw.js`).
+pub fn dismiss_payload(agent: &str, session: &str) -> String {
+    json!({ "close": true, "tag": notice_tag(agent, session) }).to_string()
 }
 
 /// Уведомления, которые нужно разослать устройствам пользователя.
@@ -225,6 +237,37 @@ pub struct Job {
     pub events: Vec<StatusEvent>,
     pub subs: Vec<PushSub>,
     pub contact: Option<String>,
+}
+
+/// Забыть подписки, отвергнутые push-службой: устройство отписалось или
+/// удалило данные сайта.
+fn forget(app: &Arc<App>, owner: &str, gone: &[String]) {
+    if !gone.is_empty() {
+        app.lock().drop_push(owner, gone);
+    }
+}
+
+/// Просит устройства убрать уведомление сессии: человек открыл её, и плашка в
+/// строке состояния ему больше не нужна. Как и рассылка уведомлений, запросы
+/// к push-службам идут в отдельном потоке.
+pub fn dismiss(vapid: Option<Vapid>, subs: Vec<PushSub>, contact: Option<String>, agent: &str, session: &str) {
+    let Some(vapid) = vapid else { return };
+    if subs.is_empty() {
+        return;
+    }
+    let text = dismiss_payload(agent, session);
+    std::thread::spawn(move || {
+        let contact = contact.unwrap_or_else(|| "mailto:aipanel@localhost".into());
+        for sub in &subs {
+            match send(&vapid, &contact, sub, text.as_bytes()) {
+                Ok(()) => {}
+                // Подписку уберёт ближайшая рассылка уведомлений: у этого
+                // потока нет доступа к состоянию сервера.
+                Err(SendError::Gone) => eprintln!("push: subscription gone: {}", sub.endpoint),
+                Err(SendError::Other(e)) => eprintln!("push: dismiss to {} failed: {e}", sub.endpoint),
+            }
+        }
+    });
 }
 
 /// Рассылает уведомления на устройства пользователя. Запросы к push-службам
@@ -253,9 +296,7 @@ pub fn dispatch(app: &Arc<App>, job: Job) {
                 }
             }
         }
-        if !gone.is_empty() {
-            app.lock().drop_push(&owner, &gone);
-        }
+        forget(&app, &owner, &gone);
     });
 }
 

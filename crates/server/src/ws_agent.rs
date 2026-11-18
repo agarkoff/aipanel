@@ -179,6 +179,10 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
             inner.broadcast_agents();
             let subs = inner.push.get(owner).cloned().unwrap_or_default();
             if !events.is_empty() && !subs.is_empty() && app.vapid.is_some() {
+                // Плашки этих уведомлений снимут с устройств, когда сессию откроют.
+                for e in &events {
+                    inner.mark_notified(owner, agent, &e.session);
+                }
                 return Some(push::Job {
                     owner: owner.to_owned(),
                     agent: agent.to_owned(),

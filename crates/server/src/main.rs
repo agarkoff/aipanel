@@ -10,7 +10,7 @@ mod ws_agent;
 mod ws_browser;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
@@ -82,6 +82,9 @@ struct Inner {
     /// Подписки устройств на push-уведомления по пользователям. Хранят их
     /// агенты, сервер собирает их при подключении агентов.
     push: HashMap<String, Vec<PushSub>>,
+    /// (пользователь, агент, сессия), о которых устройствам уже отправлено
+    /// уведомление: когда сессию откроют, эти плашки нужно убрать.
+    notified: HashSet<(String, String, String)>,
     /// Адрес панели (`https://…`) по заголовку Origin браузера: контакт для
     /// VAPID, если `PANEL_VAPID_SUB` не задан.
     origin: Option<String>,
@@ -189,6 +192,19 @@ impl Inner {
         for sub in gone {
             self.push_to_agents(owner, &sub, false);
         }
+    }
+
+    /// Запомнить, что об уведомлении сессии устройствам уже сообщили.
+    fn mark_notified(&mut self, owner: &str, agent: &str, session: &str) {
+        self.notified
+            .insert((owner.to_owned(), agent.to_owned(), session.to_owned()));
+    }
+
+    /// Сессию открыли: `true`, если её уведомление ещё висит на устройствах и
+    /// его пора убрать. Повторно та же сессия отметки уже не даст.
+    fn take_notified(&mut self, owner: &str, agent: &str, session: &str) -> bool {
+        self.notified
+            .remove(&(owner.to_owned(), agent.to_owned(), session.to_owned()))
     }
 
     fn unwatch(&mut self, browser: u64) {
@@ -539,6 +555,36 @@ mod tests {
         assert_eq!(payload["body"], "pc · сессия ждёт ответа");
         assert_eq!(payload["tag"], "aipanel:pc:b");
         assert_eq!(payload["session"], "b");
+    }
+
+    /// Открытие сессии снимает её уведомление с устройств ровно один раз:
+    /// повторный `watch` той же сессии (переподключение, вторая вкладка) молчит.
+    #[test]
+    fn opening_a_session_takes_its_notice_once() {
+        let mut inner = Inner::default();
+        inner.mark_notified("alice", "pc", "opencode:s1");
+        assert!(inner.take_notified("alice", "pc", "opencode:s1"));
+        assert!(!inner.take_notified("alice", "pc", "opencode:s1"));
+        // Чужая сессия и чужой пользователь отметку не снимают.
+        inner.mark_notified("alice", "pc", "opencode:s1");
+        assert!(!inner.take_notified("bob", "pc", "opencode:s1"));
+        assert!(!inner.take_notified("alice", "pc", "opencode:s2"));
+        assert!(inner.take_notified("alice", "pc", "opencode:s1"));
+    }
+
+    /// Просьба убрать плашку адресована тому же уведомлению: тег совпадает.
+    #[test]
+    fn dismiss_names_the_same_notice() {
+        let e = crate::push::status_events(
+            &[session("opencode:s1", "busy")],
+            &[session("opencode:s1", "idle")],
+        )
+        .remove(0);
+        let shown: serde_json::Value = serde_json::from_str(&crate::push::payload("pc", &e)).unwrap();
+        let closed: serde_json::Value =
+            serde_json::from_str(&crate::push::dismiss_payload("pc", "opencode:s1")).unwrap();
+        assert_eq!(shown["tag"], closed["tag"]);
+        assert_eq!(closed["close"], true);
     }
 
     fn push_sub(id: &str) -> PushSub {

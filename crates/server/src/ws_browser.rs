@@ -19,6 +19,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     auth::{header_str, origin_ok},
+    push,
     ws_agent::safe_id,
     App, BrowserEntry, Inner, Pending, DEAD_AFTER, PING_EVERY,
 };
@@ -207,7 +208,14 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             inner.to_agent(&owner, &agent, ServerMsg::Watch { session: session.clone() });
             // Черновик хранится у агента: при открытии сессии он приходит оттуда,
             // поэтому набранное на другом устройстве видно сразу.
-            inner.to_agent(&owner, &agent, ServerMsg::Drafts { session });
+            inner.to_agent(&owner, &agent, ServerMsg::Drafts { session: session.clone() });
+            // Сессию открыли — с остальных устройств её уведомление пора убрать:
+            // плашка в шторке телефона про уже прочитанное только мешает.
+            if inner.take_notified(&owner, &agent, &session) {
+                let subs = inner.push.get(&owner).cloned().unwrap_or_default();
+                let contact = app.vapid_contact.clone().or_else(|| inner.origin.clone());
+                push::dismiss(app.vapid.clone(), subs, contact, &agent, &session);
+            }
         }
         BrowserMsg::Unwatch => inner.unwatch(browser),
         BrowserMsg::Older { agent, session } => {
