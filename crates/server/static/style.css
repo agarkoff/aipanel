@@ -163,6 +163,50 @@ input, textarea, select {
   gap: 6px;
   align-items: center;
 }
+/* Заголовок группы внутри агента: закреплённые сессии над проектами. */
+.list-group {
+  padding: 8px 14px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+/* Проект — каталог, в котором живут сессии. Плюсик раскрывает и сворачивает. */
+.project {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg);
+  text-align: left;
+  color: var(--text);
+}
+.project:hover { background: var(--tool); }
+.project-toggle {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--muted);
+}
+.project-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 14px;
+}
+.project-count { flex: none; color: var(--muted); font-size: 12px; }
+.project .dot { flex: none; }
+/* Строки проекта сдвинуты вправо: видно, к какому каталогу они относятся. */
+.session-row.in-project .session { padding-left: 24px; }
 .session-row {
   position: relative;
   overflow: hidden;
@@ -223,6 +267,31 @@ input, textarea, select {
 }
 /* Ближе к тексту — закрытие консоли, у края — удаление. */
 .session-close { right: 40px; color: var(--accent); }
+/* Закрепление сессии: строка не участвует в общей сортировке и всегда сверху. */
+.session-pin {
+  position: absolute;
+  top: 50%;
+  right: 68px;
+  z-index: 2;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  opacity: 0;
+  pointer-events: none;
+}
+.session-pin.on { opacity: .9; pointer-events: auto; color: var(--accent); }
+.session-pin:hover { background: var(--tool); opacity: 1; }
+/* Закреплённые строки держатся выше остальных — отмечаем их фоном, но активную
+   по-прежнему красим цветом выделения. */
+.session-row.pinned .session:not(.active) { background: var(--tool); }
 @media (hover: hover) and (pointer: fine) {
   .session-close,
   .session-delete { display: flex; }
@@ -230,8 +299,16 @@ input, textarea, select {
   .session-row:hover .session-delete,
   .session-close:focus-visible,
   .session-delete:focus-visible { opacity: 1; pointer-events: auto; }
-  /* Две кнопки справа не должны наезжать на время и название. */
-  .session { padding-right: 68px; }
+  .session-row:hover .session-pin,
+  .session-pin:focus-visible { opacity: .6; pointer-events: auto; }
+  /* Три кнопки справа не должны наезжать на время и название. */
+  .session { padding-right: 96px; }
+}
+/* На телефоне наведения нет: закреп видно всегда, а кнопки консоли и удаления
+   живут в свайпе. */
+@media (hover: none) {
+  .session-pin { right: 8px; opacity: .45; pointer-events: auto; }
+  .session-pin.on { opacity: 1; }
 }
 .session-delete:hover { background: var(--wait); color: #fff; }
 .session-close:hover { background: var(--accent); color: #fff; }
@@ -1356,7 +1433,11 @@ button .icon { display: none; }
   .new-session svg { width: 18px; height: 18px; }
   .sessions { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
   .agent { padding: 12px 16px 4px; }
-  .session { padding: 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
+  .project { padding: 12px 16px; min-height: 48px; gap: 10px; }
+  .project-toggle { width: 18px; font-size: 20px; }
+  .project-name { font-size: 15px; }
+  .session-row.in-project .session { padding-left: 26px; }
+  .session { padding: 10px 40px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
   .session .meta, .session .when { font-size: 13px; }
 
   .top {

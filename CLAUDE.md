@@ -8,6 +8,7 @@
 cargo test --workspace
 node tests/ui/feed.mjs                        # если менялась crates/server/static
 node tests/ui/rename.mjs                      # если менялось переименование сессий
+node tests/ui/sessions.mjs                    # если менялся список сессий
 node tests/e2e/real.mjs                       # если менялись агент, сервер или протокол
 node tests/hl.mjs                             # если менялся hl.js (подсветка)
 ```

@@ -23,94 +23,539 @@ function dotClass(s, online) {
   return 'dot';
 }
 
+// ------------------------------------------------------------ проекты и закреп
+
+// Агент присылает сессии в порядке последней активности, а у работающей сессии
+// она меняется каждые две секунды. Такой порядок годится как исходный, но не как
+// порядок строк: список перетасовывался бы под курсором. Поэтому строки собраны
+// в проекты-каталоги, а место внутри проекта выдаётся один раз (см. rankOf).
+
+// Каталог сессии — это проект. Путь сравниваем без хвостовых разделителей и без
+// учёта регистра: `C:\Work\api` и `c:/work/api` — один и тот же проект.
+function cwdKey(cwd) {
+  return String(cwd || '').replace(/[\\/]+$/, '').toLowerCase().replace(/\//g, '\\');
+}
+
+// Проект — репозиторий, если каталог под git, иначе сам каталог. Сессии из
+// worktree попадают в проект своего репозитория: ветки у них разные, а проект
+// один, и ветку видно в строке.
+function projectKeyOf(s) {
+  const r = s.repo;
+  return r ? `repo:${String(r.url || r.root || r.name || '').toLowerCase()}` : `dir:${cwdKey(s.cwd)}`;
+}
+
+function projectId(agentName, key) {
+  return `project:${agentName}\n${key}`;
+}
+
+// Название проекта — конец пути. Если у агента два каталога заканчиваются
+// одинаково, показываем больше сегментов, пока названия не разойдутся.
+function projectLabels(projects) {
+  const parts = new Map(projects.map((p) => [p.key, (p.cwd || '').split(/[\\/]+/).filter(Boolean)]));
+  const tail = (key, n) => parts.get(key).slice(-n).join('\\');
+  const labels = new Map();
+  for (const p of projects) {
+    const own = parts.get(p.key);
+    if (!own.length) {
+      labels.set(p.key, 'Без каталога');
+      continue;
+    }
+    let take = 1;
+    while (
+      take < own.length &&
+      projects.some((o) => {
+        const other = parts.get(o.key);
+        return o.key !== p.key && other.length && tail(o.key, take) === tail(p.key, take);
+      })
+    ) {
+      take += 1;
+    }
+    labels.set(p.key, tail(p.key, take));
+  }
+  return labels;
+}
+
+// Статус задаёт порядок внутри проекта: сначала ждущие ответа, потом работающие.
+const STATUS_GROUPS = ['wait', 'busy', 'idle'];
+
+function statusGroup(s, online) {
+  // Без связи состояние сессии устарело: держим её в общем списке, а не среди работающих.
+  if (!online) return 'idle';
+  if (s.status === 'waiting') return 'wait';
+  if (s.status === 'busy' || s.status === 'shell' || s.status === 'stalled') return 'busy';
+  return 'idle';
+}
+
+// Место внутри проекта выдаётся при первом появлении сессии и при переходе в
+// другую группу статуса — тогда сессия встаёт сверху, потому что только что
+// начала или закончила работу. Обновление «последней активности» место не меняет.
+// Место проекта — то же самое: он не переезжает от чужой активности.
+const listRanks = new Map(); // "агент\nсессия" -> { group, rank }
+const projectRanks = new Map(); // id проекта -> место
+let listRankSeq = 0;
+
+function rankOf(agent, s, group) {
+  const id = `${agent}\n${s.key}`;
+  let meta = listRanks.get(id);
+  if (!meta || meta.group !== group) {
+    meta = { group, rank: ++listRankSeq };
+    listRanks.set(id, meta);
+  }
+  return meta.rank;
+}
+
+function projectRankOf(id) {
+  let rank = projectRanks.get(id);
+  if (rank === undefined) {
+    rank = ++listRankSeq;
+    projectRanks.set(id, rank);
+  }
+  return rank;
+}
+
+// Точка проекта показывает самое важное, что внутри: ожидание, работу или покой.
+function projectDot(items, online) {
+  if (!online) return 'dot';
+  if (items.some((i) => i.group === 'wait')) return 'dot waiting';
+  if (items.some((i) => i.group === 'busy')) return 'dot busy';
+  if (items.some((i) => i.s.live)) return 'dot idle';
+  return 'dot';
+}
+
+// Закреплённые сессии: порядок хранится в браузере, свежие закреплённые сверху.
+const PINS_KEY = 'aipanel.pins';
+let pinnedSessions = readPinned();
+
+function readPinned() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PINS_KEY) || '[]');
+    return Array.isArray(saved) ? saved.filter((v) => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+function pinnedId(agent, key) {
+  return `${agent}\n${key}`;
+}
+
+function isPinned(agent, key) {
+  return pinnedSessions.includes(pinnedId(agent, key));
+}
+
+function togglePin(agent, key) {
+  const id = pinnedId(agent, key);
+  const at = pinnedSessions.indexOf(id);
+  if (at < 0) pinnedSessions.unshift(id);
+  else pinnedSessions.splice(at, 1);
+  try {
+    localStorage.setItem(PINS_KEY, JSON.stringify(pinnedSessions));
+  } catch {
+    // Хранилище недоступно (приватный режим): закреп проживёт до перезагрузки.
+  }
+  renderSessions();
+}
+
+// Свёрнутые проекты: тоже в браузере, чтобы список выглядел одинаково после
+// перезагрузки. Храним именно свёрнутые — новые проекты появляются раскрытыми.
+const CLOSED_KEY = 'aipanel.closed';
+const closedProjects = readClosed();
+
+function readClosed() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CLOSED_KEY) || '[]');
+    return new Set(Array.isArray(saved) ? saved.filter((v) => typeof v === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveClosed() {
+  try {
+    localStorage.setItem(CLOSED_KEY, JSON.stringify([...closedProjects]));
+  } catch {}
+}
+
+function toggleProject(id) {
+  if (closedProjects.has(id)) closedProjects.delete(id);
+  else closedProjects.add(id);
+  saveClosed();
+  renderSessions();
+}
+
+function openProject(agentName, session) {
+  if (closedProjects.delete(projectId(agentName, projectKeyOf(session)))) saveClosed();
+}
+
+// Сессия только что начала ждать ответа — раскрываем её проект, чтобы вопрос не
+// остался за свёрнутым заголовком. Свёрнутый вручную проект с уже известным
+// вопросом обратно не раскрывается: решение человека сильнее.
+const lastWaiting = new Set();
+
+function revealWaiting() {
+  let changed = false;
+  const waiting = new Set();
+  for (const a of agents) {
+    for (const s of a.sessions) {
+      if (s.status !== 'waiting') continue;
+      const id = pinnedId(a.name, s.key);
+      waiting.add(id);
+      if (!lastWaiting.has(id) && closedProjects.delete(projectId(a.name, projectKeyOf(s)))) changed = true;
+    }
+  }
+  lastWaiting.clear();
+  for (const id of waiting) lastWaiting.add(id);
+  if (changed) saveClosed();
+}
+
+// Раскладка одного агента: закреплённые сверху, дальше проекты-каталоги, а внутри
+// проекта — по статусу. Закреплённая сессия выходит из проекта: иначе свёрнутый
+// проект прятал бы то, что человек сам поднял наверх.
+function orderedList(agent, list) {
+  const items = list.map((s) => ({ s, group: statusGroup(s, agent.online), pinned: isPinned(agent.name, s.key) }));
+
+  // Места выдаём в обратном порядке активности: первый показ повторяет привычный
+  // порядок (свежие сверху), а новая сессия получает место выше всех.
+  for (const g of STATUS_GROUPS) {
+    const group = items.filter((i) => i.group === g);
+    for (let i = group.length - 1; i >= 0; i--) rankOf(agent.name, group[i].s, g);
+  }
+
+  const pinned = items.filter((i) => i.pinned);
+  pinned.sort((a, b) => pinnedSessions.indexOf(pinnedId(agent.name, a.s.key)) - pinnedSessions.indexOf(pinnedId(agent.name, b.s.key)));
+
+  const byProject = new Map();
+  for (const i of items) {
+    if (i.pinned) continue;
+    const key = projectKeyOf(i.s);
+    let p = byProject.get(key);
+    if (!p) {
+      const r = i.s.repo;
+      p = {
+        id: projectId(agent.name, key),
+        key,
+        // Подсказка: адрес репозитория, а для обычного каталога — полный путь.
+        cwd: r ? r.url || r.root || r.name || '' : i.s.cwd || '',
+        name: r && r.name ? r.name : '',
+        items: [],
+      };
+      byProject.set(key, p);
+    }
+    p.items.push(i);
+  }
+
+  const projects = [...byProject.values()];
+  for (let i = projects.length - 1; i >= 0; i--) projectRankOf(projects[i].id);
+
+  // Названия каталогов без репозитория: конец пути, при совпадении — длиннее.
+  const labels = projectLabels(projects.filter((p) => !p.name));
+  for (const p of projects) {
+    p.items.sort(
+      (a, b) =>
+        STATUS_GROUPS.indexOf(a.group) - STATUS_GROUPS.indexOf(b.group) ||
+        rankOf(agent.name, b.s, b.group) - rankOf(agent.name, a.s, a.group),
+    );
+    p.label = p.name || labels.get(p.key);
+    p.waiting = p.items.some((i) => i.group === 'wait');
+    p.dot = projectDot(p.items, agent.online);
+  }
+
+  // Проект с ожиданием поднимается наверх — это единственное движение в списке,
+  // которое требует внимания. Остальные стоят по выданным местам.
+  projects.sort(
+    (a, b) =>
+      Number(!a.cwd) - Number(!b.cwd) ||
+      Number(b.waiting) - Number(a.waiting) ||
+      projectRankOf(b.id) - projectRankOf(a.id),
+  );
+
+  return { pinned, projects };
+}
+
+// ------------------------------------------------------------ отрисовка списка
+
+// Узлы списка переиспользуются между обновлениями: строки не создаются заново,
+// поэтому список не мигает, не сбрасывает прокрутку и сохраняет фокус, а поле
+// правки имени не теряется между сканами агента.
+const listNodes = new Map(); // id узла -> запись с DOM и ссылками на поля
+
+// Кнопки справа от текста: удаление у края, закрытие консоли ближе к тексту,
+// закреп — левее всех, чтобы не сдвигать привычные места.
+const PIN_ICON = ['M6.2 2.5h3.6l-.4 3.4 2.1 2.4H4.5l2.1-2.4z', 'M8 8.3v5.2'];
+
+function agentEntry(a) {
+  return {
+    id: `agent:${a.name}`,
+    init(entry) {
+      entry.node = el('div', 'agent');
+      entry.dot = el('span', 'dot');
+      entry.name = el('span');
+      entry.node.append(entry.dot, entry.name);
+    },
+    update(entry) {
+      entry.dot.className = a.online ? 'dot idle' : 'dot';
+      entry.name.textContent = a.online ? a.name : `${a.name} — не в сети`;
+    },
+  };
+}
+
+function emptyEntry(id, text) {
+  return {
+    id,
+    init(entry) {
+      entry.node = el('div', 'empty', text);
+    },
+    update() {},
+  };
+}
+
+function groupEntry(agentName, key, title) {
+  return {
+    id: `group:${agentName}:${key}`,
+    init(entry) {
+      entry.node = el('div', 'list-group', title);
+    },
+    update(entry) {
+      entry.node.textContent = title;
+    },
+  };
+}
+
+// Заголовок проекта: плюсик раскрывает и сворачивает каталог, счётчик говорит,
+// сколько сессий внутри, точка — самое важное из их состояний.
+function projectEntry(agent, project, expanded) {
+  return {
+    id: project.id,
+    init(entry) {
+      entry.projectId = project.id;
+      entry.node = el('button', 'project');
+      entry.node.type = 'button';
+      entry.toggle = el('span', 'project-toggle');
+      entry.name = el('span', 'project-name');
+      entry.count = el('span', 'project-count');
+      entry.dot = el('span', 'dot');
+      entry.node.append(entry.toggle, entry.name, entry.count, entry.dot);
+      entry.node.addEventListener('click', () => toggleProject(entry.projectId));
+    },
+    update(entry) {
+      entry.projectId = project.id;
+      entry.node.setAttribute('aria-expanded', String(expanded));
+      entry.toggle.textContent = expanded ? '−' : '+';
+      entry.name.textContent = project.label;
+      entry.name.title = project.cwd || 'Каталог неизвестен';
+      entry.count.textContent = String(project.items.length);
+      entry.dot.className = project.dot;
+      entry.node.setAttribute(
+        'aria-label',
+        `${project.label}: ${project.items.length} ${sessionsWord(project.items.length)}, ${expanded ? 'свернуть' : 'развернуть'}`,
+      );
+    },
+  };
+}
+
+// «1 сессия», «2 сессии», «5 сессий» — для подписи проекта.
+function sessionsWord(n) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return 'сессия';
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'сессии';
+  return 'сессий';
+}
+
+function rowEntry(agent, session, inProject) {
+  const agentName = agent.name;
+  const key = session.key;
+  return {
+    id: `row:${agentName}\n${key}`,
+    init(entry) {
+      entry.agentName = agentName;
+      entry.key = key;
+      entry.renamable = false;
+
+      entry.node = el('div', 'session-row');
+      entry.btn = el('button', 'session');
+      entry.btn.type = 'button';
+      entry.dot = el('span', 'dot');
+      entry.name = el('span', 'name');
+      entry.when = el('span', 'when');
+      entry.meta = el('span', 'meta');
+      entry.btn.append(entry.dot, entry.name, entry.when, entry.meta);
+      entry.btn.addEventListener('click', () => select(entry.agentName, entry.key));
+
+      // Название открытой сессии правится нажатием на него; остальная строка
+      // по-прежнему открывает сессию. Правится именно открытая (selected), а не
+      // просто подсвеченная после выхода.
+      entry.name.addEventListener('click', (e) => {
+        if (!entry.renamable) return;
+        e.preventDefault();
+        e.stopPropagation();
+        startRename('list', entry.agent, entry.session, entry.node);
+      });
+
+      entry.action = el('span', 'swipe-action');
+      entry.action.setAttribute('aria-hidden', 'true');
+
+      // На компьютере консоль закрывает кнопка рядом с крестиком, на телефоне — свайп.
+      // У закрытой сессии закрывать нечего: кнопки нет, а свайп сразу ведёт к удалению.
+      entry.stop = el('button', 'session-close');
+      entry.stop.type = 'button';
+      entry.stop.title = 'Закрыть консоль';
+      entry.stop.setAttribute('aria-label', 'Закрыть консоль');
+      entry.stop.append(icon(['M12.6 4.2a6 6 0 1 1-9.2 0', 'M8 1.5v6']));
+      entry.stop.addEventListener('click', (e) => {
+        e.stopPropagation();
+        askClose(entry.agentName, entry.session);
+      });
+
+      // На компьютере сессия удаляется крестиком, на телефоне — смахиванием влево.
+      entry.del = el('button', 'session-delete');
+      entry.del.append(icon(['M5 5l6 6', 'M11 5l-6 6']));
+      entry.del.type = 'button';
+      entry.del.title = 'Удалить сессию';
+      entry.del.setAttribute('aria-label', 'Удалить сессию');
+      entry.del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        askDelete(entry.agentName, entry.session);
+      });
+
+      // Закрепление: закреплённые сессии всегда сверху и не участвуют в сортировке.
+      entry.pin = el('button', 'session-pin');
+      entry.pin.type = 'button';
+      entry.pin.append(icon(PIN_ICON));
+      entry.pin.addEventListener('click', (e) => {
+        e.stopPropagation();
+        togglePin(entry.agentName, entry.key);
+      });
+
+      entry.node.append(entry.action, entry.btn, entry.del, entry.stop, entry.pin);
+      attachSwipe(entry.node, entry.btn, entry.action, {
+        get closable() {
+          return !!entry.session && entry.session.live;
+        },
+        onClose: () => askClose(entry.agentName, entry.session),
+        onDelete: () => askDelete(entry.agentName, entry.session),
+      });
+    },
+    update(entry) {
+      entry.session = session;
+      entry.agent = agent;
+      const pinned = isPinned(agentName, key);
+      entry.dot.className = dotClass(session, agent.online);
+      entry.name.textContent = session.title || key;
+      entry.when.textContent = ago(session.updated_at);
+      // В строке видно инструмент и место: у git-каталога это репозиторий с
+      // веткой, поэтому в одном проекте строки с разными worktree различимы.
+      entry.meta.textContent = `${session.tool} · ${placeLabel(session)}`;
+      entry.meta.title = placeHint(session);
+      // Подсвечивается открытая сессия, а после выхода из неё — та, где только что были.
+      const mark = selected || lastViewed;
+      entry.btn.classList.toggle('active', !!mark && mark.agent === agentName && mark.session === key);
+      entry.renamable = !!selected && selected.agent === agentName && selected.session === key;
+      entry.name.classList.toggle('rename-target', entry.renamable);
+      // Длинное название обрезается: в подсказке оно целиком.
+      entry.name.title = entry.renamable
+        ? `${session.title || key}\nНажмите, чтобы переименовать`
+        : session.title || key;
+      entry.stop.hidden = !session.live;
+      entry.node.classList.toggle('pinned', pinned);
+      entry.node.classList.toggle('in-project', inProject);
+      entry.pin.classList.toggle('on', pinned);
+      entry.pin.title = pinned ? 'Открепить сессию' : 'Закрепить сессию';
+      entry.pin.setAttribute('aria-label', entry.pin.title);
+      entry.pin.setAttribute('aria-pressed', String(pinned));
+    },
+  };
+}
+
+// Раскладывает строки по плану: известные узлы двигаются, новые создаются,
+// пропавшие удаляются. Пометки на узлах и фокус переживают обновление.
+function applyPlan(box, plan) {
+  const wasTop = new Map();
+  for (const item of plan) {
+    const entry = listNodes.get(item.id);
+    if (entry) wasTop.set(entry.node, entry.node.getBoundingClientRect().top);
+  }
+  let index = 0;
+  const keep = new Set();
+  for (const item of plan) {
+    let entry = listNodes.get(item.id);
+    if (!entry) {
+      entry = { id: item.id };
+      item.init(entry);
+      listNodes.set(item.id, entry);
+    }
+    item.update(entry);
+    // insertBefore, а не append: узел переезжает только если стоит не на месте.
+    const at = box.children[index];
+    if (at !== entry.node) box.insertBefore(entry.node, at || null);
+    index += 1;
+    keep.add(item.id);
+  }
+  for (const [id, entry] of listNodes) {
+    if (keep.has(id)) continue;
+    entry.node.remove();
+    listNodes.delete(id);
+  }
+  flyToPlace(wasTop);
+}
+
+// Перемещения строк анимируются: список меняется на глазах, но не рывком.
+function flyToPlace(wasTop) {
+  if (!wasTop.size || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  for (const [node, top] of wasTop) {
+    const dy = top - node.getBoundingClientRect().top;
+    if (Math.abs(dy) < 2) continue;
+    node.style.transition = 'none';
+    node.style.transform = `translateY(${dy}px)`;
+    requestAnimationFrame(() => {
+      node.style.transition = 'transform .18s ease';
+      node.style.transform = '';
+      setTimeout(() => {
+        node.style.transition = '';
+      }, 220);
+    });
+  }
+}
+
 function renderSessions() {
   // Пока в строке правится название, список не пересобираем: иначе поле
   // потеряет фокус и недопечатанное имя. Новый список придёт после сохранения.
   if (renaming && renaming.place === 'list') return;
-  const box = $('sessions');
   const q = $('filter').value.trim().toLowerCase();
-  box.replaceChildren();
+  const plan = [];
   if (!agents.length) {
-    box.append(el('div', 'empty', 'Нет подключённых агентов. Запустите aipanel-agent на своей машине.'));
-    return;
-  }
-  for (const a of agents) {
-    const head = el('div', 'agent');
-    head.append(el('span', a.online ? 'dot idle' : 'dot'), el('span', '', `${a.name}${a.online ? '' : ' — не в сети'}`));
-    box.append(head);
-    const list = a.sessions.filter((s) => {
-      if (!q) return true;
-      const r = s.repo || {};
-      return `${s.title} ${s.cwd} ${r.name || ''} ${r.url || ''} ${r.branch || ''}`.toLowerCase().includes(q);
-    });
-    if (!list.length) box.append(el('div', 'empty', 'Сессий нет.'));
-    for (const s of list) {
-      const row = el('div', 'session-row');
-      const btn = el('button', 'session');
-      btn.type = 'button';
-      // Подсвечивается открытая сессия, а после выхода из неё — та, где только что были.
-      const mark = selected || lastViewed;
-      if (mark && mark.agent === a.name && mark.session === s.key) btn.classList.add('active');
-      // Название открытой сессии правится нажатием на него; остальная строка
-      // по-прежнему открывает сессию. Правится именно открытая (selected), а не
-      // просто подсвеченная после выхода: на телефоне нажатие на имя последней
-      // сессии должно снова её открывать, а не включать поле.
-      const name = el('span', 'name', s.title || s.key);
-      if (selected && selected.agent === a.name && selected.session === s.key) {
-        name.classList.add('rename-target');
-        name.title = 'Переименовать сессию';
-        name.addEventListener('click', (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          startRename('list', a, s, row);
-        });
+    plan.push(emptyEntry('empty:agents', 'Нет подключённых агентов. Запустите aipanel-agent на своей машине.'));
+  } else {
+    revealWaiting();
+    for (const a of agents) {
+      plan.push(agentEntry(a));
+      const list = a.sessions.filter((s) => {
+        if (!q) return true;
+        const r = s.repo || {};
+        return `${s.title} ${s.cwd} ${r.name || ''} ${r.url || ''} ${r.branch || ''}`.toLowerCase().includes(q);
+      });
+      if (!list.length) {
+        plan.push(emptyEntry(`empty:${a.name}`, 'Сессий нет.'));
+        continue;
       }
-      const meta = el('span', 'meta', `${s.tool} · ${placeLabel(s)}`);
-      meta.title = placeHint(s);
-      btn.append(
-        el('span', dotClass(s, a.online)),
-        name,
-        el('span', 'when', ago(s.updated_at)),
-        meta,
-      );
-      btn.addEventListener('click', () => select(a.name, s.key));
-
-      const action = el('span', 'swipe-action');
-      action.setAttribute('aria-hidden', 'true');
-
-      // На компьютере консоль закрывает кнопка рядом с крестиком, на телефоне — свайп.
-      // У закрытой сессии закрывать нечего: кнопки нет, а свайп сразу ведёт к удалению.
-      const stop = el('button', 'session-close');
-      stop.type = 'button';
-      stop.title = 'Закрыть консоль';
-      stop.setAttribute('aria-label', 'Закрыть консоль');
-      stop.append(icon(['M12.6 4.2a6 6 0 1 1-9.2 0', 'M8 1.5v6']));
-      stop.addEventListener('click', (e) => {
-        e.stopPropagation();
-        askClose(a.name, s);
-      });
-
-      // На компьютере сессия удаляется крестиком, на телефоне — смахиванием влево.
-      const del = el('button', 'session-delete');
-      del.append(icon(['M5 5l6 6', 'M11 5l-6 6']));
-      del.type = 'button';
-      del.title = 'Удалить сессию';
-      del.setAttribute('aria-label', 'Удалить сессию');
-      del.addEventListener('click', (e) => {
-        e.stopPropagation();
-        askDelete(a.name, s);
-      });
-
-      row.append(action, btn, del);
-      if (s.live) row.append(stop);
-      attachSwipe(row, btn, action, {
-        closable: s.live,
-        onClose: () => askClose(a.name, s),
-        onDelete: () => askDelete(a.name, s),
-      });
-      box.append(row);
+      const { pinned, projects } = orderedList(a, list);
+      if (pinned.length) {
+        plan.push(groupEntry(a.name, 'pinned', 'Закреплённые'));
+        for (const item of pinned) plan.push(rowEntry(a, item.s, false));
+      }
+      for (const project of projects) {
+        // Во время поиска проекты раскрыты: иначе совпадение осталось бы за плюсиком.
+        const expanded = !!q || !closedProjects.has(project.id);
+        plan.push(projectEntry(a, project, expanded));
+        if (!expanded) continue;
+        for (const item of project.items) plan.push(rowEntry(a, item.s, true));
+      }
     }
   }
+  const alive = new Set();
+  for (const a of agents) for (const s of a.sessions) alive.add(`${a.name}\n${s.key}`);
+  for (const id of listRanks.keys()) if (!alive.has(id)) listRanks.delete(id);
+  applyPlan($('sessions'), plan);
 }
 
 $('filter').addEventListener('input', renderSessions);
@@ -122,9 +567,10 @@ $('filter').addEventListener('input', renderSessions);
 function attachSwipe(row, btn, action, actions) {
   const CLOSE_AT = 88;
   const DELETE_AT = 168;
-  // Закрывать нечего — порог удаления как у единственной ступени.
-  const delAt = actions.closable ? DELETE_AT : CLOSE_AT;
-  const LIMIT = delAt + 16;
+  // Строка живёт дольше одной отрисовки, поэтому «есть что закрывать» спрашиваем
+  // при каждом движении: сессию могли закрыть или снова открыть.
+  const delAt = () => (actions.closable ? DELETE_AT : CLOSE_AT);
+  const limit = () => delAt() + 16;
   let startX = 0;
   let startY = 0;
   let dx = 0;
@@ -165,7 +611,7 @@ function attachSwipe(row, btn, action, actions) {
       horizontal = true;
       row.setPointerCapture(e.pointerId);
     }
-    const shift = Math.max(-LIMIT, Math.min(0, dx));
+    const shift = Math.max(-limit(), Math.min(0, dx));
     btn.style.transform = `translateX(${shift}px)`;
     showAction(-shift);
     e.preventDefault();
@@ -176,7 +622,7 @@ function attachSwipe(row, btn, action, actions) {
     row.classList.remove('dragging');
     btn.style.transform = '';
     showAction(0);
-    const dist = Math.min(LIMIT, Math.max(0, -dx));
+    const dist = Math.min(limit(), Math.max(0, -dx));
     if (horizontal && dist > 8) {
       swiped = true;
       // Клик после свайпа не должен открыть сессию.
@@ -184,7 +630,7 @@ function attachSwipe(row, btn, action, actions) {
         swiped = false;
       }, 400);
     }
-    if (horizontal && dist >= delAt) {
+    if (horizontal && dist >= delAt()) {
       // Открываем окно после возможного click: иначе касание, завершившее
       // свайп, попало бы в затемнение и сразу закрыло подтверждение.
       setTimeout(actions.onDelete, 0);
@@ -515,6 +961,11 @@ function select(agent, session, sub) {
   dropRename();
   selected = { agent, session };
   lastViewed = selected;
+  // Сессию могли открыть не из списка: её проект должен быть раскрыт, иначе
+  // строка останется за плюсиком.
+  const opened = agents.find((a) => a.name === agent);
+  const found = opened && opened.sessions.find((s) => s.key === session);
+  if (found) openProject(agent, found);
   nodes.clear();
   feedRequests.clear();
   favorites = [];
