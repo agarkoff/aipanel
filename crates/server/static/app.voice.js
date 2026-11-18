@@ -278,7 +278,7 @@ async function voiceStopped(st, chunks) {
       (loudness.total >= 1 && loudness.secs < loudness.total * VOICE_MIN_SPEECH_RATIO));
   if (dead) {
     setHint(
-      'Голосовой ввод: телефон записал тишину — микрофон молчит. Проверьте, не занят ли он другим приложением или наушниками.',
+      'Голосовой ввод: в записи тишина — микрофон молчит. Проверьте, не занят ли он другим приложением или наушниками.',
       true,
     );
     return;
