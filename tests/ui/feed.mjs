@@ -938,6 +938,59 @@ try {
   check('кнопка «в конец» возвращает в конец', reachedEnd && endState.gap <= 1, { reachedEnd, ...endState });
   check('кнопка «в конец» скрывается внизу', endState.hidden, endState);
 
+  // ------------------------------------------------------------ чтение и конец
+  // Новый текст прилипает к низу, только пока читатель у самого низа. Раньше
+  // «рядом с концом» считалось запасом в 80 пикселей, и небольшая прокрутка
+  // вверх, чтобы перечитать последние строки, не спасала: следующий кусок
+  // ответа утягивал ленту в самый конец.
+  const follow = await evaluate(`(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const feed = document.getElementById('feed');
+    const gap = () => Math.round(feed.scrollHeight - feed.scrollTop - feed.clientHeight);
+    const put = (top) => {
+      feed.scrollTop = top;
+      feed.dispatchEvent(new Event('scroll'));
+    };
+    const answer = (id) => ({ id, ts: Date.now(), role: 'assistant', kind: 'text',
+      text: 'Ответ продолжается. ' + 'Ещё одна строка ответа. '.repeat(30) });
+    // Читатель отвёл ленту от конца на 40 пикселей — перечитывает последние
+    // строки последнего ответа.
+    put(feed.scrollHeight - feed.clientHeight - 40);
+    await wait(50);
+    const reading = { top: feed.scrollTop, gap: gap() };
+    applyHistory({ items: [answer('read1')] });
+    await wait(50);
+    const away = { top: feed.scrollTop, gap: gap() };
+    // Он же у самого низа: тут лента за ответом идёт.
+    put(feed.scrollHeight);
+    await wait(50);
+    applyHistory({ items: [answer('read2')] });
+    await wait(50);
+    const followed = { gap: gap() };
+    // Лента собрана заново без его участия (переподключение к серверу): место
+    // чтения остаётся там же, а не уезжает в конец.
+    put(Math.round(feed.scrollHeight / 2));
+    await wait(50);
+    const top = feed.getBoundingClientRect().top;
+    const visible = [...feed.querySelectorAll('.item')].find((n) => n.getBoundingClientRect().bottom > top + 1);
+    const anchorTop = Math.round(visible.getBoundingClientRect().top);
+    const anchorId = visible.dataset.id;
+    applyHistory({ reset: true, items: [...feedItems.get('').values()] });
+    await wait(80);
+    const again = document.querySelector('#feed .item[data-id="' + anchorId + '"]');
+    const rebuilt = {
+      kept: again ? Math.round(again.getBoundingClientRect().top) : null,
+      anchorTop,
+      end: gap() <= 1,
+    };
+    applyHistory({ items: [], drop: ['read1', 'read2'] });
+    return { reading, away, followed, rebuilt };
+  })()`);
+  check('читающего выше конца новый текст не тянет вниз', follow.away.top === follow.reading.top && follow.away.gap > follow.reading.gap, follow);
+  check('у самого низа лента за новым текстом идёт', follow.followed.gap <= 1, follow.followed);
+  check('пересборка ленты оставляет место чтения на месте',
+    follow.rebuilt.kept !== null && Math.abs(follow.rebuilt.kept - follow.rebuilt.anchorTop) <= 2 && !follow.rebuilt.end, follow.rebuilt);
+
   // ------------------------------------------------------------ ранние сообщения
   // Агент присылает только последние сообщения сессии; остальные догружаются,
   // когда лента доходит до верхней кромки. Старые элементы встают в начало, а

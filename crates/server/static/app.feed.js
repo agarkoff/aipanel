@@ -822,7 +822,12 @@ function applyHistory(msg) {
   }
   if (subTab) return;
   const feed = $('feed');
-  const stick = Date.now() > scrollHoldUntil && !feedRestore && feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  // Лента следует за концом, только пока человек у низа: «рядом с ним» не в
+  // счёт — перечитывающего последние строки новый кусок ответа не двигает.
+  const stick = Date.now() > scrollHoldUntil && !feedRestore && followEnd;
+  // Ленту собрали заново не по воле человека (агент перечитал транскрипт,
+  // переподключение к серверу): возвращаем его на то же место, а не в конец.
+  const place = msg.reset && !stick && !feedRestore ? feedPlace() : null;
   if (msg.reset) {
     feed.replaceChildren();
     if (!msg.items.length) feed.append(el('div', 'empty', 'Лента пуста.'));
@@ -856,8 +861,12 @@ function applyHistory(msg) {
     // придёт следом — до этого лента стоит наверху, а не прыгает в конец.
     feedRestore.ready = true;
     applyFeedRestore();
-  } else if (msg.reset || stick) {
+  } else if (stick) {
     feed.scrollTop = feed.scrollHeight;
+    followEnd = true;
+  } else if (place) {
+    applyFeedPlace(place);
+    followEnd = placeAtEnd();
   }
   updateToEnd();
 }

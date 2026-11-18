@@ -185,6 +185,10 @@ function showTab(id) {
     applyFeedRestore();
   } else {
     feed.scrollTop = saved === undefined ? feed.scrollHeight : Math.min(saved, feed.scrollHeight);
+    // Куда встала лента, то и решает, следует ли она теперь за концом: у
+    // вкладки своё место чтения, и присвоение `scrollTop` события прокрутки
+    // может не дать.
+    followEnd = placeAtEnd();
   }
   // Закреп относится к основной ленте: у подагента его нет.
   if (!id) syncPin();
@@ -230,11 +234,20 @@ function applySubHistory(msg) {
   }
   if (subTab !== msg.sub) return;
   const feed = $('feed');
-  const stick = msg.reset || feed.scrollHeight - feed.scrollTop - feed.clientHeight < 80;
+  // Как и в основной ленте: в конец лента уезжает, только пока человек у низа.
+  // Пересборка (переподключение) не должна выдёргивать читающего в самый конец.
+  const stick = followEnd;
+  const place = msg.reset && !stick ? feedPlace() : null;
   const open = openItems();
   renderFeed(key);
   restoreOpen(open);
-  if (stick) feed.scrollTop = feed.scrollHeight;
+  if (stick) {
+    feed.scrollTop = feed.scrollHeight;
+    followEnd = true;
+  } else if (place) {
+    applyFeedPlace(place);
+    followEnd = placeAtEnd();
+  }
   updateToEnd();
 }
 
