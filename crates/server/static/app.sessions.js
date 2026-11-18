@@ -118,7 +118,7 @@ function projectDot(items, online) {
   if (!online) return 'dot';
   if (items.some((i) => i.group === 'wait')) return 'dot waiting';
   if (items.some((i) => i.group === 'busy')) return 'dot busy';
-  if (items.some((i) => i.s.live)) return 'dot idle';
+  if (items.some((i) => i.s.status === 'idle')) return 'dot idle';
   return 'dot';
 }
 

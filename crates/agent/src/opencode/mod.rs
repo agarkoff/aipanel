@@ -588,7 +588,8 @@ impl OpenCode {
             .and_then(|v| v["data"].as_object().map(|o| o.keys().cloned().collect()));
         let active_ids = active.clone().unwrap_or_default();
         let waiting = self.waiting_sessions(&list, &active_ids).await;
-        let windowed = self.windowed_sessions();
+        // Без окон отчёты плагина не нужны: открытость сессии ни на что не влияет.
+        let windowed = if self.cfg.windows { self.windowed_sessions() } else { HashSet::new() };
         let mut out = Vec::new();
         for s in list["data"].as_array().into_iter().flatten() {
             let Some(id) = s["id"].as_str() else { continue };
@@ -603,6 +604,7 @@ impl OpenCode {
                 waiting.contains(id),
                 active.as_ref().map(|a| a.contains(id) || self.recently_launched(id)),
                 windowed.contains(id),
+                self.cfg.windows,
                 &s["time"],
             );
             let turn = if matches!(status, "busy" | "stalled") { self.turn(id).await } else { None };
@@ -612,9 +614,15 @@ impl OpenCode {
                 title: title.to_owned(),
                 cwd: cwd.to_owned(),
                 status: status.into(),
-                live: status != "ready",
+                // Без окон закрывать нечего: кнопка закрытия консоли не нужна.
+                live: self.cfg.windows && status != "ready",
                 updated_at: s["time"]["updated"].as_i64().unwrap_or(0),
-                delivery: if status == "ready" && cfg!(windows) { "window" } else { "api" }.into(),
+                delivery: if status == "ready" && cfg!(windows) && self.cfg.windows {
+                    "window"
+                } else {
+                    "api"
+                }
+                .into(),
                 model: session_model(&s["model"]),
                 turn,
                 repo: None,
@@ -979,14 +987,15 @@ impl OpenCode {
         Ok((cwd.clone(), handoff::build("opencode", &cwd, &messages)))
     }
 
-    /// Создаёт новую сессию opencode в каталоге `cwd` и открывает её в окне.
-    /// Сессию создаёт API, поэтому она сразу известна панели даже без окна.
+    /// Создаёт новую сессию opencode в каталоге `cwd`; окно открывается, только если
+    /// это включено в `[opencode] windows`. Сессию создаёт API, поэтому она сразу
+    /// известна панели даже без окна.
     pub async fn start(&self, cwd: &str, model: &str) -> Result<Option<String>, String> {
         self.start_with_prompt(cwd, None, model).await
     }
 
     /// Открывает новую сессию; `prompt` уходит её первым сообщением, `model` —
-    /// `провайдер/модель` для новой сессии (пусто — модель окна). В Windows
+    /// `провайдер/модель` для новой сессии (пусто — модель окна). В режиме окон
     /// текст передаётся аргументом окна, иначе — через API.
     pub async fn start_with_prompt(
         &self,
@@ -996,7 +1005,8 @@ impl OpenCode {
     ) -> Result<Option<String>, String> {
         crate::util::session_dir(cwd)?;
         if let Some(text) = prompt {
-            if text.encode_utf16().count() > crate::claude::MAX_ARG_UTF16 {
+            // Ограничение командной строки нужно только окну: через API уходит сам текст.
+            if cfg!(windows) && self.cfg.windows && text.encode_utf16().count() > crate::claude::MAX_ARG_UTF16 {
                 return Err(format!(
                     "сообщение слишком длинное для запуска окна (до {} символов)",
                     crate::claude::MAX_ARG_UTF16
@@ -1023,7 +1033,7 @@ impl OpenCode {
                 return Err(e);
             }
         }
-        if cfg!(windows) {
+        if cfg!(windows) && self.cfg.windows {
             let bin = crate::util::resolve_exe(&self.cfg.bin);
             self.launched.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), Instant::now());
             let mut args = vec!["-s".to_owned(), id.clone()];
@@ -1033,7 +1043,7 @@ impl OpenCode {
             }
             if let Err(e) = crate::platform::spawn_window(&bin, &args, cwd) {
                 self.launched.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-                // Сессия без окна пользователю не нужна: убираем её из списка opencode.
+                // Сессия, которую не удалось показать окном, пользователю не нужна.
                 let _ = self.call(reqwest::Method::DELETE, &format!("/api/session/{id}"), None).await;
                 return Err(e);
             }
@@ -1050,9 +1060,10 @@ impl OpenCode {
 
     /// Окно открывается, если сессия ничего не выполняет и её окна ещё нет. Окно ищется
     /// по `-s <id>` в командной строке `opencode.exe`: окно, в котором сессию выбрали
-    /// уже внутри программы, так не найти и будет открыто ещё одно.
+    /// уже внутри программы, так не найти и будет открыто ещё одно. В режиме без окон
+    /// (`[opencode] windows = false`) сообщение всегда уходит через API.
     async fn should_open_window(&self, id: &str, active: bool) -> bool {
-        if !cfg!(windows) || self.recently_launched(id) {
+        if !cfg!(windows) || !self.cfg.windows || self.recently_launched(id) {
             return false;
         }
         if active || self.windowed_sessions().contains(id) {
@@ -1092,6 +1103,9 @@ impl OpenCode {
     fn target_model(&self) -> Option<(String, String)> {
         match self.cfg.model.trim() {
             "" | "session" => None,
+            // Без окон следить не за чем: model.json обновляет только окно opencode,
+            // а у сессии уже стоит модель, выбранная при запуске или через /models.
+            "auto" if !self.cfg.windows => None,
             "auto" => {
                 // Последняя модель, выбранная в окне opencode: именно она видна в строке состояния.
                 let text = std::fs::read_to_string(state_file("model.json")).ok()?;
@@ -1366,7 +1380,16 @@ impl OpenCode {
 /// `running` — что об этой сессии сказал `/api/session/active`; `None` — список
 /// не получен. Тогда принятую сессию нельзя назвать зависшей: она может
 /// работать, просто проверить нечем, — и она считается занятой.
-fn session_status(waiting: bool, running: Option<bool>, windowed: bool, time: &Value) -> &'static str {
+///
+/// `windows: false` — окна не открываются вовсе. Тогда «открыта ли сессия» не
+/// спрашивается: свободная сессия готова принять сообщение, и это и есть «ждёт ввода».
+fn session_status(
+    waiting: bool,
+    running: Option<bool>,
+    windowed: bool,
+    windows: bool,
+    time: &Value,
+) -> &'static str {
     let accepted = time["busy"].as_i64().unwrap_or(0) > time["idle"].as_i64().unwrap_or(0);
     if waiting {
         "waiting"
@@ -1374,12 +1397,13 @@ fn session_status(waiting: bool, running: Option<bool>, windowed: bool, time: &V
         "busy"
     } else if accepted {
         "stalled"
-    } else if windowed {
+    } else if windowed || !windows {
         "idle"
     } else {
         // Сервис opencode хранит все сессии и примет сообщение в любую из них,
-        // но открыта ли сессия в каком-то окне, он не сообщает. Поэтому сессия,
-        // которая ничего не выполняет, показывается как неактивная, а не «ждёт ввода».
+        // но открыта ли сессия в каком-то окне, он не сообщает. Поэтому при
+        // включённых окнах неактивная сессия показывается как «не активна»,
+        // а не «ждёт ввода».
         "ready"
     }
 }
@@ -1813,17 +1837,22 @@ mod tests {
     fn marks_accepted_but_not_running_session() {
         // Ход принят в 200, простой был в 100: сессия занята, но не выполняется.
         let accepted = serde_json::json!({"busy": 200, "idle": 100});
-        assert_eq!(session_status(false, Some(false), true, &accepted), "stalled");
-        assert_eq!(session_status(false, Some(true), true, &accepted), "busy");
-        assert_eq!(session_status(true, Some(false), true, &accepted), "waiting");
+        assert_eq!(session_status(false, Some(false), true, true, &accepted), "stalled");
+        assert_eq!(session_status(false, Some(true), true, true, &accepted), "busy");
+        assert_eq!(session_status(true, Some(false), true, true, &accepted), "waiting");
         // Списка активных сессий нет: принятая считается занятой, а не зависшей —
         // она может работать, и объявлять её зависшей нечем.
-        assert_eq!(session_status(false, None, true, &accepted), "busy");
+        assert_eq!(session_status(false, None, true, true, &accepted), "busy");
         // Ход завершён: простой новее занятости.
         let finished = serde_json::json!({"busy": 100, "idle": 200});
-        assert_eq!(session_status(false, Some(false), true, &finished), "idle");
-        assert_eq!(session_status(false, Some(false), false, &finished), "ready");
-        assert_eq!(session_status(false, None, false, &finished), "ready");
+        assert_eq!(session_status(false, Some(false), true, true, &finished), "idle");
+        assert_eq!(session_status(false, Some(false), false, true, &finished), "ready");
+        assert_eq!(session_status(false, None, false, true, &finished), "ready");
+        // Без окон «не активна» не бывает: свободная сессия готова принять сообщение.
+        assert_eq!(session_status(false, Some(false), false, false, &finished), "idle");
+        assert_eq!(session_status(true, Some(true), false, false, &accepted), "waiting");
+        assert_eq!(session_status(false, Some(true), false, false, &accepted), "busy");
+        assert_eq!(session_status(false, Some(false), false, false, &accepted), "stalled");
     }
 
     #[test]

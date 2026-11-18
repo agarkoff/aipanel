@@ -46,9 +46,12 @@ pub struct ClaudeCfg {
 #[serde(default, deny_unknown_fields)]
 pub struct OpenCodeCfg {
     pub enabled: bool,
-    /// Исполняемый файл opencode для открытия окна. Если его нет в PATH,
-    /// ищется `~/.opencode/bin/opencode.exe`.
+    /// Исполняемый файл opencode: им запускается окно, если включено `windows`.
+    /// Если его нет в PATH, ищется `~/.opencode/bin/opencode.exe`.
     pub bin: String,
+    /// Открывать сессии opencode в окнах Windows Terminal. `false` — работать через
+    /// API сервиса opencode: сессия создаётся и получает сообщения без окна.
+    pub windows: bool,
     /// Модель для сообщений из панели: `auto` — последняя выбранная в окне opencode
     /// (та, что видна в строке состояния), `session` — не менять модель сессии,
     /// либо явно `провайдер/модель`.
@@ -111,6 +114,7 @@ impl Default for OpenCodeCfg {
         Self {
             enabled: true,
             bin: "opencode".into(),
+            windows: false,
             model: "auto".into(),
             max_sessions: 30,
             url: None,
@@ -228,5 +232,10 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.terminal_window, "tab");
         assert!(!cfg.terminal_new_window());
+    }
+
+    #[test]
+    fn opencode_works_without_windows_by_default() {
+        assert!(!Config::default().opencode.windows);
     }
 }
