@@ -177,6 +177,13 @@ $('composer').addEventListener('submit', (e) => {
 // Поле ввода растёт вместе с текстом, до 40% высоты экрана.
 function autoGrow() {
   const text = $('text');
+  // Скрытое поле измерить нельзя: scrollHeight у него 0, и высота 2px оставляет
+  // у правого края полосу прокрутки, пока в поле не начнут печатать. Пусть тогда
+  // действует min-height, а настоящий размер посчитаем, когда поле покажут.
+  if ($('composer').hidden) {
+    text.style.height = '';
+    return;
+  }
   text.style.height = 'auto';
   text.style.height = `${Math.min(text.scrollHeight + 2, window.innerHeight * 0.4)}px`;
 }

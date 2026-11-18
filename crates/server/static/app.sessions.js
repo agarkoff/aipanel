@@ -480,6 +480,9 @@ function select(agent, session) {
   send({ t: 'favorites', agent, session });
   renderSessions();
   renderHeader();
+  // Поле уже видно: черновик сессии может быть многострочным, и высоту ему
+  // нужно посчитать сейчас, а не при первом нажатии клавиши.
+  autoGrow();
 }
 
 function closeView() {

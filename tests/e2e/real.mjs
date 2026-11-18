@@ -402,6 +402,25 @@ enabled = false
     await evaluate(`document.querySelector('#feed')?.innerText || ''`),
   );
 
+  // Поле ввода не должно показывать полосу прокрутки сразу после открытия
+  // сессии: раньше оно измерялось ещё скрытым и получало высоту 2px, и у
+  // правого края появлялась полоса до первого нажатия клавиши.
+  check(
+    'поле ввода открылось без полосы прокрутки',
+    await waitFor(
+      `(() => {
+         const area = document.querySelector('#text');
+         // offsetWidth минус clientWidth — рамки поля; шире — значит, полоса.
+         return area.offsetWidth - area.clientWidth <= 2 && area.style.height !== '2px';
+       })()`,
+      5000,
+    ),
+    await evaluate(`(() => {
+      const area = document.querySelector('#text');
+      return { border: area.offsetWidth - area.clientWidth, height: area.style.height };
+    })()`),
+  );
+
   // Подагент: вызов `Agent` в ленте не показывается, а строка над счётчиком
   // хода открывает его собственную ленту вкладкой в блоке ленты.
   check(
