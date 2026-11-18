@@ -203,9 +203,10 @@ function revealWaiting() {
   for (const tag of waiting) lastWaiting.add(tag);
 }
 
-// Раскладка одного агента: закреплённые сверху, дальше проекты-каталоги, а внутри
-// проекта — по статусу. Закреплённая сессия выходит из проекта: иначе свёрнутый
-// проект прятал бы то, что человек сам поднял наверх.
+// Раскладка одного агента: проекты-каталоги, внутри проекта — по статусу.
+// Закреплённая сессия остаётся в своём проекте и лишь помечена кнопкой; наверх,
+// в отдельный блок, она попадает только пока проект свёрнут — иначе одна и та же
+// строка была бы в списке дважды.
 function orderedList(agent, list) {
   const items = list.map((s) => ({ s, group: statusGroup(s, agent.online), pinned: isPinned(agent.name, s.key) }));
 
@@ -222,7 +223,6 @@ function orderedList(agent, list) {
 
   const byProject = new Map();
   for (const i of items) {
-    if (i.pinned) continue;
     const key = projectKeyOf(i.s);
     let p = byProject.get(key);
     if (!p) {
@@ -238,6 +238,8 @@ function orderedList(agent, list) {
       };
       byProject.set(key, p);
     }
+    // Ключ проекта нужен строке: по нему видно, свёрнут ли её проект.
+    i.projectKey = key;
     p.items.push(i);
   }
 
@@ -329,6 +331,8 @@ function projectEntry(agent, project, expanded) {
       entry.node = el('button', 'project');
       entry.node.type = 'button';
       entry.toggle = el('span', 'project-toggle');
+      entry.toggle.setAttribute('aria-hidden', 'true');
+      entry.toggle.append(toggleIcon());
       entry.name = el('span', 'project-name');
       entry.count = el('span', 'project-count');
       entry.dot = el('span', 'dot');
@@ -339,7 +343,6 @@ function projectEntry(agent, project, expanded) {
       entry.agentName = agent.name;
       entry.projectKey = project.key;
       entry.node.setAttribute('aria-expanded', String(expanded));
-      entry.toggle.textContent = expanded ? '−' : '+';
       entry.name.textContent = project.label;
       // Подсказка объясняет, что за проект: репозиторий или каталог.
       entry.name.title = project.cwd
@@ -353,6 +356,29 @@ function projectEntry(agent, project, expanded) {
       );
     },
   };
+}
+
+// Плюсик и минус — один значок: вертикальная черта плюса убирается, когда проект
+// раскрыт. Разметка своя, а не текстовые «+»/«−»: у них разная высота и толщина.
+function toggleIcon() {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 16 16');
+  svg.setAttribute('width', '16');
+  svg.setAttribute('height', '16');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  const line = (d, cls) => {
+    const path = document.createElementNS(SVG_NS, 'path');
+    path.setAttribute('d', d);
+    if (cls) path.setAttribute('class', cls);
+    svg.append(path);
+  };
+  line('M3.5 8h9');
+  line('M8 3.5v9', 'project-toggle-bar');
+  return svg;
 }
 
 // «1 сессия», «2 сессии», «5 сессий» — для подписи проекта.
@@ -541,15 +567,21 @@ function renderSessions() {
         continue;
       }
       const { pinned, projects } = orderedList(a, list);
-      if (pinned.length) {
+      // Раскрытость считаем заранее: от неё зависит, какие закреплённые строки
+      // придётся показать сверху. Во время поиска проекты раскрыты — иначе
+      // совпадение осталось бы за плюсиком.
+      const opened = new Map();
+      for (const project of projects) opened.set(project.key, !!q || !projectClosed(a.name, project.key));
+      // Закреплённая сессия живёт в своём проекте. Наверх, в отдельный блок, она
+      // поднимается только пока проект свёрнут: иначе строка была бы видна дважды.
+      const lifted = pinned.filter((i) => !opened.get(i.projectKey));
+      if (lifted.length) {
         plan.push(groupEntry(a.name, 'pinned', 'Закреплённые'));
-        for (const item of pinned) plan.push(rowEntry(a, item.s, false));
+        for (const item of lifted) plan.push(rowEntry(a, item.s, false));
       }
       for (const project of projects) {
-        // Во время поиска проекты раскрыты: иначе совпадение осталось бы за плюсиком.
-        const expanded = !!q || !projectClosed(a.name, project.key);
-        plan.push(projectEntry(a, project, expanded));
-        if (!expanded) continue;
+        plan.push(projectEntry(a, project, opened.get(project.key)));
+        if (!opened.get(project.key)) continue;
         for (const item of project.items) plan.push(rowEntry(a, item.s, true));
       }
     }

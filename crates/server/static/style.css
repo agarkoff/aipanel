@@ -186,14 +186,26 @@ input, textarea, select {
   color: var(--text);
 }
 .project:hover { background: var(--tool); }
+/* Плюсик и минус — один значок: у раскрытого проекта вертикальная черта
+   схлопывается, поэтому значок не прыгает и не меняет толщину. */
 .project-toggle {
   flex: none;
-  width: 14px;
-  text-align: center;
-  font-size: 16px;
-  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
   color: var(--muted);
+  transition: background-color .15s ease, color .15s ease;
 }
+.project:hover .project-toggle { background: var(--tool); color: var(--text); }
+.project-toggle-bar {
+  transform-box: view-box;
+  transform-origin: 50% 50%;
+  transition: opacity .16s ease, transform .16s ease;
+}
+.project[aria-expanded="true"] .project-toggle-bar { opacity: 0; transform: scaleY(.2); }
 .project-name {
   flex: 1;
   min-width: 0;
@@ -289,9 +301,6 @@ input, textarea, select {
 }
 .session-pin.on { opacity: .9; pointer-events: auto; color: var(--accent); }
 .session-pin:hover { background: var(--tool); opacity: 1; }
-/* Закреплённые строки держатся выше остальных — отмечаем их фоном, но активную
-   по-прежнему красим цветом выделения. */
-.session-row.pinned .session:not(.active) { background: var(--tool); }
 @media (hover: hover) and (pointer: fine) {
   .session-close,
   .session-delete { display: flex; }
@@ -307,7 +316,7 @@ input, textarea, select {
 /* На телефоне наведения нет: закреп видно всегда, а кнопки консоли и удаления
    живут в свайпе. */
 @media (hover: none) {
-  .session-pin { right: 8px; opacity: .45; pointer-events: auto; }
+  .session-pin { right: 8px; opacity: .3; pointer-events: auto; }
   .session-pin.on { opacity: 1; }
 }
 .session-delete:hover { background: var(--wait); color: #fff; }
@@ -1434,12 +1443,11 @@ button .icon { display: none; }
   .sessions { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
   .agent { padding: 12px 16px 4px; }
   .project { padding: 12px 16px; min-height: 48px; gap: 10px; }
-  .project-toggle { width: 18px; font-size: 20px; }
+  .project-toggle { width: 22px; height: 22px; }
   .project-name { font-size: 15px; }
   .session-row.in-project .session { padding-left: 26px; }
   .session { padding: 10px 40px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
   .session .meta, .session .when { font-size: 13px; }
-
   .top {
     padding: calc(6px + env(safe-area-inset-top)) 10px 6px 4px;
     gap: 6px;
@@ -1522,4 +1530,10 @@ button .icon { display: none; }
     padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
     border-top: 1px solid var(--line);
   }
+}
+
+/* Узкое окно с мышью: кнопки строки видны, поэтому текст не должен под них
+   заходить — правило выше рассчитано на телефон без наведения. */
+@media (max-width: 760px) and (hover: hover) and (pointer: fine) {
+  .session { padding-right: 96px; }
 }

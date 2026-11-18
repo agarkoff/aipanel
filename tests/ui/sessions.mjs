@@ -267,7 +267,6 @@ const view = `(() => {
       current = {
         name: node.querySelector('.project-name').textContent,
         expanded: node.getAttribute('aria-expanded'),
-        toggle: node.querySelector('.project-toggle').textContent,
         count: node.querySelector('.project-count').textContent,
         rows: [],
       };
@@ -319,9 +318,15 @@ try {
   );
   check(
     'проекты раскрыты и показывают число сессий',
-    first.projects.every((p) => p.expanded === 'true' && p.toggle === '−') &&
+    first.projects.every((p) => p.expanded === 'true') &&
       first.projects.map((p) => p.count).join(',') === '3,2',
     first.projects,
+  );
+  check(
+    'значок раскрытия нарисован, а не набран текстом',
+    await evaluate(
+      `[...document.querySelectorAll('#sessions .project-toggle')].every((t) => t.querySelectorAll('svg path').length === 2)`,
+    ),
   );
 
   // Кнопки закрепа, закрытия и удаления нарисованы поверх строки: текст не
@@ -378,10 +383,8 @@ try {
   await sleep(80);
   const collapsed = await evaluate(view);
   check(
-    'свёрнутый проект прячет свои строки и показывает плюсик',
-    collapsed.projects[1].expanded === 'false' &&
-      collapsed.projects[1].toggle === '+' &&
-      collapsed.projects[1].rows.length === 0,
+    'свёрнутый проект прячет свои строки',
+    collapsed.projects[1].expanded === 'false' && collapsed.projects[1].rows.length === 0,
     collapsed.projects,
   );
   check(
@@ -395,35 +398,61 @@ try {
   const stillCollapsed = await evaluate(view);
   check('свёрнутый проект остаётся свёрнутым', stillCollapsed.projects[1].expanded === 'false', stillCollapsed.projects);
 
-  // Закрепление: сессия из проекта уезжает наверх и видна даже в свёрнутом проекте.
+  // Закрепление в раскрытом проекте: строка остаётся на своём месте и только
+  // помечается кнопкой — наверху её нет, иначе она была бы в списке дважды.
   await evaluate(`(() => {
     const row = [...document.querySelectorAll('#sessions .session-row')]
       .find((r) => r.querySelector('.name').textContent === 'Спит');
     row.querySelector('.session-pin').click();
   })()`);
   await sleep(80);
-  const pinned = await evaluate(view);
-  check('закреплённая сессия стоит выше проектов', JSON.stringify(pinned.pinned) === JSON.stringify(['Спит']), pinned);
+  const pinnedInPlace = await evaluate(view);
+  const docsProject = pinnedInPlace.projects.find((p) => p.name === 'docs');
   check(
-    'закреп сохранён у агента',
-    await evaluate(`window.__state.pins.includes('claude:i')`),
+    'закреплённая сессия остаётся в своём проекте',
+    pinnedInPlace.pinned.length === 0 && docsProject.rows.includes('Спит') && docsProject.count === '3',
+    pinnedInPlace,
   );
+  check(
+    'кнопка закрепа помечает сессию',
+    await evaluate(`!!document.querySelector('#sessions .session-pin.on[aria-pressed="true"]')`),
+  );
+  check('закреп сохранён у агента', await evaluate(`window.__state.pins.includes('claude:i')`));
 
-  // «Спит» была закреплена, поэтому проект docs остался с двумя строками.
+  // Сворачиваем проект с закреплённой: теперь она поднимается наверх, чтобы
+  // не пропасть за плюсиком.
   await evaluate(`(() => {
     [...document.querySelectorAll('#sessions .project')]
       .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
   })()`);
   await sleep(80);
-  const bothCollapsed = await evaluate(view);
+  const lifted = await evaluate(view);
   check(
-    'в свёрнутых проектах закреплённая сессия всё равно видна',
-    bothCollapsed.projects.every((p) => p.rows.length === 0) &&
-      JSON.stringify(bothCollapsed.pinned) === JSON.stringify(['Спит']),
-    bothCollapsed,
+    'в свёрнутом проекте закреплённая уходит наверх',
+    lifted.projects.every((p) => p.rows.length === 0) &&
+      JSON.stringify(lifted.pinned) === JSON.stringify(['Спит']),
+    lifted,
+  );
+
+  // Раскрываем обратно: строка возвращается в проект, наверху её больше нет.
+  await evaluate(`(() => {
+    [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
+  })()`);
+  await sleep(80);
+  const back = await evaluate(view);
+  check(
+    'после раскрытия проекта строка возвращается на место',
+    back.pinned.length === 0 && back.projects.find((p) => p.name === 'docs').rows.includes('Спит'),
+    back,
   );
 
   // Сессия начинает ждать ответа — её свёрнутый проект раскрывается сам.
+  await evaluate(`(() => {
+    [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'docs').click();
+  })()`);
+  await sleep(80);
   const ask = churn.map((s) => ({ ...s }));
   ask[4].status = 'waiting';
   await sendList(ask);
@@ -440,12 +469,13 @@ try {
   const reloaded = await evaluate(view);
   check(
     'закреп и свёрнутый проект приходят после перезагрузки',
-    JSON.stringify(reloaded.pinned) === JSON.stringify(['Спит']) &&
+    reloaded.pinned.length === 0 &&
+      reloaded.projects.find((p) => p.name === 'docs').rows.includes('Спит') &&
       reloaded.projects.find((p) => p.name === 'api').expanded === 'false',
     reloaded,
   );
 
-  // Открепление возвращает сессию в проект.
+  // Открепление: строка пропадает и из проекта, и сверху.
   await evaluate(`(() => {
     const row = [...document.querySelectorAll('#sessions .session-row')]
       .find((r) => r.querySelector('.name').textContent === 'Спит');
@@ -453,7 +483,7 @@ try {
   })()`);
   await sleep(80);
   const unpinned = await evaluate(view);
-  check('после открепления сессия вернулась в свой проект', unpinned.pinned.length === 0, unpinned);
+  check('после открепления строка больше не поднимается наверх', unpinned.pinned.length === 0, unpinned);
   check(
     'закреп убран из хранилища агента',
     await evaluate(`window.__state.pins.length === 0`),
