@@ -217,7 +217,10 @@ function renderLimits(agent, session) {
   }
 }
 
-function setHint(text, isError) {
+// `isError` — подсказка красным. `opts.list: false` — не повторять её внизу
+// списка сессий: так приходят новости одного чата (доставка сообщения), а на
+// телефоне копия из списка читалась бы как сообщение о самом списке.
+function setHint(text, isError, opts) {
   const hint = $('hint');
   hint.textContent = text;
   hint.className = isError ? 'hint error' : 'hint';
@@ -225,7 +228,7 @@ function setHint(text, isError) {
   // сообщение о запуске новой сессии дублируем в список — иначе на экране списка
   // не видно ни «Запускаем…», ни ошибки.
   const listHint = $('hint-list');
-  listHint.textContent = text;
+  listHint.textContent = opts && opts.list === false ? '' : text;
   listHint.className = isError ? 'hint hint-list error' : 'hint hint-list';
   if (text) {
     hint.dataset.sticky = '1';

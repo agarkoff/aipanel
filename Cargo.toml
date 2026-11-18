@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/proto", "crates/server", "crates/agent"]
 
 [workspace.package]
-version = "17.10.0"
+version = "17.11.0"
 edition = "2021"
 
 [profile.release]

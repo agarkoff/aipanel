@@ -157,8 +157,10 @@ $('composer').addEventListener('submit', (e) => {
     if (tapped) startVoice();
     return;
   }
-  const ok = send({ t: 'send', id: String(++cmdSeq), agent: selected.agent, session: selected.session, text });
-  if (ok) {
+  const msg = { t: 'send', id: String(++cmdSeq), agent: selected.agent, session: selected.session, text };
+  if (send(msg)) {
+    // Ответ на отправку узнаём по id: он относится к этому чату, а не к списку.
+    sendIds.set(msg.id, commandKey(msg.agent, msg.session));
     rememberSent(text);
     $('text').value = '';
     resetHistoryNav();
@@ -173,6 +175,21 @@ $('composer').addEventListener('submit', (e) => {
     setHint('Нет соединения с сервером.', true);
   }
 });
+
+// Ответ агента на отправленное сообщение. Доставка — новость самого чата: если
+// он уже закрыт (человек ушёл в список сессий) или открыт другой, подсказку не
+// показываем — иначе на телефоне «Доставлено агенту.» висело бы внизу списка.
+function onSendResult(msg) {
+  const key = sendIds.get(msg.id);
+  sendIds.delete(msg.id);
+  if (msg.ok) {
+    if (key && selected && key === commandKey(selected.agent, selected.session)) {
+      setHint('Доставлено агенту.', false, { list: false });
+    }
+    return;
+  }
+  setHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
+}
 
 // Поле ввода растёт вместе с текстом, до 40% высоты экрана.
 function autoGrow() {

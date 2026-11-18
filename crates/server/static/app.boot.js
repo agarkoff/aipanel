@@ -194,8 +194,12 @@ function onMessage(msg) {
     else if (voiceWait && msg.id === voiceWait.id) {
       endVoiceWait(`Голосовой ввод: ${msg.error || 'агент не ответил'}`, true);
     }
-    else if (!onDirsError(msg.id, msg.error))
-      setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
+    else if (sendIds.has(msg.id)) onSendResult(msg);
+    // Остальные ответы никто не ждёт: так приходит тихая подписка на push,
+    // которую панель повторяет при каждом запуске. Подсказку на них не
+    // показываем — раньше здесь стояло «Доставлено агенту.», и на телефоне
+    // оно всплывало внизу списка сессий при старте.
+    else onDirsError(msg.id, msg.error);
   } else if (msg.t === 'transcript') {
     onTranscript(msg);
   } else if (msg.t === 'screen') {

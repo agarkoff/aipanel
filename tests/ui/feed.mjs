@@ -127,6 +127,9 @@ const stub = `
   const claudeModels = ${JSON.stringify(claudeModels)};
   const dirs = ${JSON.stringify(dirs)};
   window.__sent = [];
+  // Отвечать ли на «send» результатом агента: доставку проверяем отдельно,
+  // остальным проверкам лишняя подсказка не нужна.
+  window.__sendReply = false;
   window.__subWatched = [];
   window.__screens = [];  window.__screenShots = [];
   window.__screensError = '';
@@ -195,6 +198,7 @@ const stub = `
         window.__subWatched.push(msg);
       } else if (msg.t === 'send') {
         window.__sent.push(msg);
+        if (window.__sendReply) setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: true }), 0);
       } else if (msg.t === 'set_model') {
         window.__setModels.push(msg);
         setTimeout(() => this.emit({ t: 'result', id: msg.id, ok: true }), 0);
@@ -1099,12 +1103,40 @@ try {
   check('выбор из списка не отправляет сообщение', sentBefore === 0, sentBefore);
 
   // Enter без выбранного стрелками пункта — обычная отправка набранного.
+  await evaluate(`window.__sendReply = true`);
   await typeSlash('/clear');
   await sleep(100);
   await press('Enter');
   await sleep(150);
   const sentText = await evaluate(`window.__sent.map((m) => m.text)`);
   check('Enter без выбора отправляет набранное', sentText.join('|') === '/clear', sentText);
+
+  // Ответ на отправку — подсказка самого чата: в копии для списка сессий её
+  // нет, иначе на телефоне «Доставлено агенту.» висело бы внизу списка.
+  const delivered = await evaluate(`(async () => {
+    await new Promise((r) => setTimeout(r, 50));
+    window.__sendReply = false;
+    return {
+      hint: document.getElementById('hint').textContent,
+      list: document.getElementById('hint-list').textContent,
+      listShown: getComputedStyle(document.getElementById('hint-list')).display !== 'none',
+    };
+  })()`);
+  check('доставка сообщения видна в чате', delivered.hint === 'Доставлено агенту.', delivered);
+  check('в списке сессий доставки сообщения нет', delivered.list === '' && !delivered.listShown, delivered);
+
+  // Ответ, которого никто не ждёт (так приходит тихая подписка на push при
+  // запуске панели), тоже не должен превращаться в подсказку.
+  const stranger = await evaluate(`(() => {
+    const before = document.getElementById('hint').textContent;
+    window.__sock.emit({ t: 'result', id: 'no-one-waits', ok: true });
+    return {
+      before,
+      after: document.getElementById('hint').textContent,
+      list: document.getElementById('hint-list').textContent,
+    };
+  })()`);
+  check('ответ без ожидающего его не даёт подсказки', stranger.after === stranger.before && stranger.list === '', stranger);
 
   // Список относится только к началу сообщения: дальше «/» — обычный текст.
   await typeSlash('путь /init');
