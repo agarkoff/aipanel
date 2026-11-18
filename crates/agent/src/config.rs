@@ -14,6 +14,9 @@ pub struct Config {
     /// Профиль Windows Terminal (имя или guid) для окон, которые открывает агент.
     /// Пусто — профиль по умолчанию из настроек Windows Terminal.
     pub terminal_profile: String,
+    /// Куда открывать окно сессии: `tab` — вкладкой в одном окне агента Windows Terminal,
+    /// `window` — отдельным окном на каждую сессию.
+    pub terminal_window: String,
     pub claude: ClaudeCfg,
     pub opencode: OpenCodeCfg,
     pub voice: VoiceCfg,
@@ -81,6 +84,7 @@ impl Default for Config {
                 .or_else(|_| std::env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "agent".into()),
             terminal_profile: String::new(),
+            terminal_window: "tab".into(),
             claude: ClaudeCfg::default(),
             opencode: OpenCodeCfg::default(),
             voice: VoiceCfg::default(),
@@ -186,6 +190,43 @@ impl Config {
         if !(cfg.server.starts_with("ws://") || cfg.server.starts_with("wss://")) {
             return Err("server must start with ws:// or wss://".into());
         }
+        cfg.terminal_window = terminal_window(&cfg.terminal_window)?.to_owned();
         Ok(cfg)
+    }
+
+    /// Открывать каждую сессию отдельным окном, а не вкладкой в общем окне агента.
+    pub fn terminal_new_window(&self) -> bool {
+        self.terminal_window == "window"
+    }
+}
+
+/// Приводит `terminal_window` к одному из двух значений; опечатка в конфиге
+/// должна быть видна сразу, а не превращаться молча в значение по умолчанию.
+fn terminal_window(value: &str) -> Result<&'static str, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "tab" => Ok("tab"),
+        "window" | "new" => Ok("window"),
+        other => Err(format!("terminal_window: ожидается \"tab\" или \"window\", получено \"{other}\"")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_window_values() {
+        assert_eq!(terminal_window("").unwrap(), "tab");
+        assert_eq!(terminal_window(" Tab ").unwrap(), "tab");
+        assert_eq!(terminal_window("window").unwrap(), "window");
+        assert_eq!(terminal_window("NEW").unwrap(), "window");
+        assert!(terminal_window("tabs").is_err());
+    }
+
+    #[test]
+    fn defaults_to_one_window_with_tabs() {
+        let cfg = Config::default();
+        assert_eq!(cfg.terminal_window, "tab");
+        assert!(!cfg.terminal_new_window());
     }
 }

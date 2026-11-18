@@ -22,6 +22,9 @@ mod imp {
     };
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// Имя окна Windows Terminal, куда открываются сессии вкладками. Отдельное имя,
+    /// а не «последнее окно»: иначе вкладка легла бы в терминал, где человек работает.
+    const TAB_WINDOW: &str = "aipanel";
     const VK_RETURN: u16 = 0x0D;
     const VK_ESCAPE: u16 = 0x1B;
     const VK_DOWN: u16 = 0x28;
@@ -111,8 +114,15 @@ mod imp {
 
     static PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+    /// Открывать каждую сессию отдельным окном, а не вкладкой в общем окне агента.
+    static NEW_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     pub fn set_terminal_profile(profile: &str) {
         let _ = PROFILE.set(profile.trim().to_owned());
+    }
+
+    pub fn set_terminal_window(new_window: bool) {
+        NEW_WINDOW.store(new_window, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Профиль по умолчанию из настроек Windows Terminal (guid или имя).
@@ -162,8 +172,9 @@ mod imp {
         }
     }
 
-    /// Запускает программу в новом окне Windows Terminal (`wt.exe`), а если его нет — в
-    /// отдельном окне обычной консоли. Возвращает pid запущенного процесса.
+    /// Запускает программу в Windows Terminal (`wt.exe`) — вкладкой в окне агента или,
+    /// если так настроено, в новом окне; без `wt.exe` — в отдельном окне обычной консоли.
+    /// Возвращает pid запущенного процесса.
     pub fn spawn_window(program: &str, args: &[String], cwd: &str) -> Result<u32, String> {
         use windows_sys::Win32::System::Threading::CREATE_NEW_CONSOLE;
         // Windows Terminal разбирает `;` как разделитель своих команд, а `\;` передаёт
@@ -171,7 +182,14 @@ mod imp {
         // Кавычки экранируются дважды: wt собирает командную строку программы заново и
         // не возвращает им обратные слеши, из-за чего текст обрывался на первой кавычке.
         let escape = |s: &str| s.replace(';', "\\;").replace('"', "\\\"");
-        let mut wt = String::from("wt.exe -w new ");
+        // Сессии открываются вкладками в одном окне (`-w aipanel`), чтобы каждое нажатие
+        // «Новая сессия» не добавляло окно на панель задач. Окно появляется само при первой
+        // сессии; если его закрыть, следующая снова его откроет.
+        let mut wt = if NEW_WINDOW.load(std::sync::atomic::Ordering::Relaxed) {
+            String::from("wt.exe -w new ")
+        } else {
+            format!("wt.exe -w {TAB_WINDOW} ")
+        };
         // Без профиля wt берёт общие настройки (чёрный фон), а не оформление вашего профиля.
         let configured = PROFILE.get().map(String::as_str).filter(|p| !p.is_empty());
         if let Some(profile) = configured.map(str::to_owned).or_else(default_wt_profile) {
@@ -415,6 +433,8 @@ mod imp {
     }
 
     pub fn set_terminal_profile(_profile: &str) {}
+
+    pub fn set_terminal_window(_new_window: bool) {}
 
     pub fn detach(_cmd: &mut std::process::Command) {}
 
