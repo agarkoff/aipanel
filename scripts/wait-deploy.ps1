@@ -15,8 +15,9 @@
 Скрипт только читает: ничего не коммитит, не пушит и не пересобирает.
 
 .PARAMETER Url
-Адрес панели. По умолчанию боевой; локальную проверку можно делать ключом
-`-Url http://127.0.0.1:18080`.
+Адрес панели, обязательный: своего адреса в репозитории нет. Адрес этой машины —
+в `.local/infra.md`; локальную проверку можно делать ключом
+`-Url http://127.0.0.1:8080`.
 
 .PARAMETER TimeoutSec
 Сколько ждать сборку. По умолчанию 1200 секунд (20 минут), как в CLAUDE.md.
@@ -35,17 +36,17 @@
 Показать, что и с чем будет сравниваться, и выйти.
 
 .EXAMPLE
-pwsh scripts/wait-deploy.ps1
+pwsh scripts/wait-deploy.ps1 -Url https://panel.example.com
 
 .EXAMPLE
-pwsh scripts/wait-deploy.ps1 -DryRun
+pwsh scripts/wait-deploy.ps1 -Url https://panel.example.com -DryRun
 
 .EXAMPLE
-pwsh scripts/wait-deploy.ps1 -File /,/app.voice.js -TimeoutSec 300
+pwsh scripts/wait-deploy.ps1 -Url https://panel.example.com -File /,/app.voice.js -TimeoutSec 300
 #>
 [CmdletBinding()]
 param(
-    [string]$Url = 'https://panel.example.com',
+    [string]$Url = '',
     [int]$TimeoutSec = 1200,
     [int]$EverySec = 45,
     [string[]]$File = @(),
@@ -54,6 +55,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Url) {
+    throw 'Укажите адрес панели: -Url https://… — адрес этой машины лежит в .local/infra.md'
+}
 $repo = Split-Path -Parent $PSScriptRoot
 $rev = 'origin/master'
 
@@ -170,9 +174,8 @@ while ($true) {
         Write-Host ("за {0} минут не собралось. Не обновились:" -f [int]($TimeoutSec / 60))
         foreach ($path in $stale) { Write-Host "  $path" }
         Write-Host ""
-        Write-Host "Скорее всего, упала сборка, а не «ещё собирается». Смотреть статус и логи:"
-        Write-Host "  <хостинг> repository list --project <проект>"
-        Write-Host "  <хостинг> container logs <контейнер> --tail 200"
+        Write-Host "Скорее всего, упала сборка, а не «ещё собирается». Статус сборки и логи"
+        Write-Host "контейнера — в панели хостинга; адрес и проект этой машины в .local/infra.md."
         Remove-Item -Recurse -Force $live
         exit 1
     }

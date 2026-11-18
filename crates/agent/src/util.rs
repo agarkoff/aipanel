@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn names() {
-        assert_eq!(basename("D:\\Projects\\demo"), "AiPanel");
+        assert_eq!(basename("D:\\Projects\\demo"), "demo");
         assert_eq!(basename("/home/u/proj/"), "proj");
         assert_eq!(truncate("привет", 3).chars().take(3).collect::<String>(), "при");
         assert_eq!(truncate("abc", 3), "abc");
