@@ -28,6 +28,9 @@ use crate::{
 };
 
 pub(crate) const MAX_SESSIONS_PER_AGENT: usize = 500;
+/// Предел длины распознанного текста: диктовка в поле ввода не бывает длиннее,
+/// а разросшийся ответ агента не должен занимать сообщение WebSocket целиком.
+pub(crate) const MAX_TRANSCRIPT: usize = 20_000;
 // ---------------------------------------------------------------- агент
 
 pub(crate) async fn agent_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -429,6 +432,25 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                 },
             };
             let _ = wait.tx.send(result);
+        }
+        AgentMsg::Transcript { id, text, error } => {
+            // Текст — только тому браузеру, который попросил распознать, и только
+            // от того агента, которому запись отправлена.
+            let allowed = inner
+                .pending
+                .get(&id)
+                .is_some_and(|p| p.owner == owner && p.agent == agent);
+            if !allowed {
+                return None;
+            }
+            if let Some(p) = inner.pending.remove(&id) {
+                if let Some(b) = inner.browsers.get(&p.browser) {
+                    let text = truncate(text, MAX_TRANSCRIPT);
+                    let _ = b.tx.try_send(
+                        json!({ "t": "transcript", "id": p.id, "text": text, "error": error }).to_string(),
+                    );
+                }
+            }
         }
         AgentMsg::Screen { id, index, count, label, width, height, data } => {
             // Снимок идёт тому браузеру, который его попросил, и только от того

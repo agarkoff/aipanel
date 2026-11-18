@@ -1007,4 +1007,41 @@ mod tests {
         );
         assert!(rx.try_recv().unwrap().is_err(), "пропущен не-картиночный тип");
     }
+
+    /// Распознанный текст — ответ на команду одного браузера: другому агенту и
+    /// другому браузеру он достаться не должен, иначе диктовка одного человека
+    /// оказалась бы в поле ввода другого.
+    #[test]
+    fn transcript_reaches_only_the_browser_that_asked() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(1, BrowserEntry { tx, owner: "alice".into(), watching: None, sub: None });
+        inner.pending.insert(
+            "srv:7".into(),
+            Pending { browser: 1, id: "v".into(), owner: "alice".into(), agent: "pc".into() },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        // Тот же владелец, но не та машина: текст не пересылается.
+        on_agent_msg(
+            &app,
+            "alice",
+            "laptop",
+            AgentMsg::Transcript { id: "srv:7".into(), text: "привет".into(), error: None },
+        );
+        assert!(rx.try_recv().is_err(), "текст от другого агента не пересылается");
+        assert_eq!(app.lock().pending.len(), 1, "ответ другого агента не снимает ожидание");
+
+        on_agent_msg(
+            &app,
+            "alice",
+            "pc",
+            AgentMsg::Transcript { id: "srv:7".into(), text: "запусти карго тест".into(), error: None },
+        );
+        let sent = rx.try_recv().unwrap();
+        assert!(sent.contains("\"t\":\"transcript\""), "{sent}");
+        assert!(sent.contains("\"id\":\"v\""), "{sent}");
+        assert!(sent.contains("запусти карго тест"), "{sent}");
+        assert!(app.lock().pending.is_empty(), "ожидание снято ответом агента");
+    }
 }

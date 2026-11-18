@@ -1075,6 +1075,19 @@ input, textarea, select {
   background: var(--panel);
   align-items: flex-end;
 }
+/* Кнопка у поля одна на всё, как в Telegram: пустое поле показывает микрофон,
+   набранный текст — отправку, идёт запись — остановку. Значок у всех состояний
+   одного размера, поэтому кнопка не прыгает при переключении. */
+.composer .send { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.composer .send .ico { display: none; flex: none; }
+.composer .send .ico-send { display: block; }
+.composer .send.voice .ico-send { display: none; }
+.composer .send.voice .ico-mic { display: block; }
+.composer .send.recording { background: var(--wait); border-color: var(--wait); }
+.composer .send.recording .ico,
+.composer .send.recording .ico-send,
+.composer .send.recording .ico-mic { display: none; }
+.composer .send.recording .ico-stop { display: block; }
 .composer textarea { resize: vertical; max-height: 40vh; }
 .hint { margin: 0; padding: 0 16px 8px; background: var(--panel); color: var(--muted); font-size: 12px; min-height: 0; }
 .hint.error { color: var(--wait); }

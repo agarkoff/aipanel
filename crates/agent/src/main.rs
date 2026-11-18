@@ -19,6 +19,7 @@ mod screen;
 mod status;
 mod tasks;
 mod util;
+mod voice;
 
 use std::{
     collections::HashMap,
@@ -69,6 +70,8 @@ struct Agent {
     drafts: Mutex<drafts::Store>,
     /// Подписки устройств на push-уведомления: файл `push.json` в каталоге агента.
     push: Mutex<push::Store>,
+    /// Голосовой ввод: распознавание записи на этой машине.
+    voice: voice::Voice,
     // Состояние для команды `status` (см. status.rs).
     started: i64,
     connected_since: AtomicI64,
@@ -395,6 +398,22 @@ impl Agent {
                         }
                     };
                     let _ = out.send(msg);
+                });
+            }
+            ServerMsg::Transcribe { id, audio } => {
+                // Распознавание занимает секунды (а первый раз — ещё и скачивание
+                // модели), поэтому уходит в отдельную задачу: лента и остальные
+                // команды панели продолжают работать.
+                let me = Arc::clone(self);
+                tokio::spawn(async move {
+                    let msg = match me.voice.transcribe(&audio).await {
+                        Ok(text) => AgentMsg::Transcript { id, text, error: None },
+                        Err(e) => {
+                            util::log(&format!("voice: {e}"));
+                            AgentMsg::Transcript { id, text: String::new(), error: Some(e) }
+                        }
+                    };
+                    let _ = me.out.send(msg);
                 });
             }
             ServerMsg::Screens { id } => {
@@ -738,6 +757,7 @@ async fn run(cfg: Config) {
             Box::new(Arc::new(Claude::new(cfg.claude.clone(), Arc::clone(&rescan)))) as Box<dyn Backend>,
             Box::new(Arc::new(OpenCode::new(cfg.opencode.clone()))) as Box<dyn Backend>,
         ],
+        voice: voice::Voice::new(&cfg.voice),
         cfg,
         out,
         rescan,

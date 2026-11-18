@@ -3,7 +3,9 @@
 
 use std::{sync::Arc, time::Instant};
 
-use aipanel_proto::{PushSub, ServerMsg, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PUSH_SUBS};
+use aipanel_proto::{
+    PushSub, ServerMsg, MAX_AUDIO_BYTES, MAX_DRAFT_TEXT, MAX_FAVORITE_TEXT, MAX_ITEM_ID, MAX_PUSH_SUBS,
+};
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::State,
@@ -120,6 +122,9 @@ pub(crate) enum BrowserMsg {
     /// Сохранить недописанный текст сессии: он живёт у агента, поэтому черновик
     /// один на все устройства. Пустой `text` — черновика нет.
     Draft { agent: String, session: String, text: String },
+    /// Распознать голосовую запись `audio` (base64). Распознаёт агент на машине,
+    /// где идёт сессия: сервер только передаёт запись, ничего не считая.
+    Transcribe { id: String, agent: String, audio: String },
 }
 
 pub(crate) async fn browser_ws(State(app): State<Arc<App>>, headers: HeaderMap, ws: WebSocketUpgrade) -> Response {
@@ -480,6 +485,20 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
                 cmd.clone(),
                 ServerMsg::PromptReply { id: cmd, session, prompt, kind, decision, answer, message, cancel },
             );
+        }
+        BrowserMsg::Transcribe { id, agent, audio } => {
+            // В base64 запись вырастает на треть: больше предела — это уже не
+            // диктовка, а что-то, чего агент не ждёт.
+            if audio.len() > MAX_AUDIO_BYTES * 4 / 3 + 8 {
+                reply(&inner, browser, &id, "запись слишком длинная");
+                return;
+            }
+            if audio.is_empty() {
+                reply(&inner, browser, &id, "пустая запись");
+                return;
+            }
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::Transcribe { id: cmd, audio });
         }
         BrowserMsg::PushSubscribe { id, sub } => {
             let Some(owner) = inner.browsers.get(&browser).map(|b| b.owner.clone()) else {

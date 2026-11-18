@@ -190,8 +190,13 @@ function onMessage(msg) {
     else if (modelSet && msg.id === modelSet.id) onModelResult(msg);
     else if (promptReplyIds.has(msg.id)) onPromptResult(msg);
     else if (shot && msg.id === shot.id) shotError(msg.error || 'агент не ответил');
+    else if (voiceWait && msg.id === voiceWait.id) {
+      endVoiceWait(`Голосовой ввод: ${msg.error || 'агент не ответил'}`, true);
+    }
     else if (!onDirsError(msg.id, msg.error))
       setHint(msg.ok ? 'Доставлено агенту.' : `Ошибка: ${msg.error || 'неизвестная'}`, !msg.ok);
+  } else if (msg.t === 'transcript') {
+    onTranscript(msg);
   } else if (msg.t === 'screen') {
     onScreen(msg);
   } else if (msg.t === 'screens') {

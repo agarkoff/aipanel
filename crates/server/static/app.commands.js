@@ -27,6 +27,7 @@ const slash = Suggest.attach($('text'), {
     $('text').value = '';
     resetHistoryNav();
     autoGrow();
+    updateSendButton();
     openModels();
     return false;
   },

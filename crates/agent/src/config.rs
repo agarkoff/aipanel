@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::Deserialize;
 
@@ -16,6 +16,7 @@ pub struct Config {
     pub terminal_profile: String,
     pub claude: ClaudeCfg,
     pub opencode: OpenCodeCfg,
+    pub voice: VoiceCfg,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -55,6 +56,22 @@ pub struct OpenCodeCfg {
     pub password: Option<String>,
 }
 
+/// Голосовой ввод: запись из панели распознаётся на этой машине (GigaAM v3).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VoiceCfg {
+    pub enabled: bool,
+    /// Голова модели: `e2e_rnnt` — с пунктуацией, заглавными и числами,
+    /// `rnnt` — без них, но немного точнее на коротких фразах.
+    pub model: String,
+    /// Слова, к которым декодер смещается: латиница, имена программ и команд.
+    /// Модель обучена на русском и без подсказки пишет `cargo` как «карго».
+    pub terms: Vec<String>,
+    /// Замены в готовом тексте: что модель пишет и что должно стоять вместо
+    /// (`[voice.fix]` с парами `"карго" = "cargo"`). Регистр не важен.
+    pub fix: BTreeMap<String, String>,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -66,6 +83,7 @@ impl Default for Config {
             terminal_profile: String::new(),
             claude: ClaudeCfg::default(),
             opencode: OpenCodeCfg::default(),
+            voice: VoiceCfg::default(),
         }
     }
 }
@@ -93,6 +111,41 @@ impl Default for OpenCodeCfg {
             max_sessions: 30,
             url: None,
             password: None,
+        }
+    }
+}
+
+impl Default for VoiceCfg {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            model: "e2e_rnnt".into(),
+            // Латиница и команды, с которыми чаще всего работают в панели:
+            // декодер смещается к ним, а не пишет их по-русски.
+            terms: [
+                "cargo", "clippy", "rust", "git", "GitHub", "GitLab", "commit", "branch", "merge", "push",
+                "worktree", "MR", "API", "WebSocket", "opencode", "Claude Code",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+            // Русские написания, которые модель выдаёт вместо английских слов:
+            // подсказки декодера их не исправляют, а замена в готовом тексте —
+            // исправляет. Список пополняется по своим ошибкам (`[voice.fix]`).
+            fix: [
+                ("карго", "cargo"),
+                ("клиппи", "clippy"),
+                ("мердж реквест", "merge request"),
+                ("мегреквест", "merge request"),
+                ("пул реквест", "pull request"),
+                ("ворктри", "worktree"),
+                ("гитлаб", "GitLab"),
+                ("гитхаб", "GitHub"),
+                ("опенкод", "opencode"),
+            ]
+            .iter()
+            .map(|(from, to)| ((*from).to_string(), (*to).to_string()))
+            .collect(),
         }
     }
 }

@@ -79,6 +79,7 @@ function onRemoteDraft(agent, session, text) {
   $('text').value = text;
   resetHistoryNav();
   autoGrow();
+  updateSendButton();
 }
 
 function loadDraft() {
@@ -86,6 +87,7 @@ function loadDraft() {
   area.value = selected ? drafts.get(historyKey()) || '' : '';
   resetHistoryNav();
   autoGrow();
+  updateSendButton();
 }
 
 // Отправленный запрос — в историю, пока он не пришёл в ленту. Имя не должно
@@ -135,12 +137,26 @@ function navigateHistory(step) {
   // Каретка в конец, чтобы сразу править запрос.
   area.setSelectionRange(area.value.length, area.value.length);
   autoGrow();
+  updateSendButton();
   return true;
 }
 $('composer').addEventListener('submit', (e) => {
   e.preventDefault();
+  // Кнопка у поля одна, как в Telegram: на пустом поле это микрофон. Микрофон
+  // включает только нажатие на саму кнопку — Enter в пустом поле ничего не
+  // делает, иначе запись начиналась бы случайно.
+  const tapped = voiceTap;
+  voiceTap = false;
+  if (voiceRec) {
+    stopVoice();
+    return;
+  }
   const text = $('text').value;
-  if (!selected || !text.trim()) return;
+  if (!selected) return;
+  if (!text.trim()) {
+    if (tapped) startVoice();
+    return;
+  }
   const ok = send({ t: 'send', id: String(++cmdSeq), agent: selected.agent, session: selected.session, text });
   if (ok) {
     rememberSent(text);
@@ -151,6 +167,7 @@ $('composer').addEventListener('submit', (e) => {
     saveDraft();
     flushDraft();
     autoGrow();
+    updateSendButton();
     setHint('Отправляется…');
   } else {
     setHint('Нет соединения с сервером.', true);

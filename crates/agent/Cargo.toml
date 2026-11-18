@@ -12,6 +12,11 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
+# Голосовой ввод: GigaAM v3 на ONNX Runtime, считает на CPU.
+# `quantize` выключен — он нужен только сборщику моделей и требует `protoc`,
+# которого на машинах с агентом нет; `async-pool` не нужен: движок работает
+# в отдельном потоке и берёт сессию блокирующим `checkout_blocking`.
+gigastt-core = { version = "2.22", default-features = false, features = ["net", "file-decode"] }
 
 [build-dependencies]
 winres = "0.1"

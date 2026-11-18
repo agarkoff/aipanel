@@ -421,6 +421,15 @@ pub enum AgentMsg {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Ответ на `Transcribe`: распознанный текст записи. `error` — почему
+    /// распознать не удалось (нет модели, не скачалась, битая запись).
+    Transcript {
+        id: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// Один экран машины агента на запрос `ServerMsg::Screens`. Снимков приходит
     /// столько, сколько экранов: каждый отдельным сообщением, чтобы не упереться
     /// в предел размера сообщения WebSocket.
@@ -467,6 +476,11 @@ pub const MAX_DRAFTS: usize = 200;
 /// Наибольший размер картинки, которую агент отдаёт по `ReadImage`. В base64 она
 /// вырастает на треть и должна поместиться в сообщение WebSocket (8 МБ).
 pub const MAX_IMAGE_BYTES: u64 = 5 << 20;
+
+/// Наибольшая длина записи для распознавания (`ServerMsg::Transcribe`). В base64
+/// она вырастает на треть, а сообщение от браузера сервер принимает размером до
+/// 1 МБ: при записи в Opus это минуты три речи, чего для диктовки хватает.
+pub const MAX_AUDIO_BYTES: usize = 600_000;
 
 /// Наибольший размер PNG одного экрана в `AgentMsg::Screen`. В base64 картинка
 /// вырастает на треть, и сообщение WebSocket (8 МБ) должно остаться целым:
@@ -879,6 +893,10 @@ pub enum ServerMsg {
     /// Прочитать картинку `path` с машины агента: путь из ленты сессии `session`,
     /// относительный считается от её каталога. Ответ — `AgentMsg::Image`.
     ReadImage { id: String, session: String, path: String },
+    /// Распознать запись `audio` (base64, формат браузера: Opus в WebM/Ogg или
+    /// AAC в MP4). Распознаёт агент на своей машине, поэтому запись не уходит
+    /// никуда, кроме неё. Ответ — `AgentMsg::Transcript`.
+    Transcribe { id: String, audio: String },
     /// Прислать модели, доступные сессии opencode `session`.
     Models { session: String },
     /// Прислать модели для запуска новой сессии `tool` в каталоге `cwd`.
