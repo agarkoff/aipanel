@@ -7,8 +7,8 @@ use std::{
 };
 
 use aipanel_proto::{
-    AgentMsg, PushSub, ServerMsg, IMAGE_MIMES, MAX_CLOSED_PROJECTS, MAX_FAVORITES, MAX_IMAGE_BYTES, MAX_PINS,
-    MAX_PUSH_SUBS, MAX_SCREENS, MAX_SCREEN_BYTES,
+    AgentMsg, PushSub, ServerMsg, IMAGE_MIMES, MAX_CLOSED_PROJECTS, MAX_FAVORITES, MAX_IMAGE_BYTES,
+    MAX_MODEL_RECENTS, MAX_PINS, MAX_PUSH_SUBS, MAX_SCREENS, MAX_SCREEN_BYTES,
 };
 use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -406,8 +406,9 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                 }
             }
         }
-        AgentMsg::ToolModels { id, mut models } => {
+        AgentMsg::ToolModels { id, mut models, mut recents } => {
             models.truncate(MAX_MODELS);
+            recents.truncate(MAX_MODEL_RECENTS);
             // Ответ на конкретный запрос браузера, а не рассылка наблюдателям:
             // окно «Новая сессия» не связано ни с одной сессией.
             let allowed = inner
@@ -419,7 +420,7 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                     if let Some(b) = inner.browsers.get(&p.browser) {
                         let _ = b
                             .tx
-                            .try_send(json!({ "t": "tool_models", "id": p.id, "models": models }).to_string());
+                            .try_send(json!({ "t": "tool_models", "id": p.id, "models": models, "recents": recents }).to_string());
                     }
                 }
             }

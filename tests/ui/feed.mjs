@@ -137,6 +137,8 @@ const stub = `
   window.__olderPages = [];
   window.__setModels = [];
   window.__starts = [];
+  // Недавние модели окна запуска: их помнит агент и присылает вместе со списком.
+  window.__launchRecents = {};
   // Избранное: агент хранит список и присылает его целиком на каждый запрос
   // и после каждого изменения.
   window.__favs = [];
@@ -179,7 +181,8 @@ const stub = `
         setTimeout(() => this.emit({ t: 'models', agent: msg.agent, session: msg.session, models }), 0);
       } else if (msg.t === 'tool_models') {
         const list = msg.tool === 'claude' ? claudeModels : models;
-        setTimeout(() => this.emit({ t: 'tool_models', id: msg.id, models: list }), 0);
+        const recents = (window.__launchRecents && window.__launchRecents[msg.tool]) || [];
+        setTimeout(() => this.emit({ t: 'tool_models', id: msg.id, models: list, recents }), 0);
       } else if (msg.t === 'dirs') {
         window.__dirs.push(msg);
         const error = msg.path === 'D:\\\\' ? 'нет доступа: D:\\\\' : null;
@@ -1284,8 +1287,8 @@ try {
 
   // ------------------------------------------------------------ новая сессия
   // В окне запуска модель выбирается списком для выбранного инструмента.
-  // Недавние модели окно запуска показывает первыми: их запоминает браузер.
-  await evaluate(`localStorage.setItem('aipanel.model-recents:opencode', JSON.stringify(['openai/gpt-6']))`);
+  // Недавние модели окно запуска показывает первыми: их помнит агент.
+  await evaluate(`window.__launchRecents = { opencode: ['openai/gpt-6'] }`);
 
   await evaluate(`document.getElementById('new-session').click()`);
   await waitFor(`document.getElementById('launch').open`);

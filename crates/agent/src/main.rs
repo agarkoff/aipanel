@@ -12,6 +12,7 @@ mod liststate;
 mod handoff;
 mod image;
 mod install;
+mod launch;
 mod opencode;
 mod platform;
 mod push;
@@ -70,6 +71,9 @@ struct Agent {
     /// Недописанные сообщения сессий: файл `drafts.json` в каталоге агента.
     /// Хранятся у агента, поэтому черновик общий для всех устройств.
     drafts: Mutex<drafts::Store>,
+    /// Недавние модели окна «Новая сессия»: файл `launch.json` в каталоге
+    /// агента. Тоже общие для всех устройств.
+    launch: Mutex<launch::Store>,
     /// Закреплённые сессии и свёрнутые проекты: файл `list.json` в каталоге
     /// агента. Тоже общие для всех устройств.
     liststate: Mutex<liststate::Store>,
@@ -345,6 +349,16 @@ impl Agent {
                         Ok((backend, sid)) => backend.set_model(sid, &provider, &model).await,
                         Err(e) => Err(e),
                     };
+                    // Модель только что использовали — она должна подняться в
+                    // подсказке окна запуска. Инструмент виден в ключе сессии.
+                    if result.is_ok() {
+                        let tool = session.split(':').next().unwrap_or("");
+                        let value =
+                            if provider.is_empty() { model.clone() } else { format!("{provider}/{model}") };
+                        if let Err(e) = me.launch.lock().unwrap().note(tool, &value) {
+                            util::log(&format!("launch: {e}"));
+                        }
+                    }
                     me.finish(id, result.map(|_| None));
                 });
             }
@@ -365,7 +379,10 @@ impl Agent {
                         Ok(backend) => backend.launch_models(&cwd).await,
                         Err(_) => Vec::new(),
                     };
-                    let _ = me.out.send(AgentMsg::ToolModels { id, models });
+                    // Недавние берём из своего каталога: подсказка одна на все
+                    // устройства, а не своя у каждого браузера.
+                    let recents = me.launch.lock().unwrap().recents(&tool);
+                    let _ = me.out.send(AgentMsg::ToolModels { id, models, recents });
                 });
             }
             ServerMsg::Dirs { id, path } => {
@@ -395,6 +412,13 @@ impl Agent {
                             Err(e) => Err(e),
                         },
                     };
+                    // Успешный запуск — это и есть «такой моделью запускали»:
+                    // подсказка на любом устройстве поднимет её к началу.
+                    if result.is_ok() {
+                        if let Err(e) = me.launch.lock().unwrap().note(&tool, &model) {
+                            util::log(&format!("launch: {e}"));
+                        }
+                    }
                     me.finish(id, result);
                 });
             }
@@ -956,6 +980,7 @@ async fn run(cfg: Config) {
         cwds: Mutex::new(HashMap::new()),
         favorites: Mutex::new(favorites::Store::open()),
         drafts: Mutex::new(drafts::Store::open()),
+        launch: Mutex::new(launch::Store::open()),
         liststate: Mutex::new(liststate::Store::open()),
         push: Mutex::new(push::Store::open()),
         scroll: Mutex::new(scroll::Store::open()),

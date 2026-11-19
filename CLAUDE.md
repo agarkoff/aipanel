@@ -7,6 +7,7 @@
 ```sh
 cargo test --workspace
 pwsh scripts/check-private.ps1                # приватные адреса и пути — в .local, не в репозитории
+pwsh scripts/check-storage.ps1                # всегда: хранилища в браузере быть не должно
 node tests/ui/feed.mjs                        # если менялась crates/server/static
 node tests/ui/rename.mjs                      # если менялось переименование сессий
 node tests/ui/sessions.mjs                    # если менялся список сессий

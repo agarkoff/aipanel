@@ -27,28 +27,12 @@ const launchModelSuggest = Suggest.attach($('launch-model'), {
   emptyOnQueryless: true,
 });
 
-// Недавние модели: свежие сверху, отдельно для каждого инструмента. Хранятся в
-// браузере, потому что список opencode зависит от машины и провайдеров, а у
-// Claude Code это алиасы CLI — оба набора нужны при следующем запуске.
-const MODEL_RECENTS = 5;
-const modelRecentsKey = (tool) => `aipanel.model-recents:${tool}`;
-
-function modelRecents(tool) {
-  try {
-    const list = JSON.parse(localStorage.getItem(modelRecentsKey(tool)) || '[]');
-    return Array.isArray(list) ? list.filter((v) => typeof v === 'string' && v) : [];
-  } catch {
-    return [];
-  }
-}
-
-function rememberModel(tool, value) {
-  value = String(value || '').trim();
-  if (!value) return;
-  const list = [value, ...modelRecents(tool).filter((v) => v !== value)].slice(0, MODEL_RECENTS);
-  try {
-    localStorage.setItem(modelRecentsKey(tool), JSON.stringify(list));
-  } catch {}
+// Недавние модели: свежие сверху, отдельно для каждого инструмента и машины.
+// Их помнит агент (`launch.json`) и присылает вместе со списком моделей, поэтому
+// на телефоне подсказка та же, что на компьютере. В браузере не храним: см.
+// AGENTS.md, «Состояние интерфейса: память агента, а не браузера».
+function modelRecents() {
+  return launchModelRecents.get(launchModelKey()) || [];
 }
 
 function launchModelKey() {
@@ -63,7 +47,7 @@ function launchModelValue(tool, m) {
 function launchModelItems() {
   const tool = $('launch-tool').value;
   const list = launchModelCache.get(launchModelKey()) || [];
-  const recents = modelRecents(tool);
+  const recents = modelRecents();
   return list.map((m) => {
     const value = launchModelValue(tool, m);
     return {
@@ -275,7 +259,6 @@ function onLaunchResult(msg) {
     launchHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
     return;
   }
-  rememberModel(req.tool, req.model);
   $('launch').close();
   pendingLaunch = {
     agent: req.agent,

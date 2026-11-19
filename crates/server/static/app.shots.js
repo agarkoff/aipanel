@@ -14,8 +14,11 @@
 // приближает кадр.
 
 // Компьютер прошлого снимка: когда открытой сессии нет, а агентов несколько,
-// панель спрашивает, чей экран, и запоминает выбор.
-const SHOT_AGENT_KEY = 'aipanel.shot-agent';
+// панель спрашивает, чей экран, и запоминает выбор до перезагрузки страницы.
+// В браузере выбор не хранится (см. AGENTS.md, «Состояние интерфейса: память
+// агента, а не браузера»): это выбор на один заход, и постоянного места у него
+// нет — открытая сессия и так подсказывает компьютер.
+let shotAgentLast = '';
 // Старая версия агента команду не знает и молчит вовсе, поэтому ждём не вечно.
 const SHOT_TIMEOUT = 25000;
 // Сколько экранов принимаем: столько же, сколько пропускает сервер.
@@ -49,7 +52,7 @@ function openShots() {
 
 function askShotAgent(online) {
   const list = $('shot-agent-list');
-  const last = localStorage.getItem(SHOT_AGENT_KEY) || '';
+  const last = shotAgentLast;
   list.replaceChildren();
   // Прошлый выбор — первым: чаще всего снимают ту же машину.
   const sorted = [...online].sort((a, b) => (b.name === last) - (a.name === last));
@@ -80,7 +83,7 @@ function startShots(agent) {
     done: false,
     error: '',
   };
-  localStorage.setItem(SHOT_AGENT_KEY, agent);
+  shotAgentLast = agent;
   renderShot();
   if (!$('shot').open) $('shot').showModal();
   if (!send({ t: 'screens', id: shot.id, agent })) {

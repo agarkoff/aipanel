@@ -91,6 +91,7 @@ function connect() {
     sessionModels.clear();
     modelsAsked.clear();
     launchModelCache.clear();
+    launchModelRecents.clear();
     launchModelsRequest = null;
     if (selected) {
       send({ t: 'watch', agent: selected.agent, session: selected.session });
@@ -178,6 +179,8 @@ function onMessage(msg) {
     if (!req || msg.id !== req.id) return;
     launchModelsRequest = null;
     launchModelCache.set(req.key, Array.isArray(msg.models) ? msg.models : []);
+    // Недавние — тоже от агента: в подсказке они идут первыми.
+    launchModelRecents.set(req.key, Array.isArray(msg.recents) ? msg.recents : []);
     // Окно запуска открыто на этой же паре компьютер + инструмент.
     if ($('launch').open && launchModelKey() === req.key) launchModelSuggest.refresh();
   } else if (msg.t === 'dirs') {

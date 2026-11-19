@@ -176,7 +176,7 @@ function setSessionModel(m) {
     setModelsHint('Нет соединения с сервером.', true);
     return;
   }
-  modelSet = { id, label, value: `${m.provider}/${m.id}` };
+  modelSet = { id, label };
   setModelsHint(`Переключаем на ${label}…`);
   for (const b of $('models-list').querySelectorAll('.model')) b.disabled = true;
 }
@@ -189,8 +189,8 @@ function onModelResult(msg) {
     setModelsHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
     return;
   }
-  // Модель только что использовали — она должна быть вверху списка в окне запуска.
-  if (done) rememberModel('opencode', done.value);
+  // Модель использована — агент запомнил её в недавних (`launch.json`), так что
+  // в окне запуска она поднимется сама при следующем запросе подсказки.
   $('models').close();
   setHint(done && done.label ? `Модель: ${done.label}` : 'Модель переключена.');
 }
