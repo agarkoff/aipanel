@@ -188,7 +188,7 @@ Register-ScheduledTask -TaskName AiPanelAgent -Action $action -Trigger @($logon,
 
 Удаление: `Unregister-ScheduledTask -TaskName AiPanelAgent -Confirm:$false`. Остановить агента насовсем можно только вместе с задачей: иначе она запустит его снова не позже чем через 5 минут.
 
-Для opencode должен работать его фоновый сервис (`opencode service status`).
+Для opencode нужен его фоновый сервис (`opencode service status`). Если сервис не запущен, агент сам запустит его без окна (`opencode service start`), когда из панели создают сессию или отправляют сообщение; опросом сервис не оживает, а сервис по явному `url` из `agent.toml` агент не запускает.
 
 ### Плагин для окон opencode
 

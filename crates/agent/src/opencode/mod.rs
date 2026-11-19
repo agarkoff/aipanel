@@ -342,6 +342,51 @@ impl OpenCode {
         out
     }
 
+    /// Отвечает ли сервис opencode (в `service.json` может лежать адрес мёртвого сервиса).
+    async fn service_up(&self) -> bool {
+        self.get("/api/session/active").await.is_ok()
+    }
+
+    /// Поднимает фоновый сервис opencode, если он не запущен: `opencode service start`
+    /// без окна. Вызывается только по действию человека (новая сессия, сообщение),
+    /// а не опросом: остановленный намеренно сервис сам не оживает. Явный `url` в
+    /// `agent.toml` — чужой сервис, его не запускаем.
+    async fn ensure_service(&self) -> Result<(), String> {
+        if self.service_up().await {
+            return Ok(());
+        }
+        if self.cfg.url.is_some() {
+            return Err("сервис opencode по адресу из agent.toml не отвечает".into());
+        }
+        // Одновременные запросы ждут один запуск, а не стартуют сервис по нескольку раз.
+        static START: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _guard = START.lock().await;
+        if self.service_up().await {
+            return Ok(());
+        }
+        let bin = crate::util::resolve_exe(&self.cfg.bin);
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.args(["service", "start"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        crate::platform::no_window(&mut cmd);
+        match tokio::time::timeout(Duration::from_secs(30), cmd.status()).await {
+            Ok(Ok(s)) if s.success() => {}
+            Ok(Ok(s)) => return Err(format!("сервис opencode не запустился: {bin} service start вернул {s}")),
+            Ok(Err(e)) => return Err(format!("сервис opencode не запустился: {bin}: {e}")),
+            Err(_) => return Err("сервис opencode не запустился за 30 секунд".into()),
+        }
+        for _ in 0..20 {
+            if self.service_up().await {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        Err("сервис opencode запущен, но не отвечает".into())
+    }
+
     fn recently_launched(&self, id: &str) -> bool {
         let mut map = self.launched.lock().unwrap_or_else(|e| e.into_inner());
         map.retain(|_, t| t.elapsed() < LAUNCH_GUARD);
@@ -1006,6 +1051,7 @@ impl OpenCode {
         model: &str,
     ) -> Result<Option<String>, String> {
         crate::util::session_dir(cwd)?;
+        self.ensure_service().await?;
         if let Some(text) = prompt {
             // Ограничение командной строки нужно только окну: через API уходит сам текст.
             if cfg!(windows) && self.cfg.windows && text.encode_utf16().count() > crate::claude::MAX_ARG_UTF16 {
@@ -1144,6 +1190,7 @@ impl OpenCode {
     /// Отправляет сообщение. Возвращает элемент очереди, если opencode принял
     /// сообщение, но ещё не отдал его в ленту (сессия занята).
     pub async fn send(&self, id: &str, text: &str) -> Result<Option<Item>, String> {
+        self.ensure_service().await?;
         // Слэш-команду opencode выполняет не как текст сообщения, а отдельным
         // запросом: только он разворачивает шаблон команды. Имя сверяется со
         // списком команд, поэтому сообщение «/путь/к/файлу» остаётся сообщением.
