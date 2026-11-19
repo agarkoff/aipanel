@@ -23,6 +23,9 @@ pub(crate) fn router() -> Router<Arc<App>> {
         // Service worker для push-уведомлений: лежит в корне, чтобы его область была весь сайт.
         .route("/sw.js", get(|| async { asset("text/javascript; charset=utf-8", SW_JS) }))
         .route("/style.css", get(|| async { asset("text/css; charset=utf-8", STYLE_CSS) }))
+        // Release Notes: статический файл, который панель читает при
+        // открытии заметок (клик по имени «AiPanel»).
+        .route("/releases.md", get(|| async { asset("text/markdown; charset=utf-8", RELEASES_MD) }))
         .route("/icon.svg", get(|| async { asset("image/svg+xml", ICON_SVG) }))
         .route("/favicon.ico", get(|| async { asset_bytes("image/x-icon", FAVICON_ICO) }))
         .route("/apple-touch-icon.png", get(|| async { asset_bytes("image/png", APPLE_TOUCH_ICON) }))
@@ -49,6 +52,7 @@ pub(crate) const INDEX_HTML: &str = include_str!("../static/index.html");
 pub(crate) const SCRIPTS: &[(&str, &str)] = &[
     ("/app.core.js", include_str!("../static/app.core.js")),
     ("/app.boot.js", include_str!("../static/app.boot.js")),
+    ("/app.releases.js", include_str!("../static/app.releases.js")),
     ("/app.sessions.js", include_str!("../static/app.sessions.js")),
     ("/app.notify.js", include_str!("../static/app.notify.js")),
     ("/app.push.js", include_str!("../static/app.push.js")),
@@ -71,6 +75,7 @@ pub(crate) const HL_JS: &str = include_str!("../static/hl.js");
 pub(crate) const SUGGEST_JS: &str = include_str!("../static/suggest.js");
 pub(crate) const SW_JS: &str = include_str!("../static/sw.js");
 pub(crate) const STYLE_CSS: &str = include_str!("../static/style.css");
+pub(crate) const RELEASES_MD: &str = include_str!("../static/releases.md");
 pub(crate) const ICON_SVG: &str = include_str!("../static/icon.svg");
 pub(crate) const MANIFEST: &str = include_str!("../static/app.webmanifest");
 pub(crate) const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
@@ -105,6 +110,22 @@ pub(crate) fn asset_bytes(content_type: &'static str, body: &'static [u8]) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Заметки пишет модель, а тест следит, чтобы новый выпуск не забыли:
+    /// первый раздел файла должен быть текущей версией. Сверяется только
+    /// major.minor — так же, как версия показана в панели.
+    #[test]
+    fn release_notes_start_with_current_version() {
+        let short: String = env!("CARGO_PKG_VERSION").split('.').take(2).collect::<Vec<_>>().join(".");
+        let first = RELEASES_MD
+            .lines()
+            .find_map(|line| line.strip_prefix("## "))
+            .expect("в releases.md нет разделов");
+        assert!(
+            first.starts_with(&short),
+            "releases.md начинается с {first:?}, а выпускаемая версия — {short}"
+        );
+    }
 
     /// Значок строки состояния Android рисуется силуэтом по альфе: если у
     /// картинки пропадёт прозрачность (её перерисуют на непрозрачном фоне),

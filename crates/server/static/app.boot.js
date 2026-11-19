@@ -19,6 +19,8 @@ async function boot() {
   }
   // Панель открыли нажатием на уведомление: сессия — в адресе.
   takeOpenFromHash();
+  // Ссылка на заметки: открываем их сразу, вместо чата.
+  if (location.hash === NOTES_HASH) openNotes(true);
   start();
   initPush();
 }

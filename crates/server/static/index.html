@@ -28,7 +28,7 @@
       <button id="shots" class="logo-btn" type="button" title="Снимок экрана" aria-label="Снимок экрана">
         <img class="logo" src="/icon.svg" alt="" width="20" height="20">
       </button>
-      <strong>AiPanel</strong>
+      <button id="brand" class="brand" type="button" title="Release Notes" aria-label="Release Notes">AiPanel</button>
       <span id="conn" class="conn" title="Соединение с сервером"></span>
       <button id="new-session" class="new-session" type="button" title="Новая сессия" aria-label="Новая сессия">
         <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
@@ -52,6 +52,16 @@
   </aside>
 
   <main class="main">
+    <section id="notes" class="notes" hidden>
+      <header class="top notes-head">
+        <button id="notes-back" class="link back notes-back" type="button" aria-label="К списку сессий" title="К списку сессий">←</button>
+        <div class="titles">
+          <div class="title-line"><div class="title">Release Notes</div></div>
+          <div class="subtitle"><span>Что нового в AiPanel</span></div>
+        </div>
+      </header>
+      <div id="notes-body" class="notes-body md"></div>
+    </section>
     <header class="top">
       <button id="back" class="link back" type="button" aria-label="К списку сессий">←</button>
       <div class="titles">
@@ -280,6 +290,7 @@
      объявления предыдущих и дополняет общее состояние из app.core.js. -->
 <script src="/app.core.js"></script>
 <script src="/app.boot.js"></script>
+<script src="/app.releases.js"></script>
 <script src="/app.sessions.js"></script>
 <script src="/app.notify.js"></script>
 <script src="/app.push.js"></script>

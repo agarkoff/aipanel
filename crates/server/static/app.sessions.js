@@ -1353,6 +1353,13 @@ function hashTarget() {
 // Приводит открытый чат в соответствие с адресом: сюда приходят кнопки
 // «Назад»/«Вперёд», ручная правка адреса и ссылка из уведомления.
 function syncFromHash() {
+  // Адрес заметок открывает их вместо ленты; любой другой адрес заметки
+  // прячет и показывает то, что в нём написано.
+  if (location.hash === NOTES_HASH) {
+    openNotes(true);
+    return;
+  }
+  hideNotes();
   const target = hashTarget();
   if (!target) {
     if (selected) closeView();
@@ -1397,6 +1404,8 @@ function updateSessionUrl() {
 }
 
 function select(agent, session, sub) {
+  // Открытие сессии из списка закрывает Release Notes.
+  hideNotes();
   // Недописанное в прежней сессии сохраняем до смены selected — ключ берётся
   // по ней, иначе черновик ушёл бы не той сессии. Отправляем сразу: агенту
   // он нужен раньше, чем поле покажет черновик другой сессии.
@@ -1454,7 +1463,9 @@ function select(agent, session, sub) {
   autoGrow();
 }
 
-function closeView() {
+function closeView(keepUrl) {
+  // Закрытие сессии возвращает к списку, а не к заметкам.
+  hideNotes();
   // Возврат к списку не должен терять недописанный текст: он останется
   // за сессией до следующего её открытия — и здесь, и на других устройствах.
   saveDraft();
@@ -1482,8 +1493,11 @@ function closeView() {
   // У закрытой сессии своей ссылки больше нет: возвращаем адрес списка. Если
   // сессию закрыли не кнопкой «Назад», текущая запись истории всё ещё помечена
   // как просмотр — снимаем пометку, иначе следующая сессия не добавила бы новую.
-  if (location.hash) history.replaceState(null, '', location.pathname + location.search);
-  else if (history.state && history.state.viewing) history.replaceState(null, '');
+  // `keepUrl` — адрес ещё понадобится вызывающему (переход к Release Notes).
+  if (!keepUrl) {
+    if (location.hash) history.replaceState(null, '', location.pathname + location.search);
+    else if (history.state && history.state.viewing) history.replaceState(null, '');
+  }
   // Подсказка относилась к открытой сессии; в списке её копия была бы уже не к месту.
   setHint('');
   renderSessions();
