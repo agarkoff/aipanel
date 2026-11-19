@@ -114,7 +114,46 @@ mod imp {
 
     static PROFILE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-    /// Открывать каждую сессию отдельным окном, а не вкладкой в общем окне агента.
+    /// Снимок процесса для разбора зависания: в дампе остаются стеки всех
+    /// потоков, поэтому видно, на чём именно встал агент. Файл пишет сам
+    /// процесс, значит он и принадлежит ему — читается без прав администратора.
+    pub fn dump_self(path: &std::path::Path) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
+
+        // `dbghelp` нужен ради одной функции: тянуть целый крейт не за чем.
+        #[link(name = "dbghelp")]
+        extern "system" {
+            fn MiniDumpWriteDump(
+                process: *mut std::ffi::c_void,
+                process_id: u32,
+                file: *mut std::ffi::c_void,
+                dump_type: u32,
+                exception: *const std::ffi::c_void,
+                user_stream: *const std::ffi::c_void,
+                callback: *const std::ffi::c_void,
+            ) -> i32;
+        }
+        /// Стеки и сведения о потоках — этого хватает, чтобы понять, кто стоит.
+        const WITH_THREAD_INFO: u32 = 0x0000_1000;
+
+        let file = std::fs::File::create(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let ok = unsafe {
+            MiniDumpWriteDump(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                std::process::id(),
+                file.as_raw_handle() as *mut std::ffi::c_void,
+                WITH_THREAD_INFO,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if ok == 0 {
+            return Err(format!("MiniDumpWriteDump, код {}", unsafe { GetLastError() }));
+        }
+        Ok(())
+    }
+
     static NEW_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     pub fn set_terminal_profile(profile: &str) {
@@ -440,6 +479,12 @@ mod imp {
 
     pub fn kill_pid(pid: u32) -> bool {
         std::process::Command::new("kill").arg(pid.to_string()).status().is_ok_and(|s| s.success())
+    }
+
+    /// Дамп процесса собирается средствами Windows; на остальных системах
+    /// сторож просто перезапускает агента.
+    pub fn dump_self(_path: &std::path::Path) -> Result<(), String> {
+        Err("дамп процесса умеет только Windows".into())
     }
 
     pub fn spawn_window(_program: &str, _args: &[String], _cwd: &str) -> Result<u32, String> {

@@ -1094,9 +1094,16 @@ impl OpenCode {
         // Форма `--prompt=<текст>` не даёт принять текст, начинающийся с «-», за параметр.
         let args = vec!["-s".to_owned(), id.to_owned(), format!("--prompt={text}")];
         let bin = crate::util::resolve_exe(&self.cfg.bin);
-        crate::platform::spawn_window(&bin, &args, &cwd).map(|_| ()).inspect_err(|_| {
-            self.launched.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
-        })
+        // `CreateProcess` (`wt.exe` и сама программа) — синхронный вызов, и он
+        // бывает небыстрым: в отдельном потоке запуск окна не останавливает
+        // ни пинги серверу, ни остальные сессии.
+        tokio::task::spawn_blocking(move || crate::platform::spawn_window(&bin, &args, &cwd))
+            .await
+            .map_err(|e| format!("окно сессии не открылось: {e}"))?
+            .map(|_| ())
+            .inspect_err(|_| {
+                self.launched.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+            })
     }
 
     /// Модель, на которой должны идти сообщения из панели: `(провайдер, модель)`.

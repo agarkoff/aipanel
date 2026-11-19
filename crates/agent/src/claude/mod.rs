@@ -826,7 +826,16 @@ impl Claude {
         let known = self.lock().known.get(sid).cloned().ok_or("сессия не найдена")?;
         match known.pid {
             Some(pid) => crate::platform::console_input(pid, Some(text)).await,
-            None if cfg!(windows) => self.open_window(sid, &known.cwd, text),
+            None if cfg!(windows) => {
+                // Открытие окна — синхронный запуск процесса (`wt.exe` и сама
+                // программа), а он бывает небыстрым: в отдельном потоке задержка
+                // не останавливает ни пинги серверу, ни остальные сессии.
+                let me = Arc::clone(self);
+                let (sid, cwd, text) = (sid.to_owned(), known.cwd.clone(), text.to_owned());
+                tokio::task::spawn_blocking(move || me.open_window(&sid, &cwd, &text))
+                    .await
+                    .map_err(|e| format!("окно сессии не открылось: {e}"))?
+            }
             None => self.headless(sid, &known.cwd, text, out),
         }
     }
@@ -861,12 +870,6 @@ impl Claude {
             return Err("в сессии нет текста для переноса".into());
         }
         Ok((cwd.clone(), handoff::build("Claude Code", &cwd, &messages)))
-    }
-
-    /// Открывает новую сессию Claude Code в каталоге `cwd`. Идентификатор появится
-    /// в списке после того, как Claude Code запишет реестр сессий.
-    pub fn start(&self, cwd: &str, model: &str) -> Result<Option<String>, String> {
-        self.start_with_prompt(cwd, None, model)
     }
 
     /// Файл настроек Claude Code (`~/.claude.json`) лежит рядом с каталогом данных.
@@ -1313,6 +1316,22 @@ fn front_matter(text: &str, key: &str) -> Option<String> {
 
 /// `Backend` для Claude Code: агент не разбирает ключ сессии в каждом
 /// обработчике, а зовёт эти методы (см. `crate::backend`).
+/// Запуск окна Claude Code: `CreateProcess` (`wt.exe` и сама программа) —
+/// синхронный вызов, и он уходит в отдельный поток. Окно открывается не
+/// мгновенно, а агент всё это время должен отвечать серверу.
+async fn window_start(
+    me: &Arc<Claude>,
+    cwd: &str,
+    prompt: Option<&str>,
+    model: &str,
+) -> Result<Option<String>, String> {
+    let me = Arc::clone(me);
+    let (cwd, prompt, model) = (cwd.to_owned(), prompt.map(str::to_owned), model.to_owned());
+    tokio::task::spawn_blocking(move || Claude::start_with_prompt(&me, &cwd, prompt.as_deref(), &model))
+        .await
+        .map_err(|e| format!("окно сессии не открылось: {e}"))?
+}
+
 impl Backend for Arc<Claude> {
     fn tool(&self) -> &'static str {
         "claude"
@@ -1323,7 +1342,20 @@ impl Backend for Arc<Claude> {
     }
 
     fn scan(&self) -> Fut<'_, Vec<SessionInfo>> {
-        Box::pin(async move { Claude::scan(self) })
+        // Обход `~/.claude` — обычное чтение файлов, и на медленном диске оно
+        // занимает поток целиком. В отдельной задаче оно не останавливает ни
+        // пинги серверу, ни файл состояния: панель просто дольше видит прежний
+        // список сессий.
+        let me = Arc::clone(self);
+        Box::pin(async move {
+            match tokio::task::spawn_blocking(move || Claude::scan(&me)).await {
+                Ok(list) => list,
+                Err(e) => {
+                    crate::util::log(&format!("claude: обход сессий прервался: {e}"));
+                    Vec::new()
+                }
+            }
+        })
     }
 
     fn limits(&self) -> Fut<'_, Option<Limits>> {
@@ -1395,7 +1427,7 @@ impl Backend for Arc<Claude> {
     }
 
     fn start<'a>(&'a self, cwd: &'a str, model: &'a str) -> Fut<'a, Result<Option<String>, String>> {
-        Box::pin(async move { Claude::start(self, cwd, model) })
+        Box::pin(async move { window_start(self, cwd, None, model).await })
     }
 
     fn start_with_prompt<'a>(

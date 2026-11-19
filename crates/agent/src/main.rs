@@ -27,8 +27,8 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, AtomicUsize, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
 };
@@ -626,9 +626,17 @@ async fn scanner(agent: Arc<Agent>) {
                     list.extend(backend.scan().await);
                 }
             }
-            for s in &mut list {
-                s.repo = repo::info(&s.cwd);
-            }
+            // Репозитории читаются с диска (`.git` каждого каталога сессии):
+            // такая работа уходит в отдельный поток, чтобы медленный диск не
+            // останавливал ни пинги серверу, ни файл состояния.
+            list = tokio::task::spawn_blocking(move || {
+                for s in &mut list {
+                    s.repo = repo::info(&s.cwd);
+                }
+                list
+            })
+            .await
+            .unwrap_or_default();
             list.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             agent.sessions.store(list.len(), Ordering::Relaxed);
             *agent.cwds.lock().unwrap() = list.iter().map(|s| (s.key.clone(), s.cwd.clone())).collect();
@@ -785,7 +793,11 @@ async fn session(agent: &Arc<Agent>, ws: Ws, rx: &mut mpsc::UnboundedReceiver<Ag
     // Место прокрутки списка сессий тоже живёт у агента: после перезапуска
     // сервера он узнаёт его отсюда, а панель открывает список там же, где его
     // оставили.
-    if let Some((pos, ts)) = agent.scroll.lock().unwrap().list() {
+    // Место прокрутки списка: сначала снимаем значение, и только потом шлём.
+    // Держать блокировку через `await` нельзя: пока ответ не ушёл, на ней
+    // встанут все задачи, которым нужен тот же мьютекс.
+    let list_scroll = agent.scroll.lock().unwrap().list();
+    if let Some((pos, ts)) = list_scroll {
         if sink.send(text_msg(&AgentMsg::ListScroll { pos, ts })).await.is_err() {
             return;
         }
@@ -849,6 +861,79 @@ async fn status_writer(agent: Arc<Agent>) {
     }
 }
 
+/// Отметка жизни рантайма: её раз в секунду увеличивает `heartbeat`.
+static HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+/// Аргументы запуска: по ним сторож поднимает замену зависшему агенту.
+static ARGS: OnceLock<Vec<String>> = OnceLock::new();
+
+/// Отмечается раз в секунду. Если все потоки рантайма встали (например, на
+/// залипшем диске или на мьютексе, который держит залипшая задача), отметок не
+/// будет — это замечает `watchdog`.
+async fn heartbeat() {
+    loop {
+        HEARTBEAT.fetch_add(1, Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Сторож — обычный поток ОС, а не задача рантайма: он продолжает работать и
+/// тогда, когда стоят все потоки рантайма. Зависший агент панели всё равно
+/// бесполезен, поэтому сторож снимает дамп (по нему видно, на чём именно стоят
+/// потоки) и поднимает вместо себя новый экземпляр.
+fn watchdog() {
+    const CHECK: Duration = Duration::from_secs(5);
+    /// Девять проверок по 5 секунд — 45 секунд без отметок.
+    const STALLED: u32 = 9;
+    let mut seen = HEARTBEAT.load(Ordering::Relaxed);
+    let mut stalled = 0u32;
+    let mut last_check = Instant::now();
+    loop {
+        std::thread::sleep(CHECK);
+        // Сторож сам не работал — значит, спала машина, а не агент.
+        if last_check.elapsed() > CHECK * 3 {
+            seen = HEARTBEAT.load(Ordering::Relaxed);
+            stalled = 0;
+            last_check = Instant::now();
+            continue;
+        }
+        last_check = Instant::now();
+        let beats = HEARTBEAT.load(Ordering::Relaxed);
+        if beats != seen {
+            seen = beats;
+            stalled = 0;
+            continue;
+        }
+        stalled += 1;
+        if stalled < STALLED {
+            continue;
+        }
+        let path = util::aipanel_dir().join("hang.dmp");
+        match platform::dump_self(&path) {
+            Ok(()) => util::log(&format!("сторож: агент не отвечал 45 с, дамп {}", path.display())),
+            Err(e) => util::log(&format!("сторож: агент не отвечал 45 с, дамп не снят: {e}")),
+        }
+        restart_self();
+        std::process::exit(4);
+    }
+}
+
+/// Запускает новый экземпляр агента с теми же аргументами и выходит. Файл
+/// состояния от зависшего процесса выглядит свежим, поэтому его нужно убрать:
+/// иначе новый экземпляр решит, что агент уже работает, и завершится.
+fn restart_self() {
+    let (Ok(exe), Some(args)) = (std::env::current_exe(), ARGS.get()) else {
+        return;
+    };
+    let _ = std::fs::remove_file(util::aipanel_dir().join("agent.json"));
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    platform::detach(&mut cmd);
+    if let Err(e) = cmd.spawn() {
+        util::log(&format!("сторож: не удалось запустить замену: {e}"));
+    }
+}
+
 async fn run(cfg: Config) {
     let (out, mut rx) = mpsc::unbounded_channel();
     let rescan = Arc::new(Notify::new());
@@ -882,6 +967,7 @@ async fn run(cfg: Config) {
     tokio::spawn(scanner(Arc::clone(&agent)));
     tokio::spawn(limits_watcher(Arc::clone(&agent)));
     tokio::spawn(status_writer(Arc::clone(&agent)));
+    tokio::spawn(heartbeat());
 
     let mut backoff = 1;
     // Одна и та же ошибка подключения пишется в лог один раз, иначе лог рос бы
@@ -930,6 +1016,11 @@ fn main() {
     if let Some(home) = arg_value(&args, "--home") {
         util::set_aipanel_dir(PathBuf::from(home));
     }
+
+    // Агент запущен без окна: паника уходит в невидимый stderr и пропадает
+    // вместе с задачей, которая упала. Пишем её в `agent.log`, иначе причину
+    // «выключившегося» агента потом не найти.
+    std::panic::set_hook(Box::new(|info| util::log(&format!("panic: {info}"))));
 
     // Внутренний режим: ввод в консоль другого процесса (см. platform.rs).
     if args.first().map(String::as_str) == Some("inject") {
@@ -1017,7 +1108,20 @@ fn main() {
         util::log("warning: ws:// is unencrypted, the agent token is sent in clear text; use wss:// outside localhost");
     }
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Сторож живёт отдельным потоком ОС: задача рантайма зависла бы вместе с ним.
+    let _ = ARGS.set(args.clone());
+    if let Err(e) = std::thread::Builder::new().name("aipanel-watchdog".into()).spawn(watchdog) {
+        util::log(&format!("сторож не запустился: {e}"));
+    }
+
+    // Потоков несколько: агент читает файлы сессий и каталоги репозиториев, а
+    // такая работа на одном потоке останавливала и пинги серверу, и файл
+    // состояния — сервер считал агента пропавшим через 90 секунд молчания.
+    // Восемь — с запасом: наблюдение за каждой открытой лентой тоже читает
+    // файлы, и несколько таких чтений не должны занимать все потоки.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8)
+        .thread_name("aipanel-agent")
         .enable_all()
         .build()
         .expect("tokio runtime");
