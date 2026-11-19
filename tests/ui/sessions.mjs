@@ -350,6 +350,100 @@ try {
   })()`);
   check('время сессии не заходит под кнопку закрепа', layout.whenRight <= layout.pinLeft, layout);
 
+  // Длинный проект: сразу видно только пять строк, под ними — невысокая строка
+  // с шевроном вниз. Она догружает следующую пятёрку, поиск показывает все
+  // совпадения, а свёрнутый и снова раскрытый проект начинается снова с пяти.
+  const crowded = [...sessions()];
+  for (let i = 0; i < 7; i++) {
+    crowded.push({
+      key: `opencode:x${i}`,
+      tool: 'opencode',
+      title: `Свежая ${i + 1}`,
+      cwd: WORK,
+      status: 'idle',
+      live: true,
+      updated_at: now - (5 + i) * HOUR,
+      delivery: 'api',
+    });
+  }
+  await sendList(crowded);
+  await waitFor(`document.querySelectorAll('#sessions .session-row').length === 8`);
+  const capped = await evaluate(view);
+  const cappedApi = capped.projects.find((p) => p.name === 'api');
+  check(
+    'в проекте сразу видно не больше пяти сессий',
+    cappedApi && cappedApi.rows.length === 5 && cappedApi.count === '9',
+    capped.projects,
+  );
+  const more = await evaluate(`(() => {
+    const node = document.querySelector('#sessions .project-more');
+    const row = document.querySelector('#sessions .session-row');
+    return node && {
+      text: node.textContent,
+      chevron: node.querySelectorAll('svg path').length,
+      height: Math.round(node.getBoundingClientRect().height),
+      rowHeight: Math.round(row.getBoundingClientRect().height),
+    };
+  })()`);
+  check(
+    'под пятой строкой — короткая строка с шевроном вниз',
+    !!more && more.chevron === 1 && more.text.includes('4') && more.height < more.rowHeight,
+    more,
+  );
+
+  // Поиск не прячет найденное за «Ещё»: совпадения в проекте видны все.
+  await evaluate(`(() => {
+    const f = document.getElementById('filter');
+    f.value = 'Свежая';
+    f.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(80);
+  const found = await evaluate(view);
+  const foundApi = found.projects.find((p) => p.name === 'api');
+  check(
+    'поиск показывает все найденные сессии проекта',
+    foundApi && foundApi.rows.length === 7 && !(await evaluate(`!!document.querySelector('#sessions .project-more')`)),
+    found.projects,
+  );
+  await evaluate(`(() => {
+    const f = document.getElementById('filter');
+    f.value = '';
+    f.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(80);
+
+  // Шеврон догружает остальные строки проекта, и «Ещё» пропадает.
+  await evaluate(`document.querySelector('#sessions .project-more').click()`);
+  await sleep(80);
+  const loaded = await evaluate(view);
+  const loadedApi = loaded.projects.find((p) => p.name === 'api');
+  check(
+    'шеврон догружает остальные сессии проекта',
+    loadedApi && loadedApi.rows.length === 9 && !(await evaluate(`!!document.querySelector('#sessions .project-more')`)),
+    loaded.projects,
+  );
+
+  // Свернули и раскрыли — проект снова показывает первые пять.
+  await evaluate(`(() => {
+    [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'api').click();
+  })()`);
+  await sleep(60);
+  await evaluate(`(() => {
+    [...document.querySelectorAll('#sessions .project')]
+      .find((p) => p.querySelector('.project-name').textContent === 'api').click();
+  })()`);
+  await sleep(60);
+  const reopened = await evaluate(view);
+  check(
+    'после сворачивания проект снова показывает пять строк',
+    reopened.projects.find((p) => p.name === 'api').rows.length === 5 &&
+      (await evaluate(`!!document.querySelector('#sessions .project-more')`)),
+    reopened.projects,
+  );
+  await sendList(sessions());
+  await waitFor(`document.querySelectorAll('#sessions .session-row').length === 5`);
+
   // Агент присылает новый порядок: у «Второго» последняя активность стала свежее.
   // Места внутри проекта уже выданы, поэтому строки не переставляются.
   await evaluate(`document.querySelectorAll('#sessions .session-row')[1].dataset.mark = 'keep'`);

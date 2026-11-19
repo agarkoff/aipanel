@@ -169,6 +169,7 @@ function toggleProject(agentName, key) {
   const agent = agentByName(agentName);
   if (!agent) return;
   const on = !agentClosed(agent).includes(key);
+  if (on) projectShown.delete(projectId(agentName, key));
   agent.closed = on ? [...agentClosed(agent), key] : agentClosed(agent).filter((k) => k !== key);
   if (!send({ t: 'collapse_project', agent: agentName, project: key, on })) {
     setHint('Нет соединения с сервером.', true);
@@ -210,6 +211,13 @@ function revealWaiting() {
   lastWaiting.clear();
   for (const w of waiting) lastWaiting.add(w.tag);
 }
+
+// В раскрытом проекте сразу видно не больше пяти сессий: длинный каталог иначе
+// выдавливает остальные проекты за край экрана. Сколько строк проекта уже
+// догружено строкой «Ещё» — помним, пока открыта страница; свёрнутый проект
+// при раскрытии снова показывает первые пять.
+const PROJECT_ROWS = 5;
+const projectShown = new Map(); // id проекта -> сколько строк догружено
 
 // Раскладка одного агента: проекты-каталоги, внутри проекта — по статусу.
 // Закреплённая сессия остаётся в своём проекте и лишь помечена кнопкой; наверх,
@@ -404,6 +412,49 @@ function sessionsWord(n) {
   if (mod10 === 1 && mod100 !== 11) return 'сессия';
   if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'сессии';
   return 'сессий';
+}
+
+// Сколько строк проекта видно: первые пять и догруженные. Закреплённые в
+// проекте не показываются — они стоят в своём блоке сверху, — поэтому счёт идёт
+// по остальным. Найденное при фильтре не прячем за «Ещё»: человек ищет
+// конкретную сессию, и она должна быть на виду.
+function projectRows(agent, project, q) {
+  if (q) return Infinity;
+  let limit = PROJECT_ROWS + (projectShown.get(project.id) || 0);
+  // Открытую сессию её же проект не прячет: строка должна быть видна.
+  const mark = selected || lastViewed;
+  if (mark && mark.agent === agent.name) {
+    const at = project.items.filter((i) => !i.pinned).findIndex((i) => i.s.key === mark.session);
+    if (at >= limit) limit = at + 1;
+  }
+  return limit;
+}
+
+// Короткая строка под пятой сессией проекта: шеврон вниз догружает следующую
+// пятёрку. Высота у неё меньше строки сессии, чтобы не отбирать место у других
+// проектов.
+function moreEntry(project, hidden) {
+  return {
+    id: `more:${project.id}`,
+    init(entry) {
+      entry.projectId = project.id;
+      entry.node = el('button', 'project-more');
+      entry.node.type = 'button';
+      entry.node.append(icon(['M4 6.5 8 10.5 12 6.5']));
+      entry.text = el('span');
+      entry.node.append(entry.text);
+      entry.node.addEventListener('click', () => loadProjectMore(entry.projectId));
+    },
+    update(entry) {
+      entry.text.textContent = `Ещё ${hidden} ${sessionsWord(hidden)}`;
+      entry.node.setAttribute('aria-label', `Показать ещё ${hidden} ${sessionsWord(hidden)}`);
+    },
+  };
+}
+
+function loadProjectMore(id) {
+  projectShown.set(id, (projectShown.get(id) || 0) + PROJECT_ROWS);
+  renderSessions();
 }
 
 function rowEntry(agent, session, inProject) {
@@ -602,10 +653,13 @@ function renderSessions() {
       for (const project of projects) {
         plan.push(projectEntry(a, project, opened.get(project.key)));
         if (!opened.get(project.key)) continue;
-        for (const item of project.items) {
-          if (item.pinned) continue;
-          plan.push(rowEntry(a, item.s, true));
-        }
+        // Закреплённые уже стоят сверху, внутри проекта их нет. Из остальных
+        // видно не больше пяти: под ними строка «Ещё» догружает следующую пятёрку.
+        const rows = project.items.filter((i) => !i.pinned);
+        const limit = projectRows(a, project, q);
+        for (const item of rows.slice(0, limit)) plan.push(rowEntry(a, item.s, true));
+        const hidden = rows.length - Math.min(limit, rows.length);
+        if (hidden > 0) plan.push(moreEntry(project, hidden));
       }
     }
   }

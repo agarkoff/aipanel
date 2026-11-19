@@ -220,6 +220,24 @@ input, textarea, select {
 }
 .project-count { flex: none; color: var(--muted); font-size: 12px; }
 .project .dot { flex: none; }
+/* Под пятой строкой проекта — короткая «Ещё»: шеврон вниз догружает
+   следующую пятёрку, а высотой строка меньше сессии, чтобы не отбирать
+   место у других проектов. */
+.project-more {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 14px 3px 24px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+}
+.project-more svg { flex: none; width: 14px; height: 14px; }
+.project-more:hover { background: var(--bg); color: var(--text); }
 /* Строки проекта сдвинуты вправо: видно, к какому каталогу они относятся. */
 .session-row.in-project .session { padding-left: 24px; }
 .session-row {
@@ -1504,6 +1522,7 @@ button .icon { display: none; }
   .project-toggle { width: 22px; height: 22px; }
   .project-name { font-size: 15px; }
   .session-row.in-project .session { padding-left: 26px; }
+  .project-more { padding-left: 26px; min-height: 34px; font-size: 13px; }
   .session { padding: 10px 60px 10px 16px; min-height: 60px; gap: 3px 10px; border-bottom: 1px solid var(--line); }
   .session .meta, .session .when { font-size: 13px; }
   .top {
