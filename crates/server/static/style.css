@@ -96,7 +96,7 @@ input, textarea, select {
 .logo-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .error { color: var(--wait); margin: 0; min-height: 1.4em; }
 
-.app { display: grid; grid-template-columns: 340px 1fr; height: 100dvh; }
+.app { display: grid; grid-template-columns: 340px 1fr; height: 100vh; height: 100dvh; }
 .sidebar {
   border-right: 1px solid var(--line);
   background: var(--panel);
@@ -449,10 +449,12 @@ input, textarea, select {
   cursor: pointer;
 }
 .brand:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
-/* Release Notes занимают место ленты чата: остальные части main прячем. */
+/* Release Notes занимают место ленты чата: остальные части main прячем.
+   Класс состояния — `releases`: `notes` уже занят самой секцией, и если
+   повесить его на #app, она скроет весь интерфейс. */
 .notes { display: none; flex: 1; min-height: 0; flex-direction: column; }
-.app.notes .main > :not(.notes) { display: none; }
-.app.notes .notes { display: flex; }
+.app.releases .main > :not(.notes) { display: none; }
+.app.releases .notes { display: flex; }
 .notes-head .back {
   display: inline-flex;
   align-items: center;
@@ -1538,8 +1540,8 @@ button .icon { display: none; }
   .app.viewing .main { display: flex; }
   .app.viewing .sidebar { display: none; }
   /* Заметки тоже открываются вместо списка, даже если сессия не выбрана. */
-  .app.notes .main { display: flex; }
-  .app.notes .sidebar { display: none; }
+  .app.releases .main { display: flex; }
+  .app.releases .sidebar { display: none; }
 
   .sidebar { border-right: 0; }
   .sidebar header {

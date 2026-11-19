@@ -258,6 +258,18 @@ const notes = await evaluate(`(() => {
 })()`);
 check('в заметках история выпусков', notes.text.includes('Release Notes') && notes.text.includes('17.4'), notes.headings);
 check('каждый выпуск — свой раздел', notes.headings > 10, notes.headings);
+const desktop = await evaluate(`(() => {
+  const app = document.getElementById('app');
+  const section = document.getElementById('notes');
+  const body = document.getElementById('notes-body');
+  return {
+    appDisplay: getComputedStyle(app).display,
+    appClass: app.className,
+    notesHeight: Math.round(section.getBoundingClientRect().height),
+    bodyHeight: Math.round(body.getBoundingClientRect().height),
+  };
+})()`);
+check('заметки занимают область ленты', desktop.appDisplay === 'grid' && desktop.notesHeight > 300 && desktop.bodyHeight > 300, desktop);
 
 // Кнопка «назад» в заметках возвращает к списку.
 await evaluate(`document.getElementById('notes-back').click()`);
@@ -270,7 +282,7 @@ await waitFor(`document.getElementById('app').classList.contains('viewing')`);
 check('чат открылся', await evaluate(`document.getElementById('app').classList.contains('viewing')`));
 await evaluate(`document.getElementById('brand').click()`);
 await waitFor(`!document.getElementById('notes').hidden`);
-check('заметки заменили ленту, чат закрыт', await evaluate(`document.getElementById('app').classList.contains('notes') && !document.getElementById('app').classList.contains('viewing')`));
+check('заметки заменили ленту, чат закрыт', await evaluate(`document.getElementById('app').classList.contains('releases') && !document.getElementById('app').classList.contains('viewing')`));
 // Из заметок «Назад» ведёт к списку, а не возвращает закрытый чат.
 await evaluate(`history.back()`);
 await waitFor(`document.getElementById('notes').hidden`);
@@ -284,6 +296,33 @@ check('ссылка #releases открывает заметки', await evaluate
 await evaluate(`document.getElementById('notes-back').click()`);
 await waitFor(`document.getElementById('notes').hidden`);
 check('с прямой ссылки «назад» закрывает заметки', await evaluate(`document.getElementById('notes').hidden && location.href === ${JSON.stringify(pageUrl)}`));
+
+// Телефон: заметки открываются вместо списка и занимают весь экран.
+await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
+await send('Page.navigate', { url: `${pageUrl}?mobile=1` });
+await waitFor(`location.search === '?mobile=1' && !document.getElementById('app').hidden`);
+await evaluate(`document.getElementById('brand').click()`);
+await waitFor(`document.getElementById('app').classList.contains('releases')`);
+await sleep(300);
+const mobile = await evaluate(`(() => {
+  const notes = document.getElementById('notes');
+  const main = document.querySelector('.main');
+  const body = document.getElementById('notes-body');
+  return {
+    mainDisplay: getComputedStyle(main).display,
+    sidebarDisplay: getComputedStyle(document.getElementById('sidebar')).display,
+    appDisplay: getComputedStyle(document.getElementById('app')).display,
+    notesHeight: Math.round(notes.getBoundingClientRect().height),
+    bodyHeight: Math.round(body.getBoundingClientRect().height),
+    text: body.textContent.trim().length,
+  };
+})()`);
+check(
+  'на телефоне заметки занимают экран',
+  mobile.mainDisplay === 'flex' && mobile.appDisplay === 'grid' && mobile.sidebarDisplay === 'none' && mobile.notesHeight > 300 && mobile.bodyHeight > 300 && mobile.text > 100,
+  mobile,
+);
+await send('Emulation.clearDeviceMetricsOverride');
 
 check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 

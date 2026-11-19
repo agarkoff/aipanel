@@ -14,13 +14,13 @@ let notesLoading = null;
 // Разметка уже построена: при повторном открытии не пересобираем DOM.
 let notesRendered = false;
 
-const notesShown = () => $('app').classList.contains('notes');
+const notesShown = () => $('app').classList.contains('releases');
 const notesHash = () => location.hash === NOTES_HASH;
 
 // Показывает или прячет заметки. Адрес и открытую сессию не трогает:
 // этим занимаются openNotes/closeNotes и разбор адреса в app.sessions.js.
 function showNotes(show) {
-  $('app').classList.toggle('notes', show);
+  $('app').classList.toggle('releases', show);
   $('notes').hidden = !show;
   document.title = show ? 'Release Notes — AiPanel' : 'AiPanel';
 }
