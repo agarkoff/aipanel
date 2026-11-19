@@ -13,6 +13,8 @@
   --idle: #2e9d5b;
   --wait: #c7402d;
   --off: #a0a09a;
+  /* Сессия встала до сброса лимита: тёмно-серая, будто почти неактивная. */
+  --limit: #6d6d66;
   --diff-add: #e7f5e9;
   --diff-del: #fbe9e7;
   /* Подсветка синтаксиса (hl.js) */
@@ -37,6 +39,7 @@
   --fav: #f2c230;
     --user: #24344f;
     --tool: #26282c;
+    --limit: #7c7e84;
     --diff-add: #1e3524;
     --diff-del: #3b2321;
     --hl-k: #d197e8;
@@ -433,6 +436,8 @@ input, textarea, select {
 .dot.busy { background: var(--busy); }
 .dot.idle { background: var(--idle); }
 .dot.waiting { background: var(--wait); }
+/* Лимит исчерпан: точка темнее серой «всё закрыто» — сессия почти неактивна. */
+.dot.limit { background: var(--limit); }
 .empty { padding: 14px; color: var(--muted); }
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -755,6 +760,7 @@ input, textarea, select {
 .badge.busy { border-color: var(--busy); color: var(--busy); }
 .badge.idle { border-color: var(--idle); color: var(--idle); }
 .badge.waiting { border-color: var(--wait); color: var(--wait); }
+.badge.limit { border-color: var(--limit); color: var(--limit); }
 
 /* Закреплённое сообщение: полоса под шапкой, нажатие ведёт к нему в ленте. */
 .pin {

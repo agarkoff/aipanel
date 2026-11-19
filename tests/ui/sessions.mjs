@@ -110,7 +110,7 @@ const stub = `
       this.emit({
         t: 'agents',
         agents: [
-          { name: 'pc', online: true, os: 'win', version: window.__agentVersion || '17.4.0', sessions, pins: state.pins, closed: state.closed },
+          { name: 'pc', online: true, os: 'win', version: window.__agentVersion || '17.4.0', limits: window.__limits, sessions, pins: state.pins, closed: state.closed },
         ],
       });
     }
@@ -123,6 +123,8 @@ const stub = `
   };
   window.__moves = [];
   window.__state = state;
+  // Остаток лимитов подписки, как его присылает агент: тест подменяет его сам.
+  window.__limits = [];
   const realFetch = window.fetch.bind(window);
   window.fetch = (url, opts) =>
     String(url) === '/api/me'
@@ -826,6 +828,76 @@ try {
   );
   await send('Emulation.setTouchEmulationEnabled', { enabled: false, maxTouchPoints: 1 });
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+
+  // Лимит подписки выбран до нуля: в реестре инструмента сессия «ждёт ответа», но
+  // спрашивать человека не о чем — она ждёт сброса. Точка тёмно-серая (класс
+  // limit). В списке такая строка идёт после зелёных, но выше закрытых, и место
+  // в очереди этого не меняет: группы важнее свежести.
+  await evaluate(`(() => {
+    for (const p of document.querySelectorAll('#sessions .project')) {
+      if (p.getAttribute('aria-expanded') === 'false') p.click();
+    }
+  })()`);
+  await evaluate(`window.__limits = []`);
+  // «Спросит» больше не ждёт, а ждёт ввода — зелёная.
+  const greenFirst = sessions().map((s) => ({ ...s }));
+  greenFirst[2].status = 'idle';
+  await sendList(greenFirst);
+  await sleep(80);
+
+  await evaluate(`window.__limits = [{
+    tool: 'claude',
+    title: 'Claude Code',
+    meters: [{ label: 'неделя', left: 0, resets_at: Date.now() + 3600e3 }],
+    updated_at: Date.now(),
+  }]`);
+  // «Спит» встаёт на лимит: её место в очереди свежее, чем у зелёной.
+  const limitList = greenFirst.map((s) => ({ ...s }));
+  limitList[3].status = 'waiting';
+  await sendList(limitList);
+  await sleep(120);
+  // А «Старая» получает место ещё свежее — и всё равно должна остаться внизу.
+  const closedFresh = limitList.map((s) => ({ ...s }));
+  closedFresh[4].status = 'waiting';
+  await sendList(closedFresh);
+  await sleep(80);
+  closedFresh[4].status = 'stopped';
+  await sendList(closedFresh);
+  await sleep(120);
+
+  const limited = await evaluate(view);
+  const dots = await evaluate(
+    `[...document.querySelectorAll('#sessions .session-row')]
+      .map((r) => [r.querySelector('.name').textContent, r.querySelector('.dot').className])`,
+  );
+  check(
+    'ждущая лимит — после зелёных, но выше закрытых',
+    JSON.stringify(limited.projects.find((p) => p.name === 'docs').rows) ===
+      JSON.stringify(['Спросит', 'Спит', 'Старая']),
+    limited.projects,
+  );
+  check(
+    'точка ждущей лимит тёмно-серая, а не красная',
+    dots.some(([name, cls]) => name === 'Спит' && cls === 'dot limit'),
+    dots,
+  );
+
+  // Плашка в шапке говорит, чего сессия ждёт: лимита, а не ответа.
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('#sessions .session-row')]
+      .find((r) => r.querySelector('.name').textContent === 'Спит');
+    row.querySelector('.session').click();
+  })()`);
+  await sleep(150);
+  const badge = await evaluate(`(() => {
+    const node = document.getElementById('status');
+    return { text: node.textContent, cls: node.className, title: node.title };
+  })()`);
+  check(
+    'плашка ждущей лимит называет сброс',
+    badge.text === 'ждёт сброса лимита' && badge.cls === 'badge limit' && badge.title.includes('Claude Code'),
+    badge,
+  );
 
   check('ошибок на странице нет', pageErrors.length === 0, pageErrors);
 } catch (error) {

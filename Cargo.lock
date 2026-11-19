@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-agent"
-version = "19.2.0"
+version = "19.3.0"
 dependencies = [
  "aipanel-proto",
  "futures-util",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-proto"
-version = "19.2.0"
+version = "19.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "aipanel-server"
-version = "19.2.0"
+version = "19.3.0"
 dependencies = [
  "aes-gcm",
  "aipanel-proto",

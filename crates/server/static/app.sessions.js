@@ -15,10 +15,10 @@ function ago(ts) {
   return `${Math.floor(s / 86400)} дн`;
 }
 
-function dotClass(s, online) {
-  if (!online) return 'dot';
+function dotClass(agent, s) {
+  if (!agent.online) return 'dot';
   if (s.status === 'busy' || s.status === 'shell' || s.status === 'stalled') return 'dot busy';
-  if (s.status === 'waiting') return 'dot waiting';
+  if (s.status === 'waiting') return limitOut(agent, s) ? 'dot limit' : 'dot waiting';
   if (s.status === 'idle') return 'dot idle';
   return 'dot';
 }
@@ -75,15 +75,18 @@ function projectLabels(projects) {
   return labels;
 }
 
-// Статус задаёт порядок внутри проекта: сначала ждущие ответа, потом работающие.
-const STATUS_GROUPS = ['wait', 'busy', 'idle'];
+// Статус задаёт порядок внутри проекта: сначала ждущие ответа, потом работающие,
+// затем ждущие ввода — они готовы принять сообщение. Вставшие до сброса лимита
+// идут следом: работать не могут, но и не закрыты. Закрытые — в конце.
+const STATUS_GROUPS = ['wait', 'busy', 'idle', 'limit', 'off'];
 
-function statusGroup(s, online) {
-  // Без связи состояние сессии устарело: держим её в общем списке, а не среди работающих.
-  if (!online) return 'idle';
-  if (s.status === 'waiting') return 'wait';
+function statusGroup(agent, s) {
+  // Без связи состояние сессии устарело: держим её в конце, рядом с закрытыми.
+  if (!agent.online) return 'off';
+  if (s.status === 'waiting') return limitOut(agent, s) ? 'limit' : 'wait';
   if (s.status === 'busy' || s.status === 'shell' || s.status === 'stalled') return 'busy';
-  return 'idle';
+  if (s.status === 'idle') return 'idle';
+  return 'off';
 }
 
 // Место внутри проекта выдаётся при первом появлении сессии и при переходе в
@@ -113,12 +116,14 @@ function projectRankOf(id) {
   return rank;
 }
 
-// Точка проекта показывает самое важное, что внутри: ожидание, работу или покой.
+// Точка проекта показывает самое важное, что внутри: ожидание, работу, готовность
+// к вводу, паузу до сброса лимита или покой.
 function projectDot(items, online) {
   if (!online) return 'dot';
   if (items.some((i) => i.group === 'wait')) return 'dot waiting';
   if (items.some((i) => i.group === 'busy')) return 'dot busy';
-  if (items.some((i) => i.s.status === 'idle')) return 'dot idle';
+  if (items.some((i) => i.group === 'idle')) return 'dot idle';
+  if (items.some((i) => i.group === 'limit')) return 'dot limit';
   return 'dot';
 }
 
@@ -224,7 +229,7 @@ const projectShown = new Map(); // id проекта -> сколько стро�
 // в отдельный блок, она попадает только пока проект свёрнут — иначе одна и та же
 // строка была бы в списке дважды.
 function orderedList(agent, list) {
-  const items = list.map((s) => ({ s, group: statusGroup(s, agent.online), pinned: isPinned(agent.name, s.key) }));
+  const items = list.map((s) => ({ s, group: statusGroup(agent, s), pinned: isPinned(agent.name, s.key) }));
 
   // Места выдаём в обратном порядке активности: первый показ повторяет привычный
   // порядок (свежие сверху), а новая сессия получает место выше всех.
@@ -541,7 +546,7 @@ function rowEntry(agent, session, inProject) {
       entry.session = session;
       entry.agent = agent;
       const pinned = isPinned(agentName, key);
-      entry.dot.className = dotClass(session, agent.online);
+      entry.dot.className = dotClass(agent, session);
       entry.name.textContent = session.title || key;
       entry.when.textContent = ago(session.updated_at);
       // В строке видно инструмент и место: у git-каталога это репозиторий с

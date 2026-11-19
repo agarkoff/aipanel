@@ -114,8 +114,16 @@ function renderHeader() {
   $('copy-id').hidden = false;
   $('favorites').hidden = false;
   badge.hidden = false;
-  badge.className = `badge ${agent.online ? session.status : ''}`;
-  badge.textContent = agent.online ? STATUS[session.status] || session.status : 'агент не в сети';
+  // Лимит исчерпан — сессия не спрашивает, а ждёт сброса: плашка тёмно-серая,
+  // как у почти неактивной, и говорит почему.
+  const limit = agent.online && limitOut(agent, session);
+  badge.className = `badge ${agent.online ? (limit ? 'limit' : session.status) : ''}`;
+  badge.textContent = !agent.online
+    ? 'агент не в сети'
+    : limit
+      ? LIMIT_STATUS
+      : STATUS[session.status] || session.status;
+  badge.title = limit ? limitHint(agent, session) : '';
   const busy = agent.online && ['busy', 'shell', 'stalled'].includes(session.status);
   $('interrupt').hidden = !busy;
   const target = session.tool === 'claude' ? 'opencode' : session.tool === 'opencode' ? 'claude' : null;
@@ -177,11 +185,10 @@ function renderLimits(agent, session) {
   box.replaceChildren();
   // Лимит OpenCode Go относится только к моделям этой подписки: сессия opencode
   // на zai, openai и т.п. его не тратит, поэтому строку скрываем целиком.
-  const relevant = session.tool !== 'opencode' || (session.model || '').startsWith('opencode-go/');
+  const relevant = limitApplies(session);
   $('sm-limits-row').hidden = !relevant;
   if (!relevant) return;
-  const all = agent && agent.limits ? agent.limits : [];
-  const limits = all.filter((l) => l.tool === session.tool);
+  const limits = sessionLimits(agent, session);
   if (!limits.length) {
     box.append(el('span', 'sm-limits-empty', agent && agent.online ? 'нет данных' : 'агент не в сети'));
     return;
@@ -213,6 +220,19 @@ function renderLimits(agent, session) {
     row.title = `${limit.title || limit.tool}: ${details.join(' · ')}${stale ? ` (проверено ${resetText(limit.updated_at)})` : ''}`;
     box.append(row);
   }
+}
+
+// Подсказка к плашке «ждёт сброса лимита»: какое окно кончилось и когда сброс.
+function limitHint(agent, session) {
+  const parts = [];
+  for (const limit of sessionLimits(agent, session)) {
+    for (const m of limit.meters || []) {
+      if (m.left !== 0) continue;
+      const reset = resetText(m.resets_at);
+      parts.push(`${limit.title || limit.tool}: ${m.label} — 0%${reset ? `, сброс ${reset}` : ''}`);
+    }
+  }
+  return parts.join(' · ');
 }
 
 // `isError` — подсказка красным. `opts.list: false` — не повторять её внизу

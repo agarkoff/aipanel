@@ -93,6 +93,31 @@ const DELIVERY = {
   none: 'Отправка в эту сессию недоступна на этой платформе.',
 };
 
+// Сессия встала из-за исчерпанного лимита: она тоже «ждёт ответа» в реестре
+// инструмента, но вопрос к человеку не в этом — продолжать нечем до сброса.
+const LIMIT_STATUS = 'ждёт сброса лимита';
+
+// Тратит ли сессия лимит инструмента: у opencode он относится только к моделям
+// подписки OpenCode Go, остальные модели её не расходуют. У Claude Code — всегда.
+function limitApplies(session) {
+  return session.tool !== 'opencode' || (session.model || '').startsWith('opencode-go/');
+}
+
+// Лимиты, которые тратит эта сессия. Пустой список — либо не её лимит, либо
+// данных ещё нет.
+function sessionLimits(agent, session) {
+  if (!limitApplies(session)) return [];
+  return (agent && agent.limits ? agent.limits : []).filter((l) => l.tool === session.tool);
+}
+
+// Лимит выбран до нуля: сессия стоит не потому, что ждёт ответа, а потому что
+// инструменту нечем отвечать до сброса. Окно, чей сброс уже прошёл, агент сам
+// показывает полным (`refresh_expired`), поэтому `left === 0` не устаревает.
+function limitOut(agent, session) {
+  if (!agent || !agent.online) return false;
+  return sessionLimits(agent, session).some((l) => (l.meters || []).some((m) => m.left === 0));
+}
+
 let ws = null;
 let agents = [];
 let selected = null; // { agent, session }
