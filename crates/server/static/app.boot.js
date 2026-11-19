@@ -97,8 +97,8 @@ function connect() {
     launchModelsRequest = null;
     if (selected) {
       send({ t: 'watch', agent: selected.agent, session: selected.session });
-      // Открыта вкладка подагента: её ленту тоже просим заново.
-      if (subTab) send({ t: 'watch_sub', agent: selected.agent, session: selected.session, sub: subTab });
+      // Открыта панель подагента: её ленту тоже просим заново.
+      if (subDrawer) send({ t: 'watch_sub', agent: selected.agent, session: selected.session, sub: subDrawer });
       // Избранное живёт у агента: после переподключения берём его заново.
       send({ t: 'favorites', agent: selected.agent, session: selected.session });
     }

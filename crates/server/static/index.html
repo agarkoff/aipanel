@@ -136,10 +136,26 @@
       <span id="pin-count" class="pin-count" hidden></span>
     </button>
     <div class="feed-wrap">
-      <div id="feed-tabs" class="feed-tabs" role="tablist" aria-label="Ленты сессии" hidden></div>
       <div id="feed" class="feed">
         <button id="older" class="older" type="button" hidden>Загрузить ранние сообщения</button>
       </div>
+      <!-- Лента подагента: открывается из карточки в ленте поверх неё, чтобы
+           сессия оставалась на месте. На телефоне занимает весь блок ленты. -->
+      <aside id="sub-view" class="sub-view" role="region" aria-label="Лента подагента" hidden>
+        <header class="sub-view-head">
+          <button id="sub-view-back" class="sub-view-back" type="button" title="Закрыть ленту подагента" aria-label="Закрыть ленту подагента">
+            <svg viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 3 5 8l5 5"></path>
+            </svg>
+            <span class="sub-view-back-label">К сессии</span>
+          </button>
+          <div class="sub-view-titles">
+            <div id="sub-view-title" class="sub-view-title"></div>
+            <div id="sub-view-meta" class="sub-view-meta"></div>
+          </div>
+        </header>
+        <div id="sub-feed" class="feed sub-feed"></div>
+      </aside>
       <button id="to-end" class="to-end" type="button" hidden aria-label="В конец переписки" title="В конец переписки">
         <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
           <path d="M8 3v10"></path>
@@ -147,7 +163,6 @@
         </svg>
       </button>
     </div>
-    <div id="subagents" class="subagents" role="region" aria-label="Подагенты сессии" hidden></div>
     <p id="turn" class="turn" hidden></p>
     <details id="tasks" class="bg-tasks" hidden>
       <summary><span class="turn-mark" aria-hidden="true">●</span> <span id="tasks-title"></span></summary>

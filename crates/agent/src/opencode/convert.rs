@@ -246,6 +246,7 @@ pub(super) fn queued_from_prompt(v: &Value, text: &str) -> Option<Item> {
         kind: "queued".into(),
         text: truncate(d["payload"]["text"].as_str().unwrap_or(text), TEXT_LIMIT),
         tool: None,
+        sub: None,
     })
 }
 
@@ -269,6 +270,7 @@ pub(super) fn queued_items(v: &Value, delivered: &HashSet<u64>) -> Vec<Item> {
             kind: "queued".into(),
             text: truncate(text, TEXT_LIMIT),
             tool: None,
+            sub: None,
         });
     }
     out
@@ -284,6 +286,18 @@ pub(super) fn input_diff(name: Option<&str>, input: &Value) -> Option<String> {
     let old = input["oldString"].as_str().or_else(|| input["old_string"].as_str())?;
     let new = input["newString"].as_str().or_else(|| input["new_string"].as_str())?;
     Some(edit_diff(path, old, new))
+}
+
+/// Текст из synthetic-сообщения opencode `<subagent …>итог</subagent>`.
+pub(super) fn subagent_inner(text: &str) -> String {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("<subagent") {
+        return text.trim().to_owned();
+    }
+    let Some(start) = trimmed.find('>') else { return text.trim().to_owned() };
+    let rest = &trimmed[start + 1..];
+    let end = rest.rfind("</subagent>").unwrap_or(rest.len());
+    rest[..end].trim().to_owned()
 }
 
 pub(super) fn content_text(v: &Value) -> String {
@@ -317,13 +331,35 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
         .as_i64()
         .or_else(|| m["time"]["end"].as_i64())
         .unwrap_or(0);
-    let mut push = |suffix: String, ts: i64, role: &str, kind: &str, text: String, tool: Option<String>| {
-        if !text.trim().is_empty() || kind == "tool_use" {
-            out.push(Item { id: format!("{id}:{suffix}"), ts, role: role.into(), kind: kind.into(), text, tool });
+    let mut push = |suffix: String,
+                    ts: i64,
+                    role: &str,
+                    kind: &str,
+                    text: String,
+                    tool: Option<String>,
+                    sub: Option<String>| {
+        if !text.trim().is_empty() || kind == "tool_use" || kind == "subagent" {
+            out.push(Item {
+                id: format!("{id}:{suffix}"),
+                ts,
+                role: role.into(),
+                kind: kind.into(),
+                text,
+                tool,
+                sub,
+            });
         }
     };
     match m["type"].as_str() {
-        Some("user") => push("0".into(), ts, "user", "text", truncate(m["text"].as_str().unwrap_or_default(), TEXT_LIMIT), None),
+        Some("user") => push(
+            "0".into(),
+            ts,
+            "user",
+            "text",
+            truncate(m["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
+            None,
+            None,
+        ),
         Some("assistant") => {
             // id частей совпадает с id потоковых событий opencode (`text:0`,
             // `reasoning:0`), поэтому пришедший по потоку текст заменяется
@@ -340,6 +376,7 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                             "text",
                             truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
                             None,
+                            None,
                         );
                         texts += 1;
                     }
@@ -351,16 +388,12 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                             "thinking",
                             truncate(c["text"].as_str().unwrap_or_default(), TEXT_LIMIT),
                             None,
+                            None,
                         );
                         thinks += 1;
                     }
                     Some("tool") => {
                         let name = c["name"].as_str();
-                        // Вызов подагента в ленте не показывается: он живёт в
-                        // отдельном списке, а его лента — в дочерней сессии.
-                        if name.is_some_and(crate::util::is_subagent_tool) {
-                            continue;
-                        }
                         let state = &c["state"];
                         // Свои отметки команды: у вызова — создание части или
                         // начало состояния, у результата — конец. Панель считает
@@ -374,6 +407,55 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                             .as_i64()
                             .or_else(|| state["time"]["completed"].as_i64())
                             .unwrap_or(done);
+                        if name.is_some_and(crate::util::is_subagent_tool) {
+                            // Карточка подагента на месте вызова: его лента — в
+                            // дочерней сессии opencode. У фонового запуска id
+                            // известен сразу, у синхронного его в вызове нет —
+                            // панель найдёт подагента по подписи и времени.
+                            let input = &state["input"];
+                            let child = state["metadata"]["sessionID"]
+                                .as_str()
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_owned);
+                            let title = input["description"]
+                                .as_str()
+                                .filter(|d| !d.trim().is_empty())
+                                .unwrap_or("Подагент");
+                            let agent = input["agent"]
+                                .as_str()
+                                .or_else(|| input["subagent_type"].as_str())
+                                .unwrap_or_default();
+                            push(
+                                i.to_string(),
+                                started,
+                                "assistant",
+                                "subagent",
+                                truncate(title, 400),
+                                (!agent.is_empty()).then(|| agent.to_owned()),
+                                child.clone(),
+                            );
+                            // У синхронного вызова итог лежит в самом вызове; у
+                            // фонового его пришлёт synthetic-сообщение, а в
+                            // вызове может быть только отметка о запуске.
+                            if input["background"].as_bool() != Some(true) {
+                                let mut result = content_text(&state["content"]);
+                                if result.is_empty() {
+                                    result = content_text(&state["error"]);
+                                }
+                                if !result.trim().is_empty() {
+                                    push(
+                                        format!("{i}:r"),
+                                        finished,
+                                        "tool",
+                                        "subagent_result",
+                                        truncate(&result, RESULT_LIMIT),
+                                        None,
+                                        child,
+                                    );
+                                }
+                            }
+                            continue;
+                        }
                         push(
                             i.to_string(),
                             started,
@@ -381,12 +463,21 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                             "tool_use",
                             tool_text(name, &state["input"]),
                             name.map(str::to_owned),
+                            None,
                         );
                         let mut result = content_text(&state["content"]);
                         if result.is_empty() {
                             result = content_text(&state["error"]);
                         }
-                        push(format!("{i}:r"), finished, "tool", "tool_result", truncate(&result, RESULT_LIMIT), None);
+                        push(
+                            format!("{i}:r"),
+                            finished,
+                            "tool",
+                            "tool_result",
+                            truncate(&result, RESULT_LIMIT),
+                            None,
+                            None,
+                        );
 
                         // opencode отдаёт готовые патчи изменённых файлов.
                         let mut shown = false;
@@ -402,11 +493,20 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
                                 "diff",
                                 truncate(patch, DIFF_LIMIT),
                                 None,
+                                None,
                             );
                         }
                         if !shown {
                             if let Some(text) = input_diff(name, &state["input"]) {
-                                push(format!("{i}:diff"), finished, "assistant", "diff", truncate(&text, DIFF_LIMIT), None);
+                                push(
+                                    format!("{i}:diff"),
+                                    finished,
+                                    "assistant",
+                                    "diff",
+                                    truncate(&text, DIFF_LIMIT),
+                                    None,
+                                    None,
+                                );
                             }
                         }
                     }
@@ -415,19 +515,59 @@ pub(super) fn convert(m: &Value, out: &mut Vec<Item>) {
             }
             if !m["error"].is_null() {
                 let text = m["error"]["message"].as_str().map(str::to_owned).unwrap_or_else(|| m["error"].to_string());
-                push("err".into(), ts, "system", "error", truncate(&text, RESULT_LIMIT), None);
+                push("err".into(), ts, "system", "error", truncate(&text, RESULT_LIMIT), None, None);
             }
         }
         Some("shell") => {
-            push("0".into(), ts, "assistant", "tool_use", m["command"].as_str().unwrap_or_default().to_owned(), Some("shell".into()));
-            push("0:r".into(), done, "tool", "tool_result", truncate(&content_text(&m["output"]), RESULT_LIMIT), None);
+            push(
+                "0".into(),
+                ts,
+                "assistant",
+                "tool_use",
+                m["command"].as_str().unwrap_or_default().to_owned(),
+                Some("shell".into()),
+                None,
+            );
+            push(
+                "0:r".into(),
+                done,
+                "tool",
+                "tool_result",
+                truncate(&content_text(&m["output"]), RESULT_LIMIT),
+                None,
+                None,
+            );
         }
         // Сессия переехала в другой каталог (обычно — в созданный ею worktree):
         // opencode меняет её `location.directory`, и без отметки в ленте панель
         // просто начинает показывать другой путь.
         Some("location-switched") => {
             let to = m["location"]["directory"].as_str().unwrap_or_default();
-            push("0".into(), ts, "system", "cwd", to.to_owned(), None);
+            push("0".into(), ts, "system", "cwd", to.to_owned(), None, None);
+        }
+        // Итог фонового подагента: opencode присылает его synthetic-сообщением,
+        // внутри `<subagent …>…</subagent>`. В ленте это «Итог» под карточкой.
+        Some("synthetic") => {
+            if m["metadata"]["source"].as_str() == Some("subagent") {
+                let child = m["metadata"]["childID"].as_str().filter(|s| !s.is_empty());
+                let raw = m["text"].as_str().unwrap_or_default();
+                let text = subagent_inner(raw);
+                if !text.trim().is_empty() {
+                    let suffix = match child {
+                        Some(child) => format!("sub:{child}"),
+                        None => format!("sub:{ts}"),
+                    };
+                    push(
+                        suffix,
+                        ts,
+                        "tool",
+                        "subagent_result",
+                        truncate(&text, RESULT_LIMIT),
+                        None,
+                        child.map(str::to_owned),
+                    );
+                }
+            }
         }
         // Сообщение типа idle повторяет ошибку предыдущего ответа, поэтому не показывается.
         _ => {}

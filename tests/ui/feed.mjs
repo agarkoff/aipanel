@@ -2476,8 +2476,8 @@ try {
   check('ссылка: сессия из уведомления открывается, адрес становится её ссылкой',
     opened.selected === session.key && opened.hash === opened.link, opened);
 
-  // Подагенты: их вызовы в ленте не показываются, а список над счётчиком хода
-  // открывает ленту подагента вкладкой в блоке ленты.
+  // Подагенты: их вызовы — карточки в ленте на своём месте, а лента подагента
+  // открывается панелью поверх ленты сессии. Отдельного списка-полосы больше нет.
   const subs = await evaluate(`(async () => {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const session = window.__session.key;
@@ -2485,56 +2485,73 @@ try {
     const emit = (m) => window.__sock.emit(m);
     window.__subWatched = [];
     const mainBefore = document.querySelectorAll('#feed .item').length;
+    const ts = Date.now() - 60000;
+    emit({ t: 'history', ...msg, reset: false, more: false, items: [
+      { id: 'c1', ts, role: 'assistant', kind: 'subagent', text: 'Найти причину', tool: 'explore', sub: 'a1' },
+      { id: 'c2', ts: ts + 1000, role: 'tool', kind: 'subagent_result', text: 'Причину нашёл в кэше.', sub: 'a1' },
+      { id: 'c3', ts: ts + 2000, role: 'assistant', kind: 'subagent', text: 'Написать отчёт', tool: 'general-purpose', sub: 'a2' },
+    ] });
     emit({ t: 'subagents', ...msg, subagents: [
-      { id: 'a1', title: 'Найти причину', agent: 'explore', running: true, started_at: 1 },
-      { id: 'a2', title: 'Написать отчёт', agent: 'general-purpose', running: false, started_at: 2 },
+      { id: 'a1', title: 'Найти причину', agent: 'explore', running: true, started_at: ts,
+        turn: { started_at: ts, input: 1200, output: 34 } },
+      { id: 'a2', title: 'Написать отчёт', agent: 'general-purpose', running: false, started_at: ts + 2000,
+        ended_at: ts + 62000, turn: { started_at: ts + 2000, input: 800, output: 90 } },
     ] });
     await wait(20);
-    const strip = document.getElementById('subagents');
-    const chips = [...strip.querySelectorAll('.subagent')];
-    const shown = !strip.hidden;
-    const chipTitle = chips[0] ? chips[0].textContent : '';
-    chips[0].click();
+    const cards = [...document.querySelectorAll('#feed .item.subagent .sub-card')];
+    const cardText = cards[0] ? cards[0].textContent : '';
+    const cardMeta = cards[0] ? cards[0].querySelector('.sub-card-meta').textContent : '';
+    const cardSub = cards[0] ? cards[0].dataset.sub : '';
+    const resultLabel = document.querySelector('#feed .item.subagent_result summary');
+    const noStrip = !document.getElementById('subagents') && !document.getElementById('feed-tabs');
+    const itemCount = document.querySelectorAll('#feed .item').length;
+    const scrollBefore = document.getElementById('feed').scrollTop;
+    cards[0].click();
     await wait(20);
+    const scrollAfter = document.getElementById('feed').scrollTop;
     const watch = window.__subWatched[0] || {};
-    const tabsShown = !document.getElementById('feed-tabs').hidden;
-    const tabCount = document.querySelectorAll('#feed-tabs .feed-tab').length;
-    const mainGone = document.querySelectorAll('#feed .item').length === 0;
+    const panelShown = !document.getElementById('sub-view').hidden;
+    const mainStill = document.querySelectorAll('#feed .item').length;
+    const panelTitle = document.getElementById('sub-view-title').textContent;
+    const panelMeta = document.getElementById('sub-view-meta').textContent;
     emit({ t: 'sub_history', ...msg, sub: 'a1', reset: true, more: false, items: [
       { id: 's1', ts: 1, role: 'user', kind: 'text', text: 'Что нашёл?' },
       { id: 's2', ts: 2, role: 'assistant', kind: 'text', text: 'Причину нашёл в кэше.' },
     ] });
     await wait(20);
-    const subItems = document.querySelectorAll('#feed .item').length;
-    const subText = document.getElementById('feed').textContent;
+    const subItems = document.querySelectorAll('#sub-feed .item').length;
+    const subText = document.getElementById('sub-feed').textContent;
     // Избранное относится к сессии: у подагента звёзд нет.
-    const favs = document.querySelectorAll('#feed .fav').length;
-    document.querySelectorAll('#feed-tabs .feed-tab-btn')[0].click();
-    await wait(20);
-    const backItems = document.querySelectorAll('#feed .item').length;
-    const unwatched = window.__subWatched.some((m) => m.t === 'unwatch_sub' && m.sub === 'a1');
-    // Закрываем вкладку подагента: открытых больше нет — полоса вкладок уходит.
-    document.querySelector('#feed-tabs .feed-tab-close').click();
+    const favs = document.querySelectorAll('#sub-feed .fav').length;
+    document.getElementById('sub-view-back').click();
     await wait(20);
     return {
-      shown, chips: chips.length, chipTitle, watch, tabsShown, tabCount, mainGone,
-      mainBefore, subItems, subText, favs, backItems, unwatched,
-      tabsAfter: document.querySelectorAll('#feed-tabs .feed-tab').length,
-      tabsHidden: document.getElementById('feed-tabs').hidden,
-      stripChips: document.querySelectorAll('#subagents .subagent').length,
+      mainBefore, itemCount, cards: cards.length, cardText, cardMeta, cardSub,
+      result: resultLabel ? resultLabel.textContent : '', noStrip,
+      watch, panelShown, mainStill, scrollBefore, scrollAfter, panelTitle, panelMeta,
+      subItems, subText, favs,
+      panelHidden: document.getElementById('sub-view').hidden,
+      unwatched: window.__subWatched.some((m) => m.t === 'unwatch_sub' && m.sub === 'a1'),
+      hashAfter: location.hash,
     };
   })()`);
-  check('подагенты: список виден, вызовы в ленте не нужны', subs.shown && subs.chips === 2 && subs.stripChips === 2, subs);
-  check('подагенты: подпись и запуск ленты по нажатию',
-    subs.chipTitle.includes('Найти причину') && subs.watch.t === 'watch_sub' && subs.watch.sub === 'a1', subs);
-  check('подагенты: лента открывается вкладкой, основная уступает место',
-    subs.tabsShown && subs.tabCount === 2 && subs.mainGone, subs);
-  check('подагенты: пришедшие элементы видны, звёзд избранного нет',
+  check('подагенты: вызов — карточка в ленте, отдельных полос нет',
+    subs.cards === 2 && subs.itemCount === subs.mainBefore + 3 && subs.noStrip, subs);
+  check('подагенты: подпись, тип и статус на карточке',
+    subs.cardText.includes('Найти причину') && subs.cardSub === 'a1'
+      && subs.cardMeta.includes('идёт') && subs.cardMeta.includes('↓ 34'), subs);
+  check('подагенты: итог подагента виден под карточкой',
+    subs.result === 'Итог подагента', subs);
+  check('подагенты: карточка открывает панель, лента сессии остаётся',
+    subs.watch.t === 'watch_sub' && subs.watch.sub === 'a1' && subs.panelShown
+      && subs.mainStill === subs.itemCount && subs.scrollAfter === subs.scrollBefore, subs);
+  check('подагенты: в шапке панели подпись, работа и токены',
+    subs.panelTitle.includes('Найти причину') && subs.panelMeta.includes('explore')
+      && subs.panelMeta.includes('работает') && subs.panelMeta.includes('↑ 1.2k'), subs);
+  check('подагенты: лента подагента видна, звёзд избранного нет',
     subs.subItems === 2 && subs.subText.includes('Причину нашёл') && subs.favs === 0, subs);
-  check('подагенты: возврат в основную ленту восстанавливает её целиком',
-    subs.backItems === subs.mainBefore && subs.mainBefore > 0 && subs.unwatched, subs);
-  check('подагенты: закрытая вкладка убирает полосу вкладок',
-    subs.tabsAfter === 0 && subs.tabsHidden, subs);
+  check('подагенты: панель закрывается и отписывается, адрес чист',
+    subs.panelHidden && subs.unwatched && !subs.hashAfter.includes('sub='), subs);
 
   // Ссылка на чат: открытая сессия и лента подагента видны в адресе, ссылка
   // открывается заново, а возврат к списку убирает её.
@@ -2549,19 +2566,23 @@ try {
       { id: 'a1', title: 'Найти причину', agent: 'explore', running: false, started_at: 1 },
       { id: 'a2', title: 'Написать отчёт', agent: 'general-purpose', running: false, started_at: 2 },
     ] });
+    window.__sock.emit({ t: 'history', agent: 'ui-test', session: window.__session.key, reset: false, more: false, items: [
+      { id: 'l1', ts: 1, role: 'assistant', kind: 'subagent', text: 'Найти причину', tool: 'explore', sub: 'a1' },
+      { id: 'l2', ts: 2, role: 'assistant', kind: 'subagent', text: 'Написать отчёт', tool: 'general-purpose', sub: 'a2' },
+    ] });
     await wait(20);
-    // В списке подагентов второй — a2: у его ленты должен быть свой адрес.
-    document.querySelectorAll('#subagents .subagent')[1].click();
+    // Вторая карточка — a2: у её ленты должен быть свой адрес.
+    [...document.querySelectorAll('#feed .item.subagent .sub-card')][1].click();
     await wait(20);
     const subHash = location.hash;
-    document.querySelector('#feed-tabs .feed-tab-btn').click();
+    document.getElementById('sub-view-back').click();
     await wait(20);
     const mainHash = location.hash;
     // Так адрес приходит при открытии ссылки: без события hashchange.
     history.replaceState(history.state, '', base + '&sub=a2');
     syncFromHash();
     await wait(20);
-    const linked = { subTab, hash: location.hash };
+    const linked = { subDrawer, hash: location.hash };
     closeView();
     const closed = location.hash;
     return { base, opened, subHash, mainHash, linked, closed };
@@ -2571,7 +2592,7 @@ try {
   check('ссылка: у ленты подагента свой адрес',
     links.subHash === links.base + '&sub=a2', links);
   check('ссылка: адрес с подагентом открывает его ленту',
-    links.linked.subTab === 'a2' && links.linked.hash === links.base + '&sub=a2', links);
+    links.linked.subDrawer === 'a2' && links.linked.hash === links.base + '&sub=a2', links);
   check('ссылка: возврат к списку убирает адрес сессии', links.closed === '', links);
 
   // Вывод инструментов приходит из терминала с управляющими последовательностями

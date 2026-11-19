@@ -1,24 +1,18 @@
 'use strict';
 
-// Подагенты открытой сессии: их вызовы в основную ленту не попадают (агент их
-// прячет), поэтому список над строкой хода — единственный вход в ленту
-// подагента. Открытый подагент живёт вкладкой в блоке ленты: вкладки
-// переключаются, а прокрутка и раскрытые вызовы каждой запоминаются.
+// Подагенты открытой сессии. Их вызовы в ленте — карточки (`kind: "subagent"`),
+// а лента выбранного подагента открывается панелью поверх ленты сессии: сессия
+// остаётся на месте, и к ней не нужно возвращаться вкладкой. Статус, время и
+// токены карточка берёт из списка, который агент присылает целиком.
+
+let subCalls = new Map(); // id вызова -> элемент ленты подагента
+let subPendingCalls = []; // вызовы, результата которых ещё не было
+let subOpenedFrom = null; // карточка, из которой открыли панель
 
 // Полный список подагентов от агента: он заменяет показанный.
 function applySubagents(list) {
   subagents = Array.isArray(list) ? list : [];
-  subagentsKnown = true;
-  // Сессию могли перезапустить: вкладку, которой больше нет в списке, открыть
-  // заново нечем.
-  const known = new Set(subagents.map((s) => s.id));
-  for (const id of subTabs.slice()) {
-    if (!known.has(id)) closeSubTab(id);
-  }
-  renderSubagents();
-  renderSubagentTabs();
-  // Ссылка вела на подагента: теперь видно, есть ли он в этой сессии.
-  tryPendingSub();
+  refreshSubViews();
 }
 
 function subagentById(id) {
@@ -31,241 +25,391 @@ function subagentTitle(sub) {
   return line.length > 120 ? `${line.slice(0, 120)}…` : line;
 }
 
-// Строка над счётчиком хода: работающие и завершённые подагенты. Нажатие
-// открывает его ленту вкладкой, повторное — возвращает к ней.
-function renderSubagents() {
-  const box = $('subagents');
-  if (!selected || !subagents.length) {
+// Короткая подпись из вызова: описание задачи одной строкой. Подагент и его
+// карточка приходят из разных мест, поэтому подпись сравнивается по началу.
+function shortTitle(text) {
+  return String(text || '')
+    .split('\n', 1)[0]
+    .trim()
+    .replace(/…$/, '')
+    .slice(0, 200);
+}
+
+// Подагент карточки: точная ссылка из агента, а если её нет (синхронный вызов
+// opencode) — ближайший по времени подагент с той же подписью.
+function subagentForItem(item) {
+  if (item.sub) return item.sub;
+  const want = shortTitle(item.text);
+  if (!want) return '';
+  let best = null;
+  for (const sub of subagents) {
+    if (!sub.id || shortTitle(sub.title) !== want) continue;
+    // Время запуска и отметка вызова относятся к одному моменту; далёкие
+    // совпадения — одноимённые подагенты из разных мест сессии.
+    if (!item.ts || !sub.started_at) continue;
+    const d = Math.abs(sub.started_at - item.ts);
+    if (d > 10 * 60 * 1000) continue;
+    if (!best || d < best.d) best = { id: sub.id, d };
+  }
+  return best ? best.id : '';
+}
+
+function cardSubId(item) {
+  return subagentForItem(item);
+}
+
+// Карточка вызова подагента в ленте. Она стоит там, где вызов был на самом
+// деле, поэтому несколько подагентов подряд видно рядом, а старые не теряются.
+function subagentCard(item) {
+  cardItems.set(item.id, item);
+  const card = el('button', 'sub-card');
+  card.type = 'button';
+  card.dataset.card = item.id;
+  const kind = el('span', 'sub-card-kind', item.tool || '');
+  if (!item.tool) kind.hidden = true;
+  card.append(el('span', 'sub-card-dot'), kind);
+  card.append(el('span', 'sub-card-title', shortTitle(item.text) || 'Подагент'), el('span', 'sub-card-meta'));
+  const open = el('span', 'sub-card-open');
+  open.append(icon(['M6 3.5 10.5 8 6 12.5']));
+  card.append(open);
+  refreshSubCard(card, item);
+  card.addEventListener('click', () => openCardSub(item.id));
+  return card;
+}
+
+// Итог подагента под карточкой: ответ, который получил основной агент. Раньше
+// он не был виден вовсе — только в ленте самого подагента.
+function subagentResult(item) {
+  const details = el('details', 'sub-result');
+  const body = el('div', 'body md');
+  body.append(renderMarkdown(item.text, mdOptions()));
+  details.append(el('summary', '', 'Итог подагента'), body);
+  return details;
+}
+
+// Статус, время и токены карточки. Обновляется и при новом списке, и раз в
+// секунду, пока подагент работает.
+function refreshSubCard(card, item) {
+  const id = cardSubId(item);
+  const sub = id ? subagentById(id) : null;
+  if (id) card.dataset.sub = id;
+  else delete card.dataset.sub;
+  card.classList.toggle('nolink', !id);
+  card.classList.toggle('active', Boolean(id) && subDrawer === id);
+  card.classList.toggle('running', Boolean(sub && sub.running));
+  const meta = card.querySelector('.sub-card-meta');
+  const parts = [];
+  if (sub) {
+    const end = sub.running ? Date.now() : sub.ended_at;
+    if (sub.started_at && end > sub.started_at) parts.push(fmtElapsed(end - sub.started_at));
+    const turn = sub.turn || {};
+    if (turn.input) parts.push(`↑ ${fmtTokens(turn.input)}`);
+    if (turn.output) parts.push(`↓ ${fmtTokens(turn.output)}`);
+    meta.textContent = `${sub.running ? 'идёт' : 'готово'}${parts.length ? ` · ${parts.join(' · ')}` : ''}`;
+  } else {
+    meta.textContent = '';
+  }
+  const title = subagentTitle(sub) || shortTitle(item.text) || 'Подагент';
+  const titleNode = card.querySelector('.sub-card-title');
+  // В вызове подписи не было (старая версия инструмента) — берём её из списка.
+  if (titleNode && !shortTitle(item.text)) titleNode.textContent = title;
+  if (sub && sub.agent) {
+    const kind = card.querySelector('.sub-card-kind');
+    if (kind) {
+      kind.textContent = sub.agent;
+      kind.hidden = false;
+    }
+  }
+  card.title = [title, sub && sub.agent ? `агент: ${sub.agent}` : '', sub ? (sub.running ? 'работает' : 'завершён') : '']
+    .filter(Boolean)
+    .join('\n');
+  card.setAttribute('aria-label', id ? `Открыть ленту подагента: ${title}` : `Подагент: ${title}`);
+}
+
+// Обновление карточек и шапки открытой панели: карточки остаются в ленте, а
+// статус приходит отдельным списком каждые пару секунд.
+function refreshSubViews() {
+  for (const card of document.querySelectorAll('.sub-card')) {
+    const item = cardItems.get(card.dataset.card);
+    if (item) refreshSubCard(card, item);
+  }
+  if (subDrawer) renderSubView();
+}
+
+// Шапка панели подагента: подпись, тип, работа, время и токены.
+function renderSubView() {
+  const box = $('sub-view');
+  if (!selected || !subDrawer) {
     box.hidden = true;
-    box.replaceChildren();
     return;
   }
   box.hidden = false;
-  box.replaceChildren(
-    ...subagents.map((sub) => {
-      const chip = el('button', sub.running ? 'subagent running' : 'subagent');
-      chip.type = 'button';
-      chip.dataset.sub = sub.id;
-      if (subTab === sub.id) chip.classList.add('active');
-      const title = subagentTitle(sub) || 'Подагент';
-      chip.append(el('span', 'subagent-dot'), el('span', 'subagent-title', title));
-      if (sub.agent && sub.agent !== 'general-purpose') chip.append(el('span', 'subagent-kind', sub.agent));
-      chip.title = [
-        title,
-        sub.agent ? `агент: ${sub.agent}` : '',
-        sub.running ? 'работает' : 'завершён',
-      ]
-        .filter(Boolean)
-        .join('\n');
-      chip.setAttribute('aria-label', `Открыть ленту подагента: ${title}`);
-      chip.addEventListener('click', () => openSubTab(sub.id));
-      return chip;
-    }),
-  );
-}
-
-// Вкладки в блоке ленты: основная сессия и открытые подагенты. Появляются,
-// только когда открыт хотя бы один подагент.
-function renderSubagentTabs() {
-  const bar = $('feed-tabs');
-  if (!selected || !subTabs.length) {
-    bar.hidden = true;
-    bar.replaceChildren();
-    return;
-  }
-  bar.hidden = false;
-  const list = [{ id: '', title: 'Сессия', running: false }];
-  for (const id of subTabs) {
-    const sub = subagentById(id);
-    list.push({ id, title: subagentTitle(sub) || 'Подагент', running: Boolean(sub && sub.running) });
-  }
-  bar.replaceChildren(
-    ...list.map((tab) => {
-      const box = el(
-        'div',
-        `feed-tab${subTab === tab.id ? ' active' : ''}${tab.running ? ' running' : ''}`,
+  const sub = subagentById(subDrawer);
+  const item = sub ? null : findSubCardItem(subDrawer);
+  const title = subagentTitle(sub) || shortTitle(item && item.text) || 'Подагент';
+  $('sub-view-title').textContent = title;
+  $('sub-view-title').title = title;
+  const parts = [];
+  if (sub) {
+    if (sub.agent) parts.push(sub.agent);
+    if (sub.running) {
+      parts.push(
+        sub.started_at && Date.now() > sub.started_at ? `работает ${fmtElapsed(Date.now() - sub.started_at)}` : 'работает',
       );
-      const btn = el('button', 'feed-tab-btn', tab.title);
-      btn.type = 'button';
-      btn.title = tab.title;
-      btn.setAttribute('role', 'tab');
-      btn.setAttribute('aria-selected', subTab === tab.id ? 'true' : 'false');
-      btn.addEventListener('click', () => switchFeed(tab.id));
-      box.append(btn);
-      if (tab.id) {
-        const close = el('button', 'feed-tab-close');
-        close.type = 'button';
-        close.title = 'Закрыть вкладку';
-        close.setAttribute('aria-label', `Закрыть вкладку «${tab.title}»`);
-        close.append(icon(['M4 4l8 8', 'M12 4l-8 8']));
-        close.addEventListener('click', (e) => {
-          e.stopPropagation();
-          closeSubTab(tab.id);
-        });
-        box.append(close);
-      }
-      return box;
-    }),
-  );
-}
-
-// Открывает ленту подагента из ссылки. Список подагентов приходит от агента
-// позже самой сессии, поэтому здесь запоминается, что открыть, когда он придёт.
-function openLinkedSub(id) {
-  if (!id || !selected || subTab === id) return;
-  pendingSub = id;
-  tryPendingSub();
-}
-
-function tryPendingSub() {
-  if (!pendingSub || !selected) return;
-  const id = pendingSub;
-  if (!subagentById(id)) {
-    // Список уже пришёл, а подагента в нём нет: ссылка устарела. Остаёмся
-    // в основной ленте и убираем `sub` из адреса.
-    if (subagentsKnown) {
-      pendingSub = '';
-      updateSessionUrl();
+    } else {
+      parts.push('завершён');
+      if (sub.started_at && sub.ended_at > sub.started_at) parts.push(`всего ${fmtElapsed(sub.ended_at - sub.started_at)}`);
     }
-    return;
+    const turn = sub.turn || {};
+    if (turn.input) parts.push(`↑ ${fmtTokens(turn.input)}`);
+    if (turn.output) parts.push(`↓ ${fmtTokens(turn.output)}`);
+  } else if (item && item.tool) {
+    parts.push(item.tool);
   }
-  pendingSub = '';
-  if (subTab === id) {
-    renderSubagents();
-    renderSubagentTabs();
-    return;
-  }
-  switchFeed(id);
+  $('sub-view-meta').textContent = parts.join(' · ');
 }
 
-// Открывает ленту подагента вкладкой (или переключается на уже открытую).
-function openSubTab(id) {
-  if (!selected || !subagentById(id)) return;
-  if (subTab === id) {
-    renderSubagents();
-    renderSubagentTabs();
+// Открывает панель подагента (или переключает на другого). Подписку на ленту
+// переключает здесь же: агент шлёт ленту только тому, кто её смотрит.
+function openSubDrawer(id) {
+  if (!selected || !id) return;
+  if (subDrawer === id) {
+    renderSubView();
+    refreshSubViews();
     return;
   }
-  switchFeed(id);
-}
-
-// Переключение вкладки: подписка агента на ленту и сборка DOM из кэша.
-function switchFeed(id) {
-  if (!selected || id === subTab) return;
-  // Уходим с основной ленты — её место сохраняем сейчас, пока оно ещё в DOM.
-  if (!subTab) flushFeedPlace();
-  const feed = $('feed');
-  tabScroll.set(subTab, feed.scrollTop);
-  tabOpen.set(subTab, openItems());
-  const msg = { agent: selected.agent, session: selected.session };
-  if (id) {
-    if (!subTabs.includes(id)) subTabs.push(id);
-    send({ t: 'watch_sub', ...msg, sub: id });
-  } else if (subTab) {
-    send({ t: 'unwatch_sub', ...msg, sub: subTab });
-  }
-  showTab(id);
-}
-
-// Показывает вкладку `id` из кэша. Подписку на ленту переключает вызывающий.
-function showTab(id) {
-  subTab = id;
-  // Адрес показывает открытую ленту: у подагента своя ссылка с `sub`.
+  if (subDrawer) saveSubView();
+  const previous = subDrawer;
+  subDrawer = id;
+  if (previous) send({ t: 'unwatch_sub', agent: selected.agent, session: selected.session, sub: previous });
+  send({ t: 'watch_sub', agent: selected.agent, session: selected.session, sub: id });
   updateSessionUrl();
-  const feed = $('feed');
-  const key = tabKey(id);
-  const cached = feedItems.get(key);
-  renderFeed(key, Boolean(id) && !(cached && cached.size));
-  restoreOpen(tabOpen.get(id));
-  const saved = tabScroll.get(id);
-  if (!id && feedRestore) {
-    // Основную ленту ещё не поставили на сохранённое место (её собирали, пока
-    // была открыта вкладка подагента): место важнее того, что запомнила вкладка.
-    feedRestore.ready = true;
-    applyFeedRestore();
-  } else {
-    feed.scrollTop = saved === undefined ? feed.scrollHeight : Math.min(saved, feed.scrollHeight);
-    // Куда встала лента, то и решает, следует ли она теперь за концом: у
-    // вкладки своё место чтения, и присвоение `scrollTop` события прокрутки
-    // может не дать.
-    followEnd = placeAtEnd();
-  }
-  // Закреп относится к основной ленте: у подагента его нет.
-  if (!id) syncPin();
-  renderSubagents();
-  renderSubagentTabs();
-  // В ленту подагента сообщение не отправить: поле ввода относится к сессии.
-  renderHeader();
+  showSubView();
+  refreshSubViews();
 }
 
-// Закрывает вкладку подагента. Активную заменяет соседняя (или основная лента).
-function closeSubTab(id) {
-  const at = subTabs.indexOf(id);
-  if (at < 0) return;
-  subTabs.splice(at, 1);
-  cacheReset(tabKey(id));
-  tabScroll.delete(id);
-  tabOpen.delete(id);
-  if (subTab !== id) {
-    renderSubagentTabs();
-    renderSubagents();
+// Показывает панель из кэша (если он есть) и ставит ленту туда, где её читали.
+function showSubView() {
+  $('sub-view').hidden = false;
+  renderSubView();
+  renderSubFeed(tabKey(subDrawer));
+  const back = $('sub-view-back');
+  if (back) back.focus({ preventScroll: true });
+}
+
+// Закрывает панель и возвращает фокус на карточку, из которой её открыли.
+function closeSubDrawer() {
+  if (!subDrawer) return;
+  saveSubView();
+  const id = subDrawer;
+  subDrawer = '';
+  // Лента закрытой панели больше не нужна: при следующем открытии агент
+  // пришлёт её заново, а место чтения останется в subScroll/subOpen.
+  feedItems.delete(tabKey(id));
+  feedOrder.delete(tabKey(id));
+  subNodes.clear();
+  subCalls.clear();
+  subPendingCalls = [];
+  $('sub-feed').replaceChildren();
+  $('sub-view').hidden = true;
+  if (selected) send({ t: 'unwatch_sub', agent: selected.agent, session: selected.session, sub: id });
+  updateSessionUrl();
+  refreshSubViews();
+  if (subOpenedFrom && document.contains(subOpenedFrom)) subOpenedFrom.focus({ preventScroll: true });
+  subOpenedFrom = null;
+}
+
+// Место чтения и раскрытые вызовы панели — на случай, если её откроют снова.
+function saveSubView() {
+  if (!subDrawer) return;
+  const root = $('sub-feed');
+  subScroll.set(subDrawer, root.scrollTop);
+  subOpen.set(subDrawer, subOpenItems(root));
+}
+
+function subOpenItems(root) {
+  const open = new Set();
+  for (const node of root.querySelectorAll('.item')) {
+    if (node.querySelector('details[open]')) open.add(node.dataset.id);
+  }
+  return open;
+}
+
+function subRestoreOpen(root, open) {
+  if (!open || !open.size) return;
+  for (const node of root.querySelectorAll('.item')) {
+    if (!open.has(node.dataset.id)) continue;
+    const details = node.querySelector('details');
+    if (details) details.open = true;
+  }
+}
+
+function subAtEnd(root) {
+  return root.scrollHeight - root.scrollTop - root.clientHeight < 80;
+}
+
+// Собирает панель из кэша. Пустой кэш отличается от ещё не пришедшей ленты:
+// первый появляется только после ответа агента.
+function renderSubFeed(key) {
+  const root = $('sub-feed');
+  subNodes.clear();
+  subCalls.clear();
+  subPendingCalls = [];
+  root.replaceChildren();
+  const items = feedItems.get(key);
+  if (!items) {
+    root.append(el('div', 'empty', 'Загрузка ленты подагента…'));
     return;
   }
-  const next = subTabs[Math.min(at, subTabs.length - 1)] || '';
-  if (selected) {
-    const msg = { agent: selected.agent, session: selected.session };
-    send({ t: 'unwatch_sub', ...msg, sub: id });
-    if (next) send({ t: 'watch_sub', ...msg, sub: next });
+  if (!items.size) {
+    root.append(el('div', 'empty', 'Лента подагента пуста.'));
+    return;
   }
-  // Лента закрытой вкладки больше не наша: уходим с неё, не отправляя отмену
-  // повторно (она уже ушла выше).
-  subTab = '';
-  showTab(next);
+  for (const id of feedOrder.get(key) || []) {
+    const item = items.get(id);
+    if (item) placeSubItem(item, true);
+  }
+  subRestoreOpen(root, subOpen.get(subDrawer));
+  const saved = subScroll.get(subDrawer);
+  root.scrollTop = saved === undefined ? root.scrollHeight : Math.min(saved, root.scrollHeight);
 }
 
-// Лента подагента пришла от агента: элементы копятся в кэше, а в DOM попадают,
-// пока открыта его вкладка.
+// Один элемент ленты подагента. Подсказки и раскрытые вызовы те же, что в
+// сессии, но избранного нет: оно относится к сессии, а не к подагенту.
+function placeSubItem(item, isNew) {
+  const old = subNodes.get(item.id);
+  subTrackCall(item, isNew);
+  let call = null;
+  if (item.kind === 'tool_result') call = subCallFor(item, isNew);
+  const node = buildItem(item, call, { sub: true });
+  if (old) {
+    const was = old.querySelector('details');
+    const now = node.querySelector('details');
+    if (was && now) now.open = was.open;
+    old.replaceWith(node);
+  } else {
+    $('sub-feed').append(node);
+  }
+  subNodes.set(item.id, node);
+}
+
+// Вызов инструмента для его результата: у opencode id результата — id вызова с
+// `:r`, у Claude Code результаты идут в порядке вызовов.
+function subCallFor(item, isNew) {
+  if (item.id.endsWith(':r')) {
+    const call = subCalls.get(item.id.slice(0, -2));
+    if (call) {
+      subPendingCalls = subPendingCalls.filter((c) => c !== call);
+      return call;
+    }
+  }
+  return isNew ? subPendingCalls.shift() || null : null;
+}
+
+function subTrackCall(item, isNew) {
+  if (item.kind === 'tool_use') {
+    subCalls.set(item.id, item);
+    if (isNew) subPendingCalls.push(item);
+  } else if (item.kind === 'text' && item.role === 'assistant' && isNew) {
+    subPendingCalls = [];
+  }
+}
+
+// Лента подагента пришла от агента: копим в кэше, а в панель ставим, пока она
+// открыта. Пересборка идёт только по `reset`, остальное дописывается на место.
 function applySubHistory(msg) {
   const key = tabKey(msg.sub);
   if (msg.reset) cacheReset(key);
-  for (const item of (msg.items || []).map(plainItem)) cachePut(key, item);
-  if (msg.error && (msg.reset || (msg.items || []).length)) {
+  const items = (msg.items || []).map(plainItem);
+  for (const item of items) cachePut(key, item);
+  if (msg.error && (msg.reset || items.length)) {
     setHint(`Лента подагента: ${msg.error}`, true);
   }
-  if (subTab !== msg.sub) return;
-  const feed = $('feed');
-  // Как и в основной ленте: в конец лента уезжает, только пока человек у низа.
-  // Пересборка (переподключение) не должна выдёргивать читающего в самый конец.
-  const stick = followEnd;
-  const place = msg.reset && !stick ? feedPlace() : null;
-  const open = openItems();
-  renderFeed(key);
-  restoreOpen(open);
-  if (stick) {
-    feed.scrollTop = feed.scrollHeight;
-    followEnd = true;
-  } else if (place) {
-    applyFeedPlace(place);
-    followEnd = placeAtEnd();
+  if (subDrawer !== msg.sub) return;
+  const root = $('sub-feed');
+  // Лента уезжает в конец, только если это первое открытие (места чтения ещё
+  // нет) или человек уже у низа. Пересборка после переподключения не должна
+  // выдёргивать его из середины транскрипта.
+  const stick = !subScroll.has(msg.sub) && subAtEnd(root);
+  if (msg.reset) {
+    // Транскрипт прочитан заново: место чтения и раскрытое остаются прежними.
+    // «Загрузка» вместо ленты — это первое открытие, сохранять нечего.
+    if (root.querySelector('.item')) saveSubView();
+    const open = subOpenItems(root);
+    renderSubFeed(key);
+    subRestoreOpen(root, open);
+  } else {
+    for (const item of items) placeSubItem(item, !subNodes.has(item.id));
   }
-  updateToEnd();
+  if (stick) root.scrollTop = root.scrollHeight;
+  renderSubView();
 }
 
-// Сессию закрыли или открыли другую: подагенты и их вкладки к ней не относятся.
+// Карточка нажата: открываем ленту её подагента. Ссылку берём из элемента
+// ленты, а не из DOM: список подагентов мог прийти позже.
+function openCardSub(itemId) {
+  const item = findFeedItem(itemId);
+  if (!item) return;
+  const id = cardSubId(item);
+  if (!id) {
+    setHint('Лента подагента не найдена: агент не сообщил её идентификатор.', true);
+    return;
+  }
+  subOpenedFrom = [...document.querySelectorAll('.sub-card')].find((c) => c.dataset.card === itemId) || null;
+  openSubDrawer(id);
+}
+
+// Ссылка на ленту подагента из адреса: она открывается сразу, не дожидаясь
+// списка — агенту хватает id.
+function openLinkedSub(id) {
+  if (!id || !selected) return;
+  openSubDrawer(id);
+}
+
+function findFeedItem(id) {
+  for (const items of feedItems.values()) {
+    const item = items.get(id);
+    if (item) return item;
+  }
+  return null;
+}
+
+function findSubCardItem(id) {
+  for (const items of feedItems.values()) {
+    for (const item of items.values()) {
+      if (item.kind === 'subagent' && cardSubId(item) === id) return item;
+    }
+  }
+  return null;
+}
+
+// Сессию закрыли или открыли другую: подагенты и их карточки к ней не относятся.
 function resetSubagentView() {
   subagents = [];
-  subagentsKnown = false;
-  pendingSub = '';
-  subTabs = [];
-  subTab = '';
-  cacheReset('');
+  subDrawer = '';
+  subOpenedFrom = null;
+  cardItems.clear();
+  subNodes.clear();
+  subCalls.clear();
+  subPendingCalls = [];
+  subScroll.clear();
+  subOpen.clear();
   for (const key of [...feedItems.keys()]) {
     if (!key) continue;
     feedItems.delete(key);
     feedOrder.delete(key);
   }
-  tabScroll.clear();
-  tabOpen.clear();
-  renderSubagents();
-  renderSubagentTabs();
+  $('sub-feed').replaceChildren();
+  $('sub-view').hidden = true;
+  renderSubView();
 }
+
+$('sub-view-back').addEventListener('click', closeSubDrawer);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape' || !subDrawer) return;
+  // Диалог и меню закрываются сами: не закрываем за ними ещё и панель.
+  if (document.querySelector('dialog[open]')) return;
+  if (!$('favorites-menu').hidden || !$('session-menu').hidden) return;
+  closeSubDrawer();
+});

@@ -1004,6 +1004,7 @@ mod tests {
                     kind: "text".into(),
                     text: "первый".into(),
                     tool: None,
+                    sub: None,
                 }],
                 more: true,
                 error: None,
@@ -1016,7 +1017,7 @@ mod tests {
     }
 
     #[test]
-    fn sub_history_reaches_only_the_open_subagent_tab() {
+    fn sub_history_reaches_only_the_open_subagent_panel() {
         let (tx, mut rx) = mpsc::channel::<String>(4);
         let (main, mut main_rx) = mpsc::channel::<String>(4);
         let (other, mut other_rx) = mpsc::channel::<String>(4);
@@ -1030,7 +1031,7 @@ mod tests {
                 sub: Some("a1".into()),
             },
         );
-        // Та же сессия, но открыта основная лента: чужая вкладка сюда не идёт.
+        // Та же сессия, но панель подагента закрыта: чужая лента сюда не идёт.
         inner.browsers.insert(
             2,
             BrowserEntry {
@@ -1067,6 +1068,7 @@ mod tests {
                     kind: "text".into(),
                     text: "итог подагента".into(),
                     tool: None,
+                    sub: None,
                 }],
                 more: false,
                 error: None,
@@ -1080,7 +1082,7 @@ mod tests {
     }
 
     #[test]
-    fn watch_sub_is_forwarded_and_replaces_the_previous_tab() {
+    fn watch_sub_is_forwarded_and_replaces_the_previous_panel() {
         let (tx, mut rx) = mpsc::channel::<ServerMsg>(4);
         let (browser, _browser_rx) = mpsc::channel::<String>(1);
         let mut inner = Inner::default();
@@ -1107,7 +1109,7 @@ mod tests {
         );
         assert_eq!(app.lock().browsers.get(&1).and_then(|b| b.sub.clone()).as_deref(), Some("a1"));
 
-        // Вкладку сменили: прежняя отписка уходит агенту до новой подписки.
+        // Панель сменили: прежняя отписка уходит агенту до новой подписки.
         on_browser_msg(
             &app,
             1,

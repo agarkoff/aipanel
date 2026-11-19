@@ -24,34 +24,11 @@ function fmtElapsed(ms) {
   return `${Math.floor(h / 24)}д ${String(h % 24).padStart(2, '0')}ч`;
 }
 
-// Строка хода на вкладке подагента: только его собственные токены. Слева —
-// время: идущее с запуска, пока он работает, и полное у завершённого.
-function renderSubTurn(box) {
-  const sub = subagentById(subTab);
-  if (!sub) {
-    box.hidden = true;
-    return;
-  }
-  const turn = sub.turn || {};
-  const parts = [];
-  const end = sub.running ? Date.now() : sub.ended_at;
-  if (sub.started_at && end > sub.started_at) parts.push(el('span', '', fmtElapsed(end - sub.started_at)));
-  if (turn.input) parts.push(el('span', '', `↑ ${fmtTokens(turn.input)}`));
-  if (turn.output) parts.push(el('span', '', `↓ ${fmtTokens(turn.output)}`));
-  if (!parts.length) {
-    box.hidden = true;
-    return;
-  }
-  box.replaceChildren(el('span', 'turn-mark', '✻'), ...parts);
-  box.title = 'Токены подагента: ↑ контекст его последнего ответа, ↓ выход за прогон';
-  box.classList.toggle('done', !sub.running);
-  box.hidden = false;
-}
-
+// Строка хода: время с запроса и токены, записанные в транскрипт. Токены
+// подагента показывает его панель: у открытой ленты своя шапка.
 function renderTurn() {
   const box = $('turn');
   box.classList.remove('done', 'stalled');
-  if (subTab) return renderSubTurn(box);
   const cur = current();
   const turn = cur && cur.agent.online && BUSY_STATUSES.has(cur.session.status) ? cur.session.turn : null;
   if (!turn) {
@@ -86,6 +63,7 @@ function renderTurn() {
 setInterval(() => {
   renderTurn();
   refreshCallTimers();
+  refreshSubViews();
 }, 1000);
 
 function renderHeader() {
@@ -163,9 +141,8 @@ function renderHeader() {
   $('sm-handoff').title = $('handoff').title;
   $('sm-handoff').disabled = $('handoff').disabled;
   const canSend = agent.online && session.delivery !== 'none';
-  // Лента подагента — только просмотр: сообщение отправляется в сессию, поэтому
-  // поле ввода на его вкладке скрыто.
-  $('composer').hidden = subTab !== '';
+  // Панель подагента — только просмотр: поле ввода по-прежнему пишет в сессию.
+  $('composer').hidden = false;
   $('text').disabled = !canSend;
   $('composer').querySelector('button').disabled = !canSend;
   if (!$('hint').dataset.sticky) {
@@ -553,7 +530,7 @@ function askText(text) {
   return { label: `Вопрос: ${firstLine(String(first.question || first.header || ''))}${more}`, text: blocks.join('\n\n') };
 }
 
-function buildItem(item, call) {
+function buildItem(item, call, opts = {}) {
   const node = el('div', `item ${item.role} ${item.kind}`);
   node.dataset.id = item.id;
   // Время нужно фрагменту в избранном: выделенный кусок берёт его у сообщения.
@@ -608,6 +585,13 @@ function buildItem(item, call) {
     node.append(line);
   } else if (item.kind === 'diff') {
     node.append(diffDetails(item.text));
+  } else if (item.kind === 'subagent') {
+    // Вызов подагента: карточка на своём месте в ленте, из неё открывается
+    // лента подагента. Не `<details>`: у карточки своя строка и переход.
+    node.append(subagentCard(item));
+  } else if (item.kind === 'subagent_result') {
+    // Ответ подагента, который получил основной агент: под карточкой, свёрнутый.
+    node.append(subagentResult(item));
   } else {
     const details = el('details');
     // Вопрос Claude с вариантами: в ленте — текстом, а не JSON аргументов.
@@ -659,9 +643,9 @@ function buildItem(item, call) {
     foot.append(el('div', 'time', new Date(item.ts).toLocaleString()));
     const actions = el('div', 'foot-actions');
     // В избранное попадают свои сообщения и ответы агента: у ошибок и
-    // служебных строк в списке был бы мусор. У подагента избранного нет — оно
-    // относится к сессии, а не к ленте подагента.
-    if (!subTab && item.kind === 'text' && (item.role === 'user' || item.role === 'assistant')) {
+    // служебных строк в списке был бы мусор. У ленты подагента звёзд нет — они
+    // относятся к сессии.
+    if (!opts.sub && item.kind === 'text' && (item.role === 'user' || item.role === 'assistant')) {
       actions.append(favoriteButton(item));
     }
     if (item.text) actions.append(copyTextButton(item.text));
@@ -699,13 +683,13 @@ function placeItem(item, target) {
   if (call) refreshCallTime(call.id);
 }
 
-// ------------------------------------------------------------ вкладки лент
+// ------------------------------------------------------------ кэш лент
 
-// Элементы лент по вкладкам: '' — основная сессия, иначе id подагента.
-// Лента сессии приходит всегда, даже когда открыта вкладка подагента: её
-// элементы копятся здесь и попадают в DOM при возврате на основную вкладку.
-const feedItems = new Map(); // ключ вкладки -> Map(id -> элемент)
-const feedOrder = new Map(); // ключ вкладки -> [id] в порядке ленты
+// Элементы лент: '' — лента сессии, иначе лента подагента (`sub:<id>`).
+// Лента сессии и лента подагента показываются одновременно, но собираются из
+// разных кэшей: панель подагента можно закрыть и открыть снова без запроса.
+const feedItems = new Map(); // ключ ленты -> Map(id -> элемент)
+const feedOrder = new Map(); // ключ ленты -> [id] в порядке ленты
 
 function tabKey(id) {
   return id ? `sub:${id}` : '';
@@ -749,60 +733,6 @@ function cachePrepend(key, list) {
   order.unshift(...fresh.map((item) => item.id));
 }
 
-// Какие элементы раскрыты: лента вкладки собирается заново, и раскрытые
-// вызовы должны остаться раскрытыми.
-function openItems() {
-  const open = new Set();
-  for (const node of $('feed').querySelectorAll('.item')) {
-    if (node.querySelector('details[open]')) open.add(node.dataset.id);
-  }
-  return open;
-}
-
-function restoreOpen(open) {
-  if (!open || !open.size) return;
-  for (const node of $('feed').querySelectorAll('.item')) {
-    if (!open.has(node.dataset.id)) continue;
-    const details = node.querySelector('details');
-    if (details) details.open = true;
-  }
-}
-
-// Собирает ленту вкладки из кэша. Основная лента показывает и кнопку догрузки
-// ранних сообщений, и закреп; у подагента их нет — он читается целиком.
-// `loading` — лента ещё ни разу не приходила от агента.
-function renderFeed(key, loading) {
-  const feed = $('feed');
-  nodes.clear();
-  favButtons.clear();
-  toolCalls.clear();
-  resultCalls.clear();
-  callTimes.clear();
-  pendingCalls = [];
-  flashId = '';
-  feed.replaceChildren();
-  const items = feedItems.get(key);
-  if (!key) mountOlder();
-  else olderBtn.remove();
-  if (items && items.size) {
-    for (const id of feedOrder.get(key) || []) {
-      const item = items.get(id);
-      if (item) placeItem(item, feed);
-    }
-  } else {
-    feed.append(el('div', 'empty', loading ? 'Загрузка ленты…' : key ? 'Лента подагента пуста.' : 'Лента пуста.'));
-  }
-  updateToEnd();
-  if (key) {
-    // Подагент — отдельная лента: закреп и догрузка относятся к сессии.
-    $('pin').hidden = true;
-    return;
-  }
-  mountOlder();
-  updateOlder();
-  syncPin();
-}
-
 // Своё сообщение из ленты — оно же история для стрелок в поле ввода.
 // `true`, если элемент — запрос из ленты.
 function rememberRequest(item) {
@@ -813,8 +743,6 @@ function rememberRequest(item) {
 
 function applyHistory(msg) {
   msg.items = (msg.items || []).map(plainItem);
-  // Кэш обновляется всегда: лента сессии продолжает приходить, пока открыта
-  // вкладка подагента, — иначе вернувшись, человек увидел бы старое.
   if (msg.reset) {
     cacheReset('');
     feedRequests.clear();
@@ -824,16 +752,12 @@ function applyHistory(msg) {
     // Агент сказал, есть ли перед этой лентой более ранние сообщения: если их
     // нет, кнопки догрузки не будет вовсе.
     olderMore = msg.more === true;
-    // Пока показана вкладка подагента, DOM занят его лентой: общие для ленты
-    // сессии карты не трогаем, их всё равно пересоберёт renderFeed.
-    if (!subTab) {
-      nodes.clear();
-      favButtons.clear();
-      toolCalls.clear();
-      resultCalls.clear();
-      callTimes.clear();
-      pendingCalls = [];
-    }
+    nodes.clear();
+    favButtons.clear();
+    toolCalls.clear();
+    resultCalls.clear();
+    callTimes.clear();
+    pendingCalls = [];
   }
   for (const id of msg.drop || []) cacheDrop('', id);
   for (const item of msg.items) {
@@ -841,7 +765,6 @@ function applyHistory(msg) {
     // Отправленное из панели уже в ленте: очередь больше не нужна.
     if (rememberRequest(item)) consumeSentRequest(item.text);
   }
-  if (subTab) return;
   const feed = $('feed');
   // Лента следует за концом, только пока человек у низа: «рядом с ним» не в
   // счёт — перечитывающего последние строки новый кусок ответа не двигает.

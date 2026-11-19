@@ -110,8 +110,8 @@ struct Known {
 #[derive(Clone)]
 struct SubInfo {
     info: Subagent,
-    /// id вызова инструмента (`toolu_…`): строку вызова и её результат панель
-    /// не показывает — подагент открывается отдельной вкладкой.
+    /// id вызова инструмента (`toolu_…`): по нему карточка вызова в ленте и её
+    /// итог получают ссылку на ленту подагента.
     tool_id: String,
 }
 
@@ -467,9 +467,6 @@ impl Claude {
             out.push(info);
         }
         out.sort_by_key(|s| s.info.started_at);
-        if out.len() > MAX_SUBAGENTS {
-            out.drain(..out.len() - MAX_SUBAGENTS);
-        }
         out
     }
 
@@ -611,12 +608,20 @@ impl Claude {
         let mut queue = Queue::default();
         let mut shown_subs: Option<Vec<Subagent>> = None;
         loop {
-            // Список подагентов нужен и до ленты: по нему панель показывает их
-            // над полем ввода, а вызовы в самой ленте прячутся.
+            // Список подагентов нужен и до ленты: по нему карточки в ленте
+            // показывают статус, а их вызовы получают ссылку на ленту подагента.
             let subs = self.subagents(&sid);
-            let hide_ids: HashSet<String> =
-                subs.iter().filter(|s| !s.tool_id.is_empty()).map(|s| s.tool_id.clone()).collect();
-            let now_subs: Vec<Subagent> = subs.into_iter().map(|s| s.info).collect();
+            let sub_of: HashMap<String, String> = subs
+                .iter()
+                .filter(|s| !s.tool_id.is_empty())
+                .map(|s| (s.tool_id.clone(), s.info.id.clone()))
+                .collect();
+            let mut now_subs: Vec<Subagent> = subs.into_iter().map(|s| s.info).collect();
+            // Панели список нужен для статуса карточек: старые вытесняются, но
+            // сами карточки в ленте остаются (ссылки на них берутся из sub_of).
+            if now_subs.len() > MAX_SUBAGENTS {
+                now_subs.drain(..now_subs.len() - MAX_SUBAGENTS);
+            }
             if shown_subs.as_ref() != Some(&now_subs) {
                 let _ = out.send(AgentMsg::Subagents { session: key.clone(), subagents: now_subs.clone() });
                 shown_subs = Some(now_subs);
@@ -631,8 +636,7 @@ impl Claude {
                         let start = len.saturating_sub(HISTORY_BYTES);
                         queue = Queue::default();
                         let mut opts = ParseOpts {
-                            hide_subagents: true,
-                            hide_ids: Some(&hide_ids),
+                            subs: Some(&sub_of),
                             sidechain: false,
                             ..Default::default()
                         };
@@ -657,8 +661,7 @@ impl Claude {
                         });
                     } else if len > offset {
                         let mut opts = ParseOpts {
-                            hide_subagents: true,
-                            hide_ids: Some(&hide_ids),
+                            subs: Some(&sub_of),
                             sidechain: false,
                             ..Default::default()
                         };
@@ -714,9 +717,9 @@ impl Claude {
         }
     }
 
-    /// Следит за лентой подагента `sub`: вкладка с ней открывается из списка над
-    /// полем ввода. Транскрипт подагента — обычный транскрипт Claude Code, только
-    /// все его строки помечены `isSidechain`: их разбираем как есть.
+    /// Следит за лентой подагента `sub`: она открывается в панели из его
+    /// карточки в ленте сессии. Транскрипт подагента — обычный транскрипт Claude
+    /// Code, только все его строки помечены `isSidechain`: их разбираем как есть.
     pub async fn watch_sub(&self, key: String, sid: String, sub: String, out: UnboundedSender<AgentMsg>) {
         let mut path: Option<PathBuf> = None;
         let mut offset = 0u64;
@@ -796,18 +799,20 @@ impl Claude {
         if left == 0 {
             return Ok((Vec::new(), false));
         }
-        // Вызовы подагентов прячутся и в ранних сообщениях: их id берём из
-        // метаданных, а встреченные в куске id запоминаем для их результатов.
+        // Карточки подагентов есть и в ранних сообщениях: ссылку на ленту
+        // берём из метаданных, а встреченные в куске id запоминаем для итогов.
         let subs = self.subagents(sid);
-        let hide_ids: HashSet<String> =
-            subs.iter().filter(|s| !s.tool_id.is_empty()).map(|s| s.tool_id.clone()).collect();
+        let sub_of: HashMap<String, String> = subs
+            .iter()
+            .filter(|s| !s.tool_id.is_empty())
+            .map(|s| (s.tool_id.clone(), s.info.id.clone()))
+            .collect();
         let mut items = Vec::new();
         let mut spent = 0u64;
         while left > 0 && items.is_empty() && spent < OLDER_MAX_BYTES {
             let from = left.saturating_sub(OLDER_BYTES);
             let opts = ParseOpts {
-                hide_subagents: true,
-                hide_ids: Some(&hide_ids),
+                subs: Some(&sub_of),
                 sidechain: false,
                 ..Default::default()
             };
@@ -1092,6 +1097,7 @@ impl Claude {
                             truncate(err.trim(), 2000)
                         ),
                         tool: None,
+                        sub: None,
                     }],
                 });
             }
@@ -2158,20 +2164,58 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Вызов подагента в ленту сессии не попадает (ни вызов, ни его результат),
-    /// а в ленте самого подагента его записи видны как обычные сообщения.
+    /// Вызов подагента — карточка в ленте сессии, его результат — «Итог», а с
+    /// метаданными карточка получает ссылку на ленту подагента. Записи самого
+    /// подагента видны только в его транскрипте.
     #[test]
-    fn subagent_calls_are_hidden_from_session_feed() {
+    fn subagent_call_becomes_a_card_in_session_feed() {
         let call = r#"{"type":"assistant","uuid":"a1","timestamp":"2026-11-15T10:00:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Agent","input":{"description":"Найти причину","subagent_type":"explore"}}]}}"#;
         let result = r#"{"type":"user","uuid":"u1","timestamp":"2026-11-15T10:01:00.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"готово"}]}]}}"#;
         let plain = r#"{"type":"assistant","uuid":"a2","timestamp":"2026-11-15T10:02:00.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"a.rs"}}]}}"#;
-        let mut opts = ParseOpts { hide_subagents: true, ..Default::default() };
         let mut items = Vec::new();
+        let mut opts = ParseOpts::default();
         for line in [call, result, plain] {
             parse_line_opts(line, &mut items, &mut opts);
         }
-        let got: Vec<_> = items.iter().map(|i| (i.kind.as_str(), i.tool.as_deref())).collect();
-        assert_eq!(got, [("tool_use", Some("Read"))]);
+        let got: Vec<_> = items
+            .iter()
+            .map(|i| (i.kind.as_str(), i.tool.as_deref(), i.sub.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("subagent", Some("explore"), None),
+                ("subagent_result", None, None),
+                ("tool_use", Some("Read"), None),
+            ]
+        );
+        assert_eq!(items[0].text, "Найти причину");
+        assert_eq!(items[1].text, "готово");
+
+        // Связь из метаданных: id вызова -> id подагента. Она работает и тогда,
+        // когда строка самого вызова осталась за пределами прочитанного куска.
+        let mut sub_of = HashMap::new();
+        sub_of.insert("toolu_1".to_owned(), "a1".to_owned());
+        let mut opts = ParseOpts { subs: Some(&sub_of), ..Default::default() };
+        let mut items = Vec::new();
+        for line in [call, result] {
+            parse_line_opts(line, &mut items, &mut opts);
+        }
+        assert_eq!(items[0].sub.as_deref(), Some("a1"));
+        assert_eq!(items[1].sub.as_deref(), Some("a1"));
+        let mut opts = ParseOpts { subs: Some(&sub_of), ..Default::default() };
+        let mut items = Vec::new();
+        parse_line_opts(result, &mut items, &mut opts);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "subagent_result");
+        assert_eq!(items[0].sub.as_deref(), Some("a1"));
+
+        // Фоновый запуск: результат — отметка о запуске, а не итог подагента.
+        let background = r#"{"type":"user","uuid":"u2","timestamp":"2026-11-15T10:01:00.000Z","toolUseResult":{"backgroundTaskId":"bpn1"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"running in background"}]}]}}"#;
+        let mut opts = ParseOpts { subs: Some(&sub_of), ..Default::default() };
+        let mut items = Vec::new();
+        parse_line_opts(background, &mut items, &mut opts);
+        assert!(items.is_empty());
 
         // Записи подагента: в его транскрипте все строки `isSidechain`.
         let side = r#"{"type":"assistant","isSidechain":true,"uuid":"s1","timestamp":"2026-11-15T10:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"ищу"}]}}"#;

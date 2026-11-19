@@ -809,69 +809,64 @@ input, textarea, select {
 }
 .older:hover:not(:disabled) { color: var(--text); background: var(--panel); }
 
-/* Вкладки лент в блоке ленты: основная сессия и открытые подагенты. Полоса
-   появляется, только когда открыт хотя бы один подагент. */
-.feed-tabs {
+/* Панель ленты подагента: открывается поверх ленты сессии из карточки, поэтому
+   сессия остаётся на месте — её прокрутка, закреп и избранное не меняются. */
+.sub-view {
+  position: absolute;
+  inset: 0 0 0 auto;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  width: min(680px, 62%);
+  border-left: 1px solid var(--line);
+  background: var(--bg);
+  box-shadow: -10px 0 30px rgba(0, 0, 0, .14);
+}
+.sub-view[hidden] { display: none; }
+.sub-view-head {
   flex: none;
   display: flex;
-  gap: 4px;
-  padding: 6px 8px 0;
-  overflow-x: auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
 }
-.feed-tabs[hidden] { display: none; }
-.feed-tab {
+.sub-view-back {
   flex: none;
   display: inline-flex;
   align-items: center;
-  max-width: 280px;
-  border: 1px solid transparent;
-  border-bottom: 0;
-  border-radius: 8px 8px 0 0;
-}
-.feed-tab.active { background: var(--bg); border-color: var(--line); }
-.feed-tab-btn {
-  min-width: 0;
-  max-width: 236px;
-  padding: 5px 10px;
+  gap: 4px;
+  padding: 4px 8px;
   border: 0;
-  border-radius: 8px 8px 0 0;
+  border-radius: 6px;
   background: none;
   color: var(--muted);
   font-size: 12px;
+}
+.sub-view-back:hover { color: var(--text); background: var(--bg); }
+.sub-view-back svg { width: 15px; height: 15px; }
+.sub-view-titles { min-width: 0; flex: 1; }
+.sub-view-title {
+  font-size: 13px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.feed-tab.active .feed-tab-btn { color: var(--text); }
-.feed-tab.running .feed-tab-btn::before {
-  content: '';
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  margin-right: 5px;
-  border-radius: 50%;
-  background: var(--busy);
-  vertical-align: middle;
-  animation: turn-pulse 1.6s ease-in-out infinite;
-}
-.feed-tab-close {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin-right: 4px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: none;
+.sub-view-meta {
   color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.feed-tab-close svg { width: 12px; height: 12px; }
-.feed-tab-close:hover { color: var(--wait); background: var(--panel); }
+.sub-feed { padding: 12px 14px; }
+@media (max-width: 760px) {
+  .sub-view { left: 0; width: auto; border-left: 0; box-shadow: none; }
+  .sub-view-back-label { display: none; }
+}
 .item { max-width: 900px; width: 100%; margin: 0 auto; }
 /* Подсветка сообщения, к которому перешли по закрепу. */
 .item.flash { border-radius: 10px; animation: pin-flash 1.6s ease-out; }
@@ -1209,44 +1204,57 @@ input, textarea, select {
 .prompt-save { color: var(--muted); font-size: 11px; margin-top: 6px; overflow-wrap: anywhere; }
 .prompt-external { color: var(--accent); font-size: 13px; }
 
-/* Подагенты сессии: строка над счётчиком хода. Вызовы подагентов из ленты
-   убраны, поэтому это единственный вход в их ленты. */
-.subagents {
-  flex: none;
+/* Карточка подагента в ленте: вызов стоит там, где он случился, а лента
+   подагента открывается из неё панелью. */
+.sub-card {
   display: flex;
-  gap: 6px;
-  padding: 6px 16px;
-  overflow-x: auto;
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-}
-.subagents[hidden] { display: none; }
-.subagent {
-  flex: none;
-  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  max-width: 320px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--bg);
-  color: var(--muted);
-  font-size: 12px;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
 }
-.subagent:hover { color: var(--text); border-color: var(--accent); }
-.subagent.active { color: var(--text); border-color: var(--accent); }
-.subagent-dot {
+.sub-card:hover:not(.nolink) { border-color: var(--accent); }
+.sub-card.active { border-color: var(--accent); }
+.sub-card.nolink { cursor: default; }
+.sub-card-dot {
   flex: none;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--off);
 }
-.subagent.running .subagent-dot { background: var(--busy); animation: turn-pulse 1.6s ease-in-out infinite; }
-.subagent-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-kind { flex: none; font-size: 11px; opacity: .8; }
+.sub-card.running .sub-card-dot {
+  background: var(--busy);
+  animation: turn-pulse 1.6s ease-in-out infinite;
+}
+.sub-card-kind { flex: none; color: var(--muted); font-size: 11px; }
+.sub-card-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sub-card-meta {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.sub-card-open { flex: none; display: inline-flex; color: var(--muted); }
+.sub-card-open svg { width: 14px; height: 14px; }
+.sub-card.nolink .sub-card-open { visibility: hidden; }
+/* Итог подагента — ответ, который получил основной агент: под карточкой. */
+.item.subagent_result { margin-top: -4px; }
+.item.subagent_result details {
+  margin-left: 14px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+.item.subagent_result summary { color: var(--muted); font-size: 12px; }
 @media (prefers-reduced-motion: reduce) {
-  .subagent.running .subagent-dot, .feed-tab.running .feed-tab-btn::before { animation: none; }
+  .sub-card.running .sub-card-dot { animation: none; }
 }
 
 /* Строка хода: время и токены, пока сессия работает. Одна и та же на любом экране. */

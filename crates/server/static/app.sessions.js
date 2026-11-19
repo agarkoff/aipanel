@@ -1367,10 +1367,10 @@ function syncFromHash() {
   }
   const sameSession = selected && selected.agent === target.agent && selected.session === target.session;
   if (sameSession) {
-    // Ссылка на другую вкладку той же сессии: основная лента или подагент.
-    if (target.sub !== subTab) {
+    // Ссылка на другую ленту той же сессии: панель подагента или основная лента.
+    if (target.sub !== subDrawer) {
       if (target.sub) openLinkedSub(target.sub);
-      else switchFeed('');
+      else closeSubDrawer();
     }
     return;
   }
@@ -1395,11 +1395,11 @@ function setSessionUrl(agent, session, sub) {
   }
 }
 
-// Переключение вкладки не создаёт запись истории: «Назад» по-прежнему ведёт
-// к списку сессий, а адрес показывает открытую ленту.
+// Открытие панели подагента не создаёт запись истории: «Назад» по-прежнему
+// ведёт к списку сессий, а адрес показывает открытую ленту.
 function updateSessionUrl() {
   if (!selected) return;
-  const hash = sessionHash(selected.agent, selected.session, subTab);
+  const hash = sessionHash(selected.agent, selected.session, subDrawer);
   if (location.hash !== hash) history.replaceState(history.state, '', hash);
 }
 
@@ -1431,9 +1431,9 @@ function select(agent, session, sub) {
   applyFavorites();
   clearPrompts();
   clearTasks();
-  // Вкладки и подагенты относятся к прежней сессии.
+  // Подагенты относятся к прежней сессии: их карточки и открытая панель тоже.
   resetSubagentView();
-  // Ссылка могла вести на ленту подагента: откроем её, когда придёт список.
+  // Ссылка могла вести на ленту подагента: откроем её сразу.
   if (sub) openLinkedSub(sub);
   // В поле — черновик открытой сессии, а не текст предыдущей.
   loadDraft();

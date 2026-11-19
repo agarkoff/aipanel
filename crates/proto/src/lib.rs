@@ -79,12 +79,18 @@ pub struct Item {
     pub ts: i64,
     /// `user`, `assistant`, `system`.
     pub role: String,
-    /// `text`, `thinking`, `tool_use`, `tool_result`, `diff`, `error`;
+    /// `text`, `thinking`, `tool_use`, `tool_result`, `diff`, `error`,
+    /// `subagent` (карточка вызова подагента) и `subagent_result` (его итог);
     /// `cwd` — сессия перешла в другой каталог (`text` — новый путь).
     pub kind: String,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<String>,
+    /// Подагент, к которому относится элемент: карточка его вызова
+    /// (`kind = "subagent"`) и его итог (`kind = "subagent_result"`). По нему
+    /// панель открывает ленту подагента. Пусто, если связь неизвестна.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
 }
 
 /// Остаток одного окна лимита подписки (сессия, неделя, месяц).
@@ -256,9 +262,9 @@ pub struct BgTask {
 pub const MAX_TASKS: usize = 50;
 
 /// Подагент сессии: дочерний агент, которого запустил инструмент (`Agent` раньше
-/// `Task` в Claude Code, `subagent` в opencode). В ленте сессии его вызов не
-/// показывается: панель держит подагентов отдельным списком, а ленту выбранного
-/// подагента открывает вкладкой.
+/// `Task` в Claude Code, `subagent` в opencode). В ленте сессии его вызов — это
+/// карточка (`Item` с `kind = "subagent"`), а лента подагента открывается поверх
+/// ленты сессии из этой карточки.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Subagent {
     /// Идентификатор подагента: id его транскрипта у Claude Code или id дочерней
@@ -348,7 +354,8 @@ pub enum AgentMsg {
         tasks: Vec<BgTask>,
     },
     /// Подагенты сессии — в том числе завершённые. Полный список: клиент заменяет
-    /// им показанный ранее. Сами вызовы подагентов в ленту не попадают.
+    /// им показанный ранее. По нему карточки в ленте показывают, кто ещё
+    /// работает, сколько идёт и сколько токенов потратил подагент.
     Subagents {
         session: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -829,14 +836,23 @@ mod tasks_tests {
             session: "opencode:x".into(),
             sub: "ses_child".into(),
             reset: true,
-            items: vec![Item { id: "m:0".into(), ts: 1, role: "assistant".into(), kind: "text".into(), text: "итог".into(), tool: None }],
+            items: vec![Item {
+                id: "m:0".into(),
+                ts: 1,
+                role: "assistant".into(),
+                kind: "subagent_result".into(),
+                text: "итог".into(),
+                tool: None,
+                sub: Some("a031ee1e".into()),
+            }],
             more: false,
             error: None,
         };
         let text = serde_json::to_string(&msg).unwrap();
         assert!(text.starts_with("{\"t\":\"sub_history\""), "{text}");
         let back: AgentMsg = serde_json::from_str(&text).unwrap();
-        assert!(matches!(back, AgentMsg::SubHistory { sub, .. } if sub == "ses_child"));
+        assert!(matches!(back, AgentMsg::SubHistory { sub, items, .. }
+            if sub == "ses_child" && items[0].sub.as_deref() == Some("a031ee1e")));
 
         for msg in [
             ServerMsg::WatchSub { session: "opencode:x".into(), sub: "ses_child".into() },

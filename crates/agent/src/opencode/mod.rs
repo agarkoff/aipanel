@@ -99,7 +99,7 @@ struct Feed {
 impl Feed {
     fn item_hash(item: &Item) -> u64 {
         let mut h = DefaultHasher::new();
-        (&item.kind, &item.text, &item.tool).hash(&mut h);
+        (&item.kind, &item.text, &item.tool, &item.sub).hash(&mut h);
         h.finish()
     }
 
@@ -146,6 +146,7 @@ impl Feed {
             kind: item_kind.into(),
             text: truncate(&text, TEXT_LIMIT),
             tool: None,
+            sub: None,
         };
         self.changed(&item).then_some(item)
     }
@@ -741,6 +742,7 @@ impl OpenCode {
                                     kind: "error".into(),
                                     text: e,
                                     tool: None,
+                                    sub: None,
                                 });
                             }
                         }
@@ -1710,6 +1712,70 @@ mod tests {
                 ("m2:1:r", "tool_result", "a\nb"),
                 ("m2:text:0", "text", "done"),
             ]
+        );
+    }
+
+    #[test]
+    fn subagent_call_becomes_card_and_result() {
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m1","type":"assistant","time":{"created":100},"content":[
+                {"type":"tool","name":"subagent","state":{"status":"completed",
+                    "input":{"agent":"explore","description":"Найти причину"},
+                    "metadata":{"sessionID":"ses_child"},
+                    "content":[{"type":"text","text":"готово"}],
+                    "time":{"created":150,"completed":900}}}]}),
+            &mut items,
+        );
+        let got: Vec<_> = items
+            .iter()
+            .map(|i| (i.id.as_str(), i.kind.as_str(), i.text.as_str(), i.tool.as_deref(), i.sub.as_deref()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("m1:0", "subagent", "Найти причину", Some("explore"), Some("ses_child")),
+                ("m1:0:r", "subagent_result", "готово", None, Some("ses_child")),
+            ]
+        );
+
+        // Синхронный вызов: id ребёнка в вызове нет, итог лежит в самом вызове.
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m2","type":"assistant","time":{"created":100},"content":[
+                {"type":"tool","name":"subagent","state":{"status":"completed",
+                    "input":{"agent":"general","description":"Проверить"},"content":"итог"}}]}),
+            &mut items,
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!((items[0].kind.as_str(), items[0].sub.as_deref()), ("subagent", None));
+        assert_eq!((items[1].kind.as_str(), items[1].text.as_str()), ("subagent_result", "итог"));
+
+        // Фоновый вызов: его ответ приходит отдельным synthetic-сообщением, а
+        // содержимое самого вызова — не итог.
+        let mut items = Vec::new();
+        convert(
+            &json!({"id":"m3","type":"assistant","time":{"created":100},"content":[
+                {"type":"tool","name":"subagent","state":{"status":"completed",
+                    "input":{"agent":"general","background":true,"description":"В фоне"},
+                    "metadata":{"sessionID":"ses_child"},"content":"запущен"}}]}),
+            &mut items,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].kind, "subagent");
+
+        // Итог фонового подагента — synthetic-сообщение с обёрткой `<subagent>`.
+        let mut items = Vec::new();
+        convert(
+            &json!({"type":"synthetic","time":{"created":2000},
+                "metadata":{"source":"subagent","childID":"ses_child"},
+                "text":"<subagent sessionID=\"ses_child\" state=\"completed\">итог</subagent>"}),
+            &mut items,
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            (items[0].kind.as_str(), items[0].text.as_str(), items[0].sub.as_deref()),
+            ("subagent_result", "итог", Some("ses_child"))
         );
     }
 

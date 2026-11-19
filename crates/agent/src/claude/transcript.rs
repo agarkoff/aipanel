@@ -348,21 +348,19 @@ pub(super) fn read_range(path: &Path, start: u64, end: u64) -> Vec<u8> {
     buf
 }
 
-/// Что разбирать и что прятать при чтении строк транскрипта.
+/// Что разбирать при чтении строк транскрипта.
 #[derive(Default)]
 pub(super) struct ParseOpts<'a> {
-    /// Не показывать вызовы подагентов (`Agent`, `Task`) и их результаты: у них
-    /// своя лента, которая открывается из списка подагентов.
-    pub(super) hide_subagents: bool,
-    /// id вызовов подагентов из файлов `<id>/subagents/*.meta.json`: по ним
-    /// прячется результат вызова, даже если строка самого вызова осталась за
-    /// пределами прочитанного куска.
-    pub(super) hide_ids: Option<&'a HashSet<String>>,
+    /// id вызовов подагентов (`tool_use.id`) из файлов
+    /// `<id>/subagents/*.meta.json` и id самих подагентов. По этой связи карточка
+    /// вызова и её итог получают ссылку на ленту подагента, даже если файл
+    /// метаданных появился позже самой строки вызова.
+    pub(super) subs: Option<&'a HashMap<String, String>>,
     /// Разбирать записи подагента: в его транскрипте все строки помечены
     /// `isSidechain`, а в ленте сессии такие строки пропускаются.
     pub(super) sidechain: bool,
-    /// id вызовов подагентов, встреченных в этом куске: по ним прячется
-    /// результат вызова, даже когда файла метаданных ещё нет.
+    /// id вызовов подагентов, встреченных в этом куске: по ним итог относится
+    /// к карточке, даже когда связи из метаданных ещё нет.
     pub(super) seen: HashSet<String>,
 }
 
@@ -430,6 +428,7 @@ impl Queue {
                     kind: "queued".into(),
                     text: truncate(text, TEXT_LIMIT),
                     tool: None,
+                    sub: None,
                 });
             }
             Some("dequeue") => gone.extend(self.pending.pop_front().and_then(|(id, _)| id)),
@@ -585,6 +584,7 @@ pub(super) fn push_diff(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item>) {
         kind: "diff".into(),
         text: truncate(&text, DIFF_LIMIT),
         tool: None,
+        sub: None,
     });
 }
 
@@ -623,8 +623,21 @@ pub(super) fn parse_line_opts(line: &str, out: &mut Vec<Item>, opts: &mut ParseO
     if role == "user" {
         push_diff(&v, uuid, ts, out);
     }
-    let mut push = |idx: usize, role: &str, kind: &str, text: String, tool: Option<String>| {
-        out.push(Item { id: format!("{uuid}:{idx}"), ts, role: role.into(), kind: kind.into(), text, tool });
+    let mut push = |idx: usize,
+                    role: &str,
+                    kind: &str,
+                    text: String,
+                    tool: Option<String>,
+                    sub: Option<String>| {
+        out.push(Item {
+            id: format!("{uuid}:{idx}"),
+            ts,
+            role: role.into(),
+            kind: kind.into(),
+            text,
+            tool,
+            sub,
+        });
     };
     match &v["message"]["content"] {
         // Запрос, который Claude Code отправил сам (уведомление о фоновой задаче),
@@ -632,45 +645,70 @@ pub(super) fn parse_line_opts(line: &str, out: &mut Vec<Item>, opts: &mut ParseO
         // Сводка, которой Claude Code продолжает сессию после сжатия контекста:
         // запрос от имени пользователя, но писал его не человек.
         Value::String(s) if role == "user" && is_compact(&v) => {
-            push(0, "system", "notice", truncate(s, TEXT_LIMIT), Some("compact".into()))
+            push(0, "system", "notice", truncate(s, TEXT_LIMIT), Some("compact".into()), None)
         }
         Value::Array(blocks) if role == "user" && is_compact(&v) => {
             let text = blocks.iter().filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n");
             if !text.trim().is_empty() {
-                push(0, "system", "notice", truncate(&text, TEXT_LIMIT), Some("compact".into()));
+                push(0, "system", "notice", truncate(&text, TEXT_LIMIT), Some("compact".into()), None);
             }
         }
-        Value::String(s) if role == "user" && is_notice(&v, s) => push(0, "system", "notice", truncate(s, TEXT_LIMIT), None),
-        Value::String(s) if !s.trim().is_empty() => push(0, role, "text", truncate(s, TEXT_LIMIT), None),
+        Value::String(s) if role == "user" && is_notice(&v, s) => {
+            push(0, "system", "notice", truncate(s, TEXT_LIMIT), None, None)
+        }
+        Value::String(s) if !s.trim().is_empty() => push(0, role, "text", truncate(s, TEXT_LIMIT), None, None),
         Value::Array(blocks) => {
             for (i, b) in blocks.iter().enumerate() {
                 match b["type"].as_str() {
                     Some("text") => {
                         let text = b["text"].as_str().unwrap_or_default();
                         if !text.trim().is_empty() {
-                            push(i, role, "text", truncate(text, TEXT_LIMIT), None);
+                            push(i, role, "text", truncate(text, TEXT_LIMIT), None, None);
                         }
                     }
                     Some("thinking") => {
                         let text = b["thinking"].as_str().unwrap_or_default();
                         if !text.trim().is_empty() {
-                            push(i, role, "thinking", truncate(text, TEXT_LIMIT), None);
+                            push(i, role, "thinking", truncate(text, TEXT_LIMIT), None, None);
                         }
                     }
                     Some("tool_use") => {
                         let name = b["name"].as_str();
                         let id = b["id"].as_str().unwrap_or_default();
+                        // Связь с подагентом: точная из файлов метаданных или по
+                        // имени инструмента, если метаданных ещё нет. Вместо
+                        // обычного вызова в ленте — карточка: из неё панель
+                        // открывает ленту подагента.
                         let subagent = name.is_some_and(is_subagent_tool);
-                        // id из метаданных подагентов: вызов мог остаться за
-                        // пределами этого куска, а его результат — попасть в него.
-                        let known = !id.is_empty() && opts.hide_ids.is_some_and(|ids| ids.contains(id));
-                        if subagent && opts.hide_subagents {
-                            // По этому id прячется результат вызова ниже.
+                        let linked = if id.is_empty() {
+                            None
+                        } else {
+                            opts.subs.and_then(|subs| subs.get(id)).cloned()
+                        };
+                        if subagent || linked.is_some() {
                             if !id.is_empty() {
                                 opts.seen.insert(id.to_owned());
                             }
-                        }
-                        if !(opts.hide_subagents && (subagent || known)) {
+                            let input = &b["input"];
+                            let title = input["description"]
+                                .as_str()
+                                .filter(|d| !d.trim().is_empty())
+                                .or_else(|| input["prompt"].as_str())
+                                .unwrap_or("Подагент");
+                            let agent = input["subagent_type"]
+                                .as_str()
+                                .or(name)
+                                .unwrap_or_default()
+                                .to_owned();
+                            push(
+                                i,
+                                "assistant",
+                                "subagent",
+                                truncate(title, 400),
+                                (!agent.is_empty()).then_some(agent),
+                                linked,
+                            );
+                        } else {
                             push(
                                 i,
                                 "assistant",
@@ -684,26 +722,36 @@ pub(super) fn parse_line_opts(line: &str, out: &mut Vec<Item>, opts: &mut ParseO
                                     name => tool_text(name, &b["input"]),
                                 },
                                 name.map(str::to_owned),
+                                None,
                             );
                         }
                     }
                     Some("tool_result") => {
                         let use_id = b["tool_use_id"].as_str().unwrap_or_default();
-                        let hidden = opts.hide_subagents
-                            && !use_id.is_empty()
-                            && (opts.hide_ids.is_some_and(|ids| ids.contains(use_id))
-                                || opts.seen.contains(use_id));
-                        if !hidden {
-                            let text = match &b["content"] {
-                                Value::String(s) => s.clone(),
-                                Value::Array(parts) => parts
-                                    .iter()
-                                    .filter_map(|p| p["text"].as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                                _ => String::new(),
-                            };
-                            push(i, "tool", "tool_result", truncate(&text, RESULT_LIMIT), None);
+                        let linked = if use_id.is_empty() {
+                            None
+                        } else {
+                            opts.subs.and_then(|subs| subs.get(use_id)).cloned()
+                        };
+                        let subagent = !use_id.is_empty() && (linked.is_some() || opts.seen.contains(use_id));
+                        let text = match &b["content"] {
+                            Value::String(s) => s.clone(),
+                            Value::Array(parts) => parts
+                                .iter()
+                                .filter_map(|p| p["text"].as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            _ => String::new(),
+                        };
+                        if subagent {
+                            // У фонового запуска результат — не ответ подагента,
+                            // а отметка о запуске (`backgroundTaskId`): её место
+                            // занимает карточка, а итог придёт уведомлением.
+                            if v["toolUseResult"]["backgroundTaskId"].as_str().is_none() {
+                                push(i, "tool", "subagent_result", truncate(&text, RESULT_LIMIT), None, linked);
+                            }
+                        } else {
+                            push(i, "tool", "tool_result", truncate(&text, RESULT_LIMIT), None, None);
                         }
                     }
                     _ => {}
@@ -737,6 +785,7 @@ pub(super) fn push_cwd_switch(v: &Value, uuid: &str, ts: i64, out: &mut Vec<Item
         kind: "cwd".into(),
         text: to.to_owned(),
         tool: None,
+        sub: None,
     });
 }
 
@@ -781,5 +830,6 @@ pub(super) fn parse_queued(line: &str, out: &mut Vec<Item>) {
         kind: if notice { "notice" } else { "text" }.into(),
         text: truncate(text, TEXT_LIMIT),
         tool: None,
+        sub: None,
     });
 }

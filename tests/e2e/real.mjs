@@ -154,7 +154,7 @@ fs.writeFileSync(
 );
 
 // Транскрипт подагента и его метаданные: описание, тип агента и id вызова — всё,
-// что панели нужно для строки над счётчиком хода и для его ленты.
+// что панели нужно для карточки в ленте и для ленты самого подагента.
 const subDir = path.join(project, SESSION_ID, 'subagents');
 fs.mkdirSync(subDir, { recursive: true });
 fs.writeFileSync(
@@ -426,70 +426,72 @@ enabled = false
     })()`),
   );
 
-  // Подагент: вызов `Agent` в ленте не показывается, а строка над счётчиком
-  // хода открывает его собственную ленту вкладкой в блоке ленты.
+  // Подагент: вызов `Agent` — карточка в ленте на своём месте, его итог — под
+  // ней, а лента подагента открывается панелью поверх ленты сессии.
   check(
-    'подагент: вызов скрыт из ленты, а сам он виден над счётчиком хода',
+    'подагент: вызов виден карточкой, его итог — под ней',
     await waitFor(
       `(() => {
          const feed = document.querySelector('#feed')?.innerText || '';
-         const strip = document.querySelector('#subagents');
-         return !feed.includes(${JSON.stringify(SUB_ASK)})
-           && !feed.includes('подагент закончил')
-           && strip && !strip.hidden && strip.innerText.includes(${JSON.stringify(SUB_ASK)});
+         const card = document.querySelector('#feed .item.subagent .sub-card');
+         return feed.includes(${JSON.stringify(SUB_ASK)})
+           && feed.includes('Итог подагента')
+           && card && card.dataset.sub === ${JSON.stringify(SUB_ID)};
        })()`,
       15000,
     ),
-    await evaluate(`(() => ({ feed: document.querySelector('#feed')?.innerText || '', strip: document.querySelector('#subagents')?.innerText || '' }))()`),
+    await evaluate(`(() => ({ feed: document.querySelector('#feed')?.innerText || '', cards: document.querySelectorAll('#feed .sub-card').length }))()`),
   );
 
-  await evaluate(`(() => { document.querySelector('#subagents .subagent').click(); return true; })()`);
+  await evaluate(`(() => { document.querySelector('#feed .sub-card').click(); return true; })()`);
   check(
-    'подагент: лента открывается вкладкой вместо основной',
+    'подагент: карточка открывает его ленту панелью',
     await waitFor(
       `(() => {
-         const t = document.querySelector('#feed')?.innerText || '';
-         const tabs = document.querySelector('#feed-tabs');
-         return tabs && !tabs.hidden && t.includes(${JSON.stringify(SUB_REPLY)})
-           && !t.includes(${JSON.stringify(USER_TEXT)});
+         const panel = document.querySelector('#sub-view');
+         const t = document.querySelector('#sub-feed')?.innerText || '';
+         return panel && !panel.hidden && t.includes(${JSON.stringify(SUB_REPLY)});
        })()`,
       15000,
     ),
-    await evaluate(`(() => ({ feed: document.querySelector('#feed')?.innerText || '', tabs: document.querySelector('#feed-tabs')?.innerText || '' }))()`),
+    await evaluate(`(() => ({ hidden: document.querySelector('#sub-view')?.hidden, sub: document.querySelector('#sub-feed')?.innerText || '' }))()`),
   );
 
-  // Вкладка подагента показывает его собственные токены и полное время работы:
-  // подагент завершён, поэтому время считается от начала до его `idle`.
+  // Панель показывает токены и полное время подагента: он завершён, поэтому
+  // время считается от начала до его `idle`.
   check(
-    'подагент: на его вкладке видны его токены и время',
+    'подагент: в шапке панели его токены и время',
     await waitFor(
       `(() => {
-         const t = document.querySelector('#turn');
-         return t && !t.hidden && t.innerText.includes('↑ 1.5k') && t.innerText.includes('↓ 40')
-           && t.innerText.includes('1с');
+         const m = document.querySelector('#sub-view-meta');
+         return m && m.innerText.includes('↑ 1.5k') && m.innerText.includes('↓ 40')
+           && m.innerText.includes('1с');
        })()`,
       5000,
     ),
-    await evaluate(`(() => { const t = document.querySelector('#turn'); return { hidden: t.hidden, text: t.innerText, title: t.title }; })()`),
+    await evaluate(`document.querySelector('#sub-view-meta')?.innerText || ''`),
   );
 
-  await evaluate(`(() => { document.querySelectorAll('#feed-tabs .feed-tab-btn')[0].click(); return true; })()`);
   check(
-    'подагент: возврат во вкладку сессии восстанавливает её ленту',
+    'подагент: лента сессии осталась за панелью',
+    await evaluate(`(() => {
+      const t = document.querySelector('#feed')?.innerText || '';
+      return t.includes(${JSON.stringify(USER_TEXT)}) && !t.includes(${JSON.stringify(SUB_REPLY)});
+    })()`),
+  );
+
+  await evaluate(`(() => { document.querySelector('#sub-view-back').click(); return true; })()`);
+  check(
+    'подагент: закрытая панель убирается, лента сессии на месте',
     await waitFor(
       `(() => {
+         const panel = document.querySelector('#sub-view');
          const t = document.querySelector('#feed')?.innerText || '';
-         return t.includes(${JSON.stringify(USER_TEXT)}) && !t.includes(${JSON.stringify(SUB_REPLY)});
+         return panel && panel.hidden && t.includes(${JSON.stringify(USER_TEXT)});
        })()`,
-      10000,
+      5000,
     ),
-    await evaluate(`document.querySelector('#feed')?.innerText || ''`),
-  );
-
-  await evaluate(`(() => { const close = document.querySelector('#feed-tabs .feed-tab-close'); if (close) close.click(); return true; })()`);
-  check(
-    'подагент: закрытая вкладка убирает полосу вкладок',
-    await waitFor(`document.querySelector('#feed-tabs').hidden`, 5000),
+    await evaluate(`(() => ({ hidden: document.querySelector('#sub-view')?.hidden, feed: document.querySelector('#feed')?.innerText || '' }))()`),
   );
 
   // Избранное: звезда в браузере -> агент пишет favorites.json в своём каталоге.
