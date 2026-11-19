@@ -78,6 +78,9 @@ pub(crate) enum BrowserMsg {
     Commands { agent: String, session: String },
     /// Попросить у агента модели для окна «Новая сессия».
     ToolModels { id: String, agent: String, tool: String, cwd: String },
+    /// Попросить у агента сохранённые параметры окна «Новая сессия»:
+    /// последний инструмент и модель каждого инструмента.
+    LaunchState { id: String, agent: String },
     /// Попросить у агента содержимое каталога для окна «Новая сессия».
     /// Пустой `path` — корни дерева.
     Dirs { id: String, agent: String, path: String },
@@ -379,6 +382,10 @@ pub(crate) fn on_browser_msg(app: &App, browser: u64, msg: BrowserMsg) {
             }
             let cmd = format!("{browser}:{}", inner.id());
             command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::ToolModels { id: cmd, tool, cwd });
+        }
+        BrowserMsg::LaunchState { id, agent } => {
+            let cmd = format!("{browser}:{}", inner.id());
+            command(&mut inner, browser, id, &agent, cmd.clone(), ServerMsg::LaunchState { id: cmd });
         }
         BrowserMsg::Dirs { id, agent, path } => {
             let path = path.trim().to_owned();

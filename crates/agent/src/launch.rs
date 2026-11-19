@@ -1,7 +1,9 @@
-//! Недавние модели окна «Новая сессия»: чем запускали сессии каждого
-//! инструмента. Хранятся в каталоге агента (`launch.json`), а не в браузере:
-//! список opencode зависит от машины и провайдеров, у Claude Code это алиасы
-//! CLI, и на телефоне должны подниматься те же модели, что на компьютере.
+//! Параметры окна «Новая сессия»: последний выбранный инструмент, модель каждого
+//! инструмента и недавние модели для подсказки. Хранятся в каталоге агента
+//! (`launch.json`), а не в браузере: список opencode зависит от машины и
+//! провайдеров, у Claude Code это алиасы CLI, и на телефоне должно подставляться
+//! то же, что на компьютере, — открытой сессии, от которой можно взять
+//! инструмент, там обычно нет.
 
 use std::{collections::BTreeMap, path::PathBuf};
 
@@ -16,6 +18,12 @@ pub fn path() -> PathBuf {
 
 #[derive(Default, Deserialize, Serialize)]
 struct File {
+    /// Последний выбранный инструмент: `claude` или `opencode`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    tool: String,
+    /// Модель, которой запускали сессии этого инструмента: ключ — инструмент.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    models: BTreeMap<String, String>,
     /// Недавние модели: ключ — инструмент (`claude` или `opencode`), свежие
     /// впереди.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -48,18 +56,48 @@ impl Store {
         self.file.recents.get(tool).cloned().unwrap_or_default()
     }
 
-    /// Модель использовали — запустили новую сессию или переключили у открытой.
-    /// Свежая встаёт в начало, повтор не дублируется, хвост обрезается: это
-    /// подсказка, а не история.
+    /// Последний выбранный инструмент; пусто — новых сессий ещё не запускали.
+    pub fn tool(&self) -> &str {
+        &self.file.tool
+    }
+
+    /// Модель, которой последний раз запускали сессию `tool`.
+    pub fn model(&self, tool: &str) -> &str {
+        self.file.models.get(tool).map(String::as_str).unwrap_or("")
+    }
+
+    /// Запоминает, чем запустили новую сессию: инструмент, его модель и место
+    /// модели в недавних. Именно это окно подставит в следующий раз на любом
+    /// устройстве. Модель без инструмента смысла не имеет, поэтому не пишется.
+    pub fn remember(&mut self, tool: &str, model: &str) -> Result<(), String> {
+        if tool.is_empty() {
+            return Ok(());
+        }
+        self.file.tool = tool.to_owned();
+        if !model.is_empty() {
+            self.file.models.insert(tool.to_owned(), model.to_owned());
+            self.note_recent(tool, model);
+        }
+        self.save()
+    }
+
+    /// Модель использовали, но сессию не запускали — переключили у открытой.
+    /// «Так запускали» это не меняет, а в подсказке модель поднимается.
     pub fn note(&mut self, tool: &str, model: &str) -> Result<(), String> {
         if tool.is_empty() || model.is_empty() {
             return Ok(());
         }
+        self.note_recent(tool, model);
+        self.save()
+    }
+
+    /// Свежая модель встаёт в начало, повтор не дублируется, хвост обрезается:
+    /// это подсказка, а не история.
+    fn note_recent(&mut self, tool: &str, model: &str) {
         let list = self.file.recents.entry(tool.to_owned()).or_default();
         list.retain(|v| v != model);
         list.insert(0, model.to_owned());
         list.truncate(MAX_MODEL_RECENTS);
-        self.save()
     }
 
     fn save(&self) -> Result<(), String> {
@@ -92,6 +130,51 @@ mod tests {
         let store = Store::at(tmp("empty"));
         assert!(store.recents("opencode").is_empty());
         assert!(store.recents("claude").is_empty());
+        assert_eq!(store.tool(), "");
+        assert_eq!(store.model("claude"), "");
+    }
+
+    #[test]
+    fn remembers_tool_and_model_per_tool() {
+        let path = tmp("remembers");
+        let mut store = Store::at(path.clone());
+        store.remember("opencode", "openai/gpt-6").unwrap();
+        store.remember("claude", "sonnet").unwrap();
+        // Инструмент — последний запущенный, модели — свои у каждого.
+        assert_eq!(store.tool(), "claude");
+        assert_eq!(store.model("claude"), "sonnet");
+        assert_eq!(store.model("opencode"), "openai/gpt-6");
+        // Переживает перезапуск агента.
+        let again = Store::at(path.clone());
+        assert_eq!((again.tool(), again.model("opencode")), ("claude", "openai/gpt-6"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"openai/gpt-6\""), "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn launch_without_model_keeps_previous_one() {
+        let path = tmp("no-model");
+        let mut store = Store::at(path.clone());
+        store.remember("claude", "opus").unwrap();
+        store.remember("claude", "").unwrap();
+        assert_eq!(store.model("claude"), "opus");
+        // Пустой инструмент ничего не меняет.
+        store.remember("", "haiku").unwrap();
+        assert_eq!((store.tool(), store.model("claude")), ("claude", "opus"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn used_model_does_not_change_last_launch() {
+        let path = tmp("used");
+        let mut store = Store::at(path.clone());
+        store.remember("opencode", "openai/gpt-6").unwrap();
+        store.note("opencode", "openai/gpt-6-mini").unwrap();
+        // Переключение у сессии — подсказка, а не «так запускали».
+        assert_eq!(store.model("opencode"), "openai/gpt-6");
+        assert_eq!(store.recents("opencode"), vec!["openai/gpt-6-mini", "openai/gpt-6"]);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

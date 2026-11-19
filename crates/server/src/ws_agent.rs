@@ -425,6 +425,27 @@ pub(crate) fn on_agent_msg(app: &App, owner: &str, agent: &str, msg: AgentMsg) -
                 }
             }
         }
+        AgentMsg::LaunchState { id, tool, claude, opencode } => {
+            // Ответ на конкретный запрос браузера: окно «Новая сессия» не
+            // связано ни с одной сессией.
+            let allowed = inner
+                .pending
+                .get(&id)
+                .is_some_and(|p| p.owner == owner && p.agent == agent);
+            if allowed {
+                if let Some(p) = inner.pending.remove(&id) {
+                    if let Some(b) = inner.browsers.get(&p.browser) {
+                        let _ = b.tx.try_send(
+                            json!({
+                                "t": "launch_state", "id": p.id,
+                                "tool": tool, "claude": claude, "opencode": opencode,
+                            })
+                            .to_string(),
+                        );
+                    }
+                }
+            }
+        }
         AgentMsg::Dirs { id, path, mut entries, error } => {
             entries.truncate(MAX_DIRS);
             // Ответ только тому браузеру, который открыл окно выбора папки.

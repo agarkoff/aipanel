@@ -71,8 +71,9 @@ struct Agent {
     /// Недописанные сообщения сессий: файл `drafts.json` в каталоге агента.
     /// Хранятся у агента, поэтому черновик общий для всех устройств.
     drafts: Mutex<drafts::Store>,
-    /// Недавние модели окна «Новая сессия»: файл `launch.json` в каталоге
-    /// агента. Тоже общие для всех устройств.
+    /// Параметры окна «Новая сессия» — последний инструмент, модель каждого и
+    /// недавние модели: файл `launch.json` в каталоге агента. Тоже общие для всех
+    /// устройств.
     launch: Mutex<launch::Store>,
     /// Закреплённые сессии и свёрнутые проекты: файл `list.json` в каталоге
     /// агента. Тоже общие для всех устройств.
@@ -385,6 +386,16 @@ impl Agent {
                     let _ = me.out.send(AgentMsg::ToolModels { id, models, recents });
                 });
             }
+            ServerMsg::LaunchState { id } => {
+                // Файл маленький и уже прочитан при запуске: отвечаем сразу.
+                let store = self.launch.lock().unwrap();
+                let _ = self.out.send(AgentMsg::LaunchState {
+                    id,
+                    tool: store.tool().to_owned(),
+                    claude: store.model("claude").to_owned(),
+                    opencode: store.model("opencode").to_owned(),
+                });
+            }
             ServerMsg::Dirs { id, path } => {
                 let me = Arc::clone(self);
                 tokio::spawn(async move {
@@ -412,10 +423,10 @@ impl Agent {
                             Err(e) => Err(e),
                         },
                     };
-                    // Успешный запуск — это и есть «такой моделью запускали»:
-                    // подсказка на любом устройстве поднимет её к началу.
+                    // Успешный запуск — это и есть «так запускали в прошлый раз»:
+                    // окно на любом устройстве подставит те же инструмент и модель.
                     if result.is_ok() {
-                        if let Err(e) = me.launch.lock().unwrap().note(&tool, &model) {
+                        if let Err(e) = me.launch.lock().unwrap().remember(&tool, &model) {
                             util::log(&format!("launch: {e}"));
                         }
                     }

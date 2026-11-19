@@ -16,6 +16,11 @@ const launchModelSuggest = Suggest.attach($('launch-model'), {
   openAllWhenExact: true,
   // Моделей у opencode много: список прокручивается, а не обрезается.
   limit: 0,
+  // Выбранная человеком модель — уже не подставленная: из-за списка её не
+  // очищаем, даже если она в него не попала (тогда запуск скажет об этом сам).
+  onSelect: () => {
+    launchModelPrefill = '';
+  },
   // Недавние — сверху, остальные — в порядке списка агента.
   rank: (item) => (item.recent ? 0 : 1),
   emptyText: (q) =>
@@ -37,6 +42,29 @@ function modelRecents() {
 
 function launchModelKey() {
   return `${$('launch-agent').value}\n${$('launch-tool').value}`;
+}
+
+// Состояние полей окна: что подставлено, а что человек выбрал сам. Пока поле не
+// трогали, ответ агента с сохранёнными параметрами может его поправить.
+let launchToolPinned = false; // инструмент взят из открытой сессии, его не меняем
+let launchToolEdited = false; // инструмент выбрал человек
+// Значение поля модели, подставленное из сохранённых параметров: если его нет в
+// списке этого компьютера, поле очищается, а не остаётся нерабочим текстом.
+let launchModelPrefill = '';
+
+// Параметры запуска выбранного компьютера; пустые строки — запусков не было.
+function launchPrefsOf(agent) {
+  return launchPrefs.get(agent) || { tool: '', claude: '', opencode: '' };
+}
+
+// Инструмент, которым запускали новую сессию на этом компьютере в прошлый раз.
+function launchToolChoice(agent) {
+  return launchPrefsOf(agent).tool;
+}
+
+// Модель, которой запускали сессию этого инструмента на этом компьютере.
+function launchModelChoice(tool) {
+  return launchPrefsOf($('launch-agent').value)[tool] || '';
 }
 
 // Значение поля модели: у Claude Code — алиас CLI, у opencode — «провайдер/модель».
@@ -67,7 +95,7 @@ function launchModelKnown(value) {
   const list = launchModelCache.get(launchModelKey());
   if (!list) {
     // Список ещё в пути: прошлый выбор пришёл из списка, а свежий набор — нет.
-    return v === (launchModelChoice[tool] || '').toLowerCase() ? true : null;
+    return v === launchModelChoice(tool).toLowerCase() ? true : null;
   }
   return list.some((m) => launchModelValue(tool, m).toLowerCase() === v);
 }
@@ -92,11 +120,50 @@ function requestLaunchModels() {
   launchModelsRequest = { id, key };
 }
 
+// Параметры окна запуска хранит агент: на телефоне открытой сессии нет, и
+// инструмент с моделью неоткуда было бы взять. Спрашиваем при каждом открытии
+// окна: за это время новую сессию могли запустить с другого устройства.
+function requestLaunchPrefs() {
+  const agent = $('launch-agent').value;
+  if (!agent) return;
+  // Такой же запрос уже в пути: второй ответ ничего не добавит.
+  for (const pending of launchPrefsAsks.values()) if (pending === agent) return;
+  const id = String(++cmdSeq);
+  if (!send({ t: 'launch_state', id, agent })) return;
+  launchPrefsAsks.set(id, agent);
+}
+
+// Ответ агента пришёл: подставляем то, чем запускали на этом компьютере в
+// прошлый раз, если человек ещё ничего не выбрал в этом окне.
+function onLaunchPrefs(agent) {
+  if (!$('launch').open || $('launch-agent').value !== agent) return;
+  const tool = launchToolChoice(agent);
+  const switched = tool && tool !== $('launch-tool').value && !launchToolPinned && !launchToolEdited;
+  if (switched) $('launch-tool').value = tool;
+  // Поле модели, которое человек не трогал, берём из свежих параметров: у
+  // другого инструмента своя модель, а запуск с другого устройства мог сменить
+  // и модель этого. Набранное вручную не переписываем.
+  const value = $('launch-model').value.trim();
+  if (switched || !value || value === launchModelPrefill) syncLaunchModel();
+  else requestLaunchModels();
+}
+
+// Значение, подставленное из сохранённых параметров, могло исчезнуть из списка
+// (модель убрали с компьютера): пустое поле честнее нерабочего текста.
+function dropStaleLaunchModel() {
+  const value = $('launch-model').value.trim();
+  if (!value || value !== launchModelPrefill || launchModelKnown(value) === true) return;
+  $('launch-model').value = '';
+  launchModelPrefill = '';
+  launchModelSuggest.close();
+}
+
 // Поле модели при открытии окна и смене инструмента: своё значение у каждого
 // инструмента, список подсказок — для выбранного компьютера и инструмента.
 function syncLaunchModel() {
   const tool = $('launch-tool').value;
-  $('launch-model').value = launchModelChoice[tool] || '';
+  launchModelPrefill = launchModelChoice(tool);
+  $('launch-model').value = launchModelPrefill;
   $('launch-model').placeholder =
     tool === 'claude'
       ? 'Выберите модель из списка (например, sonnet)'
@@ -116,11 +183,15 @@ function openLaunch() {
   // Дерево выбора папки помнит состояние; у другого компьютера пути чужие.
   syncLaunchTreeAgent();
   const dirs = fillLaunchDirs();
+  const agent = $('launch-agent').value;
   const cur = current();
-  const sameAgent = cur && cur.agent.name === $('launch-agent').value;
-  if (sameAgent && (cur.session.tool === 'claude' || cur.session.tool === 'opencode')) {
-    $('launch-tool').value = cur.session.tool;
-  }
+  const sameAgent = cur && cur.agent.name === agent;
+  launchToolEdited = false;
+  // Инструмент открытой сессии — самый вероятный выбор. Если сессии нет (на
+  // телефоне её обычно и нет), берём тот, которым запускали здесь в прошлый
+  // раз; пока агент не ответил, остаётся Claude Code — первый в списке.
+  launchToolPinned = Boolean(sameAgent && (cur.session.tool === 'claude' || cur.session.tool === 'opencode'));
+  $('launch-tool').value = launchToolPinned ? cur.session.tool : launchToolChoice(agent) || 'claude';
   // Каталог открытой сессии — самый вероятный выбор, иначе самый свежий из списка.
   $('launch-cwd').value = sameAgent && cur.session.cwd ? cur.session.cwd : (dirs[0]?.cwd ?? '');
   if (launchTree.open) {
@@ -129,6 +200,7 @@ function openLaunch() {
     revealLaunchPath($('launch-cwd').value);
   }
   syncLaunchModel();
+  requestLaunchPrefs();
   $('launch-ok').disabled = false;
   launchHint('');
   $('launch').showModal();
@@ -178,12 +250,19 @@ $('launch-agent').addEventListener('change', () => {
     loadLaunchDir('');
     revealLaunchPath($('launch-cwd').value);
   }
-  // У другого компьютера свой набор моделей.
-  launchModelSuggest.close();
-  requestLaunchModels();
+  // У другого компьютера свои параметры запуска и свой набор моделей: инструмент
+  // берём из них, а не оставляем от прошлой машины.
+  launchToolEdited = false;
+  launchToolPinned = false;
+  $('launch-tool').value = launchToolChoice($('launch-agent').value) || 'claude';
+  syncLaunchModel();
+  requestLaunchPrefs();
 });
 
-$('launch-tool').addEventListener('change', syncLaunchModel);
+$('launch-tool').addEventListener('change', () => {
+  launchToolEdited = true;
+  syncLaunchModel();
+});
 
 $('launch-form').addEventListener('submit', (e) => {
   e.preventDefault();
@@ -236,7 +315,6 @@ function startLaunch(req) {
     launchHint('Нет соединения с сервером.', true);
     return false;
   }
-  launchModelChoice[req.tool] = req.model;
   launchId = id;
   launchRequest = req;
   $('launch-ok').disabled = true;
@@ -259,6 +337,10 @@ function onLaunchResult(msg) {
     launchHint(`Ошибка: ${msg.error || 'неизвестная'}`, true);
     return;
   }
+  // Агент запомнил запуск у себя (`launch.json`) — инструмент, модель и место
+  // модели в недавних. Спрашиваем свежие параметры, а не догадываемся о них:
+  // ответ подставит их при следующем открытии окна.
+  requestLaunchPrefs();
   $('launch').close();
   pendingLaunch = {
     agent: req.agent,

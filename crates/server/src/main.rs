@@ -1314,4 +1314,35 @@ mod tests {
         assert!(sent.contains("запусти карго тест"), "{sent}");
         assert!(app.lock().pending.is_empty(), "ожидание снято ответом агента");
     }
+
+    /// Параметры окна «Новая сессия» — тоже ответ на команду одного браузера:
+    /// другой агент их не пересылает и ожидание не снимает.
+    #[test]
+    fn launch_state_reaches_only_the_browser_that_asked() {
+        let (tx, mut rx) = mpsc::channel::<String>(4);
+        let mut inner = Inner::default();
+        inner.browsers.insert(1, BrowserEntry { tx, owner: "alice".into(), watching: None, sub: None });
+        inner.pending.insert(
+            "srv:9".into(),
+            Pending { browser: 1, id: "l".into(), owner: "alice".into(), agent: "pc".into() },
+        );
+        let app = App { inner: Mutex::new(inner), users: BTreeMap::new(), vapid: None, vapid_contact: None };
+
+        let prefs = AgentMsg::LaunchState {
+            id: "srv:9".into(),
+            tool: "opencode".into(),
+            claude: "sonnet".into(),
+            opencode: "prov/model".into(),
+        };
+        on_agent_msg(&app, "alice", "laptop", prefs.clone());
+        assert!(rx.try_recv().is_err(), "параметры другого агента не пересылаются");
+        assert_eq!(app.lock().pending.len(), 1, "ответ другого агента не снимает ожидание");
+
+        on_agent_msg(&app, "alice", "pc", prefs);
+        let sent = rx.try_recv().unwrap();
+        assert!(sent.contains("\"t\":\"launch_state\""), "{sent}");
+        assert!(sent.contains("\"id\":\"l\""), "{sent}");
+        assert!(sent.contains("\"opencode\":\"prov/model\""), "{sent}");
+        assert!(app.lock().pending.is_empty(), "ожидание снято ответом агента");
+    }
 }

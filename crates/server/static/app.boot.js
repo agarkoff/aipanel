@@ -95,6 +95,9 @@ function connect() {
     launchModelCache.clear();
     launchModelRecents.clear();
     launchModelsRequest = null;
+    // Параметры запуска тоже могли измениться: их помнит агент.
+    launchPrefs.clear();
+    launchPrefsAsks.clear();
     if (selected) {
       send({ t: 'watch', agent: selected.agent, session: selected.session });
       // Открыта панель подагента: её ленту тоже просим заново.
@@ -184,7 +187,21 @@ function onMessage(msg) {
     // Недавние — тоже от агента: в подсказке они идут первыми.
     launchModelRecents.set(req.key, Array.isArray(msg.recents) ? msg.recents : []);
     // Окно запуска открыто на этой же паре компьютер + инструмент.
-    if ($('launch').open && launchModelKey() === req.key) launchModelSuggest.refresh();
+    if ($('launch').open && launchModelKey() === req.key) {
+      // Подставленная из параметров модель могла исчезнуть из свежего списка.
+      dropStaleLaunchModel();
+      launchModelSuggest.refresh();
+    }
+  } else if (msg.t === 'launch_state') {
+    const agent = launchPrefsAsks.get(msg.id);
+    if (!agent) return;
+    launchPrefsAsks.delete(msg.id);
+    launchPrefs.set(agent, {
+      tool: msg.tool || '',
+      claude: msg.claude || '',
+      opencode: msg.opencode || '',
+    });
+    onLaunchPrefs(agent);
   } else if (msg.t === 'dirs') {
     onDirsResult(msg);
   } else if (msg.t === 'result') {

@@ -420,6 +420,18 @@ pub enum AgentMsg {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         recents: Vec<String>,
     },
+    /// Ответ на `LaunchState`: чем запускали новые сессии на этой машине.
+    /// Пустые поля — таких запусков ещё не было.
+    LaunchState {
+        id: String,
+        /// Последний выбранный инструмент: `claude` или `opencode`.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        tool: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        claude: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        opencode: String,
+    },
     /// Содержимое каталога для дерева выбора папки в окне «Новая сессия».
     /// Пустой `path` — корни дерева (диски на Windows, `/` на остальных).
     Dirs {
@@ -1049,6 +1061,11 @@ pub enum ServerMsg {
     Models { session: String },
     /// Прислать модели для запуска новой сессии `tool` в каталоге `cwd`.
     ToolModels { id: String, tool: String, cwd: String },
+    /// Прислать сохранённые на машине агента параметры окна «Новая сессия»:
+    /// последний выбранный инструмент и модель для каждого инструмента. Панель
+    /// спрашивает их при открытии окна, чтобы подставить то же самое на любом
+    /// устройстве, а не только там, где новую сессию уже запускали.
+    LaunchState { id: String },
     /// Прислать содержимое каталога `path` для дерева выбора папки. Пустой
     /// `path` — корни дерева.
     Dirs {
