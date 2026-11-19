@@ -1501,6 +1501,11 @@ try {
     const c = document.getElementById('launch-cwd');
     c.value = 'D:/Проекты/нет-такого';
     c.dispatchEvent(new Event('input', { bubbles: true }));
+    // Каталог проверяем не раньше, чем выбрана модель: без неё окно запуска
+    // справедливо отказывается стартовать и до агента не доходит.
+    const m = document.getElementById('launch-model');
+    m.value = 'opencode-go/deepseek-v4.1-flash';
+    m.dispatchEvent(new Event('input', { bubbles: true }));
   })()`);
   await evaluate(`document.getElementById('launch-form').requestSubmit()`);
   const asked = await waitFor(`document.getElementById('mkdir').open`);
