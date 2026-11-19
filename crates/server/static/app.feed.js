@@ -141,8 +141,9 @@ function renderHeader() {
   $('sm-handoff').title = $('handoff').title;
   $('sm-handoff').disabled = $('handoff').disabled;
   const canSend = agent.online && session.delivery !== 'none';
-  // Панель подагента — только просмотр: поле ввода по-прежнему пишет в сессию.
-  $('composer').hidden = false;
+  // Панель подагента — только просмотр: поле ввода пишет в сессию, а не
+  // подагенту, поэтому на время панели оно скрыто. Вернуться к письму — «К сессии».
+  $('composer').hidden = Boolean(subDrawer);
   $('text').disabled = !canSend;
   $('composer').querySelector('button').disabled = !canSend;
   if (!$('hint').dataset.sticky) {

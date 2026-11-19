@@ -2512,6 +2512,7 @@ try {
     const watch = window.__subWatched[0] || {};
     const panelShown = !document.getElementById('sub-view').hidden;
     const mainStill = document.querySelectorAll('#feed .item').length;
+    const composerHidden = document.getElementById('composer').hidden;
     const panelTitle = document.getElementById('sub-view-title').textContent;
     const panelMeta = document.getElementById('sub-view-meta').textContent;
     emit({ t: 'sub_history', ...msg, sub: 'a1', reset: true, more: false, items: [
@@ -2528,9 +2529,10 @@ try {
     return {
       mainBefore, itemCount, cards: cards.length, cardText, cardMeta, cardSub,
       result: resultLabel ? resultLabel.textContent : '', noStrip,
-      watch, panelShown, mainStill, scrollBefore, scrollAfter, panelTitle, panelMeta,
+      watch, panelShown, mainStill, scrollBefore, scrollAfter, composerHidden, panelTitle, panelMeta,
       subItems, subText, favs,
       panelHidden: document.getElementById('sub-view').hidden,
+      composerBack: document.getElementById('composer').hidden,
       unwatched: window.__subWatched.some((m) => m.t === 'unwatch_sub' && m.sub === 'a1'),
       hashAfter: location.hash,
     };
@@ -2543,13 +2545,18 @@ try {
   check('подагенты: итог подагента виден под карточкой',
     subs.result === 'Итог подагента', subs);
   check('подагенты: карточка открывает панель, лента сессии остаётся',
+    // Поле ввода скрывается, и лента получает его высоту — прокрутка может
+    // сдвинуться на эту величину, но не должна прыгнуть в начало или в конец.
     subs.watch.t === 'watch_sub' && subs.watch.sub === 'a1' && subs.panelShown
-      && subs.mainStill === subs.itemCount && subs.scrollAfter === subs.scrollBefore, subs);
+      && subs.mainStill === subs.itemCount
+      && Math.abs(subs.scrollAfter - subs.scrollBefore) < 200, subs);
   check('подагенты: в шапке панели подпись, работа и токены',
     subs.panelTitle.includes('Найти причину') && subs.panelMeta.includes('explore')
       && subs.panelMeta.includes('работает') && subs.panelMeta.includes('↑ 1.2k'), subs);
   check('подагенты: лента подагента видна, звёзд избранного нет',
     subs.subItems === 2 && subs.subText.includes('Причину нашёл') && subs.favs === 0, subs);
+  check('подагенты: поле ввода скрыто на время панели и возвращается после',
+    subs.composerHidden === true && subs.composerBack === false, subs);
   check('подагенты: панель закрывается и отписывается, адрес чист',
     subs.panelHidden && subs.unwatched && !subs.hashAfter.includes('sub='), subs);
 

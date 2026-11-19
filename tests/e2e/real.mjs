@@ -473,6 +473,11 @@ enabled = false
   );
 
   check(
+    'подагент: поле ввода скрыто, пока открыта панель',
+    await evaluate(`document.querySelector('#composer').hidden === true`),
+  );
+
+  check(
     'подагент: лента сессии осталась за панелью',
     await evaluate(`(() => {
       const t = document.querySelector('#feed')?.innerText || '';
@@ -492,6 +497,11 @@ enabled = false
       5000,
     ),
     await evaluate(`(() => ({ hidden: document.querySelector('#sub-view')?.hidden, feed: document.querySelector('#feed')?.innerText || '' }))()`),
+  );
+
+  check(
+    'подагент: поле ввода вернулось после закрытия панели',
+    await waitFor(`document.querySelector('#composer').hidden === false`, 5000),
   );
 
   // Избранное: звезда в браузере -> агент пишет favorites.json в своём каталоге.

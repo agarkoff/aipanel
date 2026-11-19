@@ -190,17 +190,31 @@ function openSubDrawer(id) {
 
 // Показывает панель из кэша (если он есть) и ставит ленту туда, где её читали.
 function showSubView() {
+  // На широком экране панель занимает колонку и сужает ленту сессии: место
+  // чтения сохраняем, чтобы карточка не «уезжала» из-под глаз.
+  const place = typeof feedPlace === 'function' ? feedPlace() : null;
   $('sub-view').hidden = false;
+  setSubOpen(true);
   renderSubView();
   renderSubFeed(tabKey(subDrawer));
+  // Поле ввода относится к сессии и на время панели скрыто.
+  renderHeader();
+  if (place) applyFeedPlace(place);
   const back = $('sub-view-back');
   if (back) back.focus({ preventScroll: true });
+}
+
+// Панель открыта: на широком экране она становится колонкой рядом с лентой.
+function setSubOpen(on) {
+  const wrap = document.querySelector('.feed-wrap');
+  if (wrap) wrap.classList.toggle('sub-open', on);
 }
 
 // Закрывает панель и возвращает фокус на карточку, из которой её открыли.
 function closeSubDrawer() {
   if (!subDrawer) return;
   saveSubView();
+  const place = typeof feedPlace === 'function' ? feedPlace() : null;
   const id = subDrawer;
   subDrawer = '';
   // Лента закрытой панели больше не нужна: при следующем открытии агент
@@ -212,8 +226,12 @@ function closeSubDrawer() {
   subPendingCalls = [];
   $('sub-feed').replaceChildren();
   $('sub-view').hidden = true;
+  setSubOpen(false);
   if (selected) send({ t: 'unwatch_sub', agent: selected.agent, session: selected.session, sub: id });
   updateSessionUrl();
+  // Поле ввода снова относится к сессии.
+  renderHeader();
+  if (place) applyFeedPlace(place);
   refreshSubViews();
   if (subOpenedFrom && document.contains(subOpenedFrom)) subOpenedFrom.focus({ preventScroll: true });
   subOpenedFrom = null;
@@ -401,6 +419,7 @@ function resetSubagentView() {
   }
   $('sub-feed').replaceChildren();
   $('sub-view').hidden = true;
+  setSubOpen(false);
   renderSubView();
 }
 

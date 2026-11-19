@@ -863,6 +863,21 @@ input, textarea, select {
   white-space: nowrap;
 }
 .sub-feed { padding: 12px 14px; }
+/* На широком экране панель подагента — отдельная колонка: лента сессии
+   сужается, и карточка со статусом остаётся видна целиком. На узком — панель
+   ложится поверх ленты, как лист. */
+@media (min-width: 1200px) {
+  .feed-wrap.sub-open { flex-direction: row; }
+  .feed-wrap.sub-open #feed { min-width: 0; }
+  .feed-wrap.sub-open .sub-view {
+    position: static;
+    inset: auto;
+    flex: none;
+    width: min(680px, 50%);
+    box-shadow: none;
+  }
+  .feed-wrap.sub-open .to-end { right: calc(min(680px, 50%) + 18px); }
+}
 @media (max-width: 760px) {
   .sub-view { left: 0; width: auto; border-left: 0; box-shadow: none; }
   .sub-view-back-label { display: none; }
