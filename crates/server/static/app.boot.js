@@ -154,7 +154,7 @@ function onMessage(msg) {
     applySubHistory(msg);
   } else if (msg.t === 'favorites') {
     if (!selected || msg.agent !== selected.agent || msg.session !== selected.session) return;
-    favorites = Array.isArray(msg.items) ? msg.items : [];
+    favorites = sortFavorites(Array.isArray(msg.items) ? msg.items : []);
     applyFavorites();
   } else if (msg.t === 'draft') {
     onRemoteDraft(msg.agent, msg.session, typeof msg.text === 'string' ? msg.text : '');

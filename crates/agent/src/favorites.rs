@@ -15,7 +15,9 @@ pub fn path() -> PathBuf {
 
 #[derive(Default, Deserialize, Serialize)]
 struct File {
-    /// Ключ — `tool:id` сессии, значения — в порядке добавления.
+    /// Ключ — `tool:id` сессии, значения — в порядке добавления: так при
+    /// переполнении вытесняется то, что отложили раньше всех. Показываются же
+    /// они по времени сообщения (см. `Store::list`).
     #[serde(default)]
     sessions: BTreeMap<String, Vec<Favorite>>,
 }
@@ -40,8 +42,14 @@ impl Store {
         Self { path, file }
     }
 
+    /// Избранное сессии по времени сообщения: старые сверху, как в ленте.
+    /// В файле список лежит в порядке добавления, а плашка в шапке должна
+    /// читаться как переписка. Сообщения без времени — в конце: их место
+    /// неизвестно, и пусть они не разрывают известную хронологию.
     pub fn list(&self, session: &str) -> Vec<Favorite> {
-        self.file.sessions.get(session).cloned().unwrap_or_default()
+        let mut items = self.file.sessions.get(session).cloned().unwrap_or_default();
+        items.sort_by_key(|f| (f.ts <= 0, f.ts));
+        items
     }
 
     /// Добавляет сообщение в избранное или убирает его оттуда и сохраняет файл.
@@ -161,6 +169,28 @@ mod tests {
         assert!(again.list("claude:a").is_empty());
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("claude:a"), "{text}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lists_by_message_time_not_by_add_order() {
+        let path = tmp("order");
+        let mut store = Store::at(path.clone());
+        let at = |id: &str, ts: i64| Favorite { id: id.into(), ts, role: "user".into(), text: id.into(), of: String::new() };
+        // Добавляем вразнобой: в файле остаётся порядок добавления, а списком
+        // правит время сообщения — позднее сообщение добавляют не последним.
+        store.set("s", at("позднее", 3000), true).unwrap();
+        store.set("s", at("без времени", 0), true).unwrap();
+        store.set("s", at("раннее", 1000), true).unwrap();
+        store.set("s", at("среднее", 2000), true).unwrap();
+        let ids: Vec<_> = store.list("s").into_iter().map(|f| f.id).collect();
+        assert_eq!(ids, ["раннее", "среднее", "позднее", "без времени"]);
+        // Файл при этом не пересортирован: вытесняется то, что отложили раньше.
+        let again = Store::at(path.clone());
+        assert_eq!(again.list("s").len(), 4);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let first = text.find("позднее").unwrap();
+        assert!(first < text.find("раннее").unwrap(), "{text}");
         let _ = std::fs::remove_file(&path);
     }
 

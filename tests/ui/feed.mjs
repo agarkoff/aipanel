@@ -700,11 +700,13 @@ try {
     const rows = [...document.querySelectorAll('#favorites-menu .fav-row')];
     const row = rows.find((r) => r.querySelector('.fav-preview').textContent.startsWith('Первый вопрос'));
     if (!row) return { missing: true, previews: rows.map((r) => r.querySelector('.fav-preview').textContent) };
+    const previews = rows.map((r) => r.querySelector('.fav-preview').textContent);
     row.click();
     await new Promise((r) => setTimeout(r, 600));
     const flash = document.querySelector('#feed .item.flash');
     return {
       closed: document.getElementById('favorites-menu').hidden,
+      previews,
       flash: flash ? flash.textContent.replace(/\\s+/g, ' ').trim() : '',
       top: flash ? flash.getBoundingClientRect().top : -1,
       feedTop: feed.getBoundingClientRect().top,
@@ -716,6 +718,13 @@ try {
     !favJump.missing && favJump.closed && favJump.flash.startsWith('Первый вопрос') &&
       favJump.top >= favJump.feedTop - 1 && favJump.top <= favJump.feedBottom,
     favJump,
+  );
+  // Список идёт по времени сообщения, а не по порядку добавления: первое
+  // сообщение сессии отложили последним, но оно самое раннее — значит, сверху.
+  check(
+    'избранное отсортировано по времени сообщения, старые сверху',
+    !favJump.missing && favJump.previews[0].startsWith('Первый вопрос'),
+    favJump.previews,
   );
 
   // Повторное нажатие убирает сообщение из избранного.

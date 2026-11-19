@@ -175,7 +175,7 @@ let menuKey = null;
 let copyIdTimer = null;
 // Избранное открытой сессии. Список хранит агент (`favorites.json` в его
 // каталоге), поэтому звёзды и плашка в шапке одинаковы во всех браузерах.
-let favorites = []; // [{ id, ts, role, text }]
+let favorites = []; // [{ id, ts, role, text }] в порядке времени сообщения
 const favButtons = new Map(); // id элемента ленты -> звезда в его строке
 let cancelQueuedId = null;
 // Удаление сессии: id команды и удаляемая сессия. Диалог остаётся открытым,
